@@ -21,7 +21,6 @@ require (
 	github.com/nats-io/nats.go v1.10.1-0.20210228004050-ed743748acac
 	github.com/nats-io/nuid v1.0.1
 	github.com/opentracing/opentracing-go v1.2.0
-	github.com/orfjackal/nanospec.go v0.0.0-20120727230329-de4694c1d701 // indirect
 	github.com/prometheus/client_golang v1.11.0
 	github.com/sirupsen/logrus v1.8.1
 	github.com/spf13/viper v1.7.1
