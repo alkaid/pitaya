@@ -252,6 +252,12 @@ func (h *HandlerService) processPacket(a agent.Agent, p *packet.Packet) error {
 		h.processMessage(a, msg)
 
 	case packet.Heartbeat:
+		if err := a.SendHeartbeatResponse(); err != nil {
+			logger.Log.Errorf("Error sending handshake response: %s", err.Error())
+			return err
+		}
+
+	case packet.HeartbeatAck:
 		// expected
 	}
 

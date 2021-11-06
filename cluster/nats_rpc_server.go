@@ -274,6 +274,13 @@ func (ns *NatsRPCServer) processMessages(threadID int) {
 		} else {
 			ns.responses[threadID], _ = ns.pitayaServer.Call(ctx, ns.requests[threadID])
 		}
+
+		//notify server don't need to publish
+		if ns.requests[threadID].GetMsg().Type == protos.MsgType_MsgNotify {
+			logger.Log.Debugf("message is notify,no publish")
+			break
+		}
+
 		p, err := ns.marshalResponse(ns.responses[threadID])
 		err = ns.conn.Publish(ns.requests[threadID].GetMsg().GetReply(), p)
 		if err != nil {

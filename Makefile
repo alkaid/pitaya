@@ -160,3 +160,6 @@ serializer-mock:
 
 acceptor-mock:
 	@mockgen github.com/topfreegames/pitaya/v2/acceptor PlayerConn,Acceptor | sed 's/mock_acceptor/mocks/' > mocks/acceptor.go
+
+message-mock:
+	@mockgen github.com/topfreegames/pitaya/v2/conn/message Encoder | sed 's/mock_message/mocks/' > conn/message/mocks/message_encoder.go

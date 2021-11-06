@@ -41,6 +41,8 @@ const (
 
 	// Kick represents a kick off packet
 	Kick = 0x05 // disconnect message from server
+
+	HeartbeatAck = 0x06
 )
 
 // ErrWrongPomeloPacketType represents a wrong packet type.

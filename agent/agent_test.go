@@ -58,6 +58,7 @@ func heartbeatAndHandshakeMocks(mockEncoder *codecmocks.MockPacketEncoder) {
 	// heartbeat and handshake if not set by another test
 	mockEncoder.EXPECT().Encode(packet.Type(packet.Handshake), gomock.Not(gomock.Nil())).AnyTimes()
 	mockEncoder.EXPECT().Encode(packet.Type(packet.Heartbeat), gomock.Nil()).AnyTimes()
+	mockEncoder.EXPECT().Encode(packet.Type(packet.HeartbeatAck), gomock.Nil()).AnyTimes()
 }
 
 func getCtxWithRequestKeys() context.Context {
@@ -88,6 +89,10 @@ func TestNewAgent(t *testing.T) {
 	mockEncoder.EXPECT().Encode(gomock.Any(), gomock.Nil()).Do(
 		func(typ packet.Type, d []byte) {
 			assert.EqualValues(t, packet.Heartbeat, typ)
+		})
+	mockEncoder.EXPECT().Encode(gomock.Any(), gomock.Nil()).Do(
+		func(typ packet.Type, d []byte) {
+			assert.EqualValues(t, packet.HeartbeatAck, typ)
 		})
 	messageEncoder := message.NewMessagesEncoder(false)
 
@@ -821,6 +826,7 @@ func TestAgentSendHandshakeResponse(t *testing.T) {
 			mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
 			heartbeatAndHandshakeMocks(mockEncoder)
 			mockMessageEncoder := messagemocks.NewMockEncoder(ctrl)
+			mockMessageEncoder.EXPECT().IsCompressionEnabled().AnyTimes()
 			mockSerializer := serializemocks.NewMockSerializer(ctrl)
 			mockSerializer.EXPECT().GetName()
 
@@ -830,6 +836,39 @@ func TestAgentSendHandshakeResponse(t *testing.T) {
 
 			mockConn.EXPECT().Write(hrd).Return(0, table.err)
 			err := ag.SendHandshakeResponse()
+			assert.Equal(t, table.err, err)
+		})
+	}
+}
+
+func TestAgentSendHearbeatResponse(t *testing.T) {
+	tables := []struct {
+		name string
+		err  error
+	}{
+		{"success", nil},
+		{"failure", errors.New("handshake failed")},
+	}
+
+	for _, table := range tables {
+		t.Run(table.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			mockConn := mocks.NewMockPlayerConn(ctrl)
+			mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
+			heartbeatAndHandshakeMocks(mockEncoder)
+			mockMessageEncoder := messagemocks.NewMockEncoder(ctrl)
+			mockMessageEncoder.EXPECT().IsCompressionEnabled().AnyTimes()
+			mockSerializer := serializemocks.NewMockSerializer(ctrl)
+			mockSerializer.EXPECT().GetName()
+
+			sessionPool := session.NewSessionPool()
+			ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool)
+			assert.NotNil(t, ag)
+
+			mockConn.EXPECT().Write(hbAck).Return(0, table.err)
+			err := ag.SendHeartbeatResponse()
 			assert.Equal(t, table.err, err)
 		})
 	}

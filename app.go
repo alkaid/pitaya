@@ -89,6 +89,10 @@ type Pitaya interface {
 	Documentation(getPtrNames bool) (map[string]interface{}, error)
 	IsRunning() bool
 
+	//Notify calls a method in a different server not waitting for response
+	Notify(ctx context.Context, routeStr string, arg proto.Message) error
+	// NotifyTo send a rpc to a specific server not waitting for response
+	NotifyTo(ctx context.Context, serverID, routeStr string, arg proto.Message) error
 	RPC(ctx context.Context, routeStr string, reply proto.Message, arg proto.Message) error
 	RPCTo(ctx context.Context, serverID, routeStr string, reply proto.Message, arg proto.Message) error
 	ReliableRPC(

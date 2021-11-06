@@ -424,15 +424,17 @@ func TestNatsRPCClientCall(t *testing.T) {
 
 	tables := []struct {
 		name     string
+		msgType  message.Type
 		response interface{}
 		expected *protos.Response
 		err      error
 	}{
-		{"test_error", &protos.Response{Data: []byte("nok"), Error: &protos.Error{Msg: "nok"}}, nil, e.NewError(errors.New("nok"), e.ErrUnknownCode)},
-		{"test_ok", &protos.Response{Data: []byte("ok")}, &protos.Response{Data: []byte("ok")}, nil},
-		{"test_bad_response", []byte("invalid"), nil, errors.New("cannot parse invalid wire-format data")},
-		{"test_bad_proto", &protos.Session{Id: 1, Uid: "snap"}, nil, errors.New("cannot parse invalid wire-format data")},
-		{"test_no_response", nil, nil, errors.New("nats: timeout")},
+		{"test_error", message.Request, &protos.Response{Data: []byte("nok"), Error: &protos.Error{Msg: "nok"}}, nil, e.NewError(errors.New("nok"), e.ErrUnknownCode)},
+		{"test_ok", message.Request, &protos.Response{Data: []byte("ok")}, &protos.Response{Data: []byte("ok")}, nil},
+		{"test_bad_response", message.Request, []byte("invalid"), nil, errors.New("cannot parse invalid wire-format data")},
+		{"test_bad_proto", message.Request, &protos.Session{Id: 1, Uid: "snap"}, nil, errors.New("cannot parse invalid wire-format data")},
+		{"test_no_response", message.Request, nil, nil, errors.New("nats: timeout")},
+		{"test_notify", message.Notify, &protos.Response{Data: []byte("not need response")}, &protos.Response{}, nil},
 	}
 
 	for _, table := range tables {
@@ -444,6 +446,7 @@ func TestNatsRPCClientCall(t *testing.T) {
 			sv2 := getServer()
 			sv2.Type = uuid.New().String()
 			sv2.ID = uuid.New().String()
+			msg.Type = table.msgType
 			subs, err := conn.Subscribe(getChannel(sv2.Type, sv2.ID), func(m *nats.Msg) {
 				if table.response != nil {
 					if val, ok := table.response.(*protos.Response); ok {
@@ -467,6 +470,9 @@ func TestNatsRPCClientCall(t *testing.T) {
 			ss.EXPECT().GetDataEncoded().Return(data2).Times(1)
 
 			res, err := rpcClient.Call(context.Background(), protos.RPCType_Sys, rt, ss, msg, sv2)
+			if table.msgType == message.Notify {
+				assert.NotEqual(t, table.expected, table.response)
+			}
 			assert.Equal(t, table.expected, res)
 			if table.err != nil {
 				assert.Error(t, err)

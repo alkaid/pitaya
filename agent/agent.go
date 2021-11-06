@@ -51,6 +51,8 @@ import (
 var (
 	// hbd contains the heartbeat packet data
 	hbd []byte
+	// hbd contains the heartbeat ack packet data
+	hbAck []byte
 	// hrd contains the handshake response data
 	hrd  []byte
 	once sync.Once
@@ -110,6 +112,7 @@ type (
 		Handle()
 		IPVersion() string
 		SendHandshakeResponse() error
+		SendHeartbeatResponse() error
 		SendRequest(ctx context.Context, serverID, route string, v interface{}) (*protos.Response, error)
 		AnswerWithError(ctx context.Context, mid uint, err error)
 	}
@@ -477,6 +480,10 @@ func (a *agentImpl) SendHandshakeResponse() error {
 	_, err := a.conn.Write(hrd)
 	return err
 }
+func (a *agentImpl) SendHeartbeatResponse() error {
+	_, err := a.conn.Write(hbAck)
+	return err
+}
 
 func (a *agentImpl) write() {
 	// clean func
@@ -565,6 +572,10 @@ func hbdEncode(heartbeatTimeout time.Duration, packetEncoder codec.PacketEncoder
 	}
 
 	hbd, err = packetEncoder.Encode(packet.Heartbeat, nil)
+	if err != nil {
+		panic(err)
+	}
+	hbAck, err = packetEncoder.Encode(packet.HeartbeatAck, nil)
 	if err != nil {
 		panic(err)
 	}

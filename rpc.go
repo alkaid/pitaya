@@ -40,6 +40,16 @@ func (app *App) RPCTo(ctx context.Context, serverID, routeStr string, reply prot
 	return app.doSendRPC(ctx, serverID, routeStr, reply, arg)
 }
 
+// Notify calls a method in a different server not waitting for response
+func (app *App) Notify(ctx context.Context, routeStr string, arg proto.Message) error {
+	return app.doSendNotify(ctx, "", routeStr, arg)
+}
+
+// NotifyTo send a rpc to a specific server not waitting for response
+func (app *App) NotifyTo(ctx context.Context, serverID, routeStr string, arg proto.Message) error {
+	return app.doSendNotify(ctx, serverID, routeStr, arg)
+}
+
 // ReliableRPC enqueues RPC to worker so it's executed asynchronously
 // Default enqueue options are used
 func (app *App) ReliableRPC(
@@ -84,4 +94,26 @@ func (app *App) doSendRPC(ctx context.Context, serverID, routeStr string, reply 
 	}
 
 	return app.remoteService.RPC(ctx, serverID, r, reply, arg)
+}
+
+// doSendNotify only support nats,don't use grpc.(copy then modify from doSendRPC)
+func (app *App) doSendNotify(ctx context.Context, serverID, routeStr string, arg proto.Message) error {
+	if app.rpcServer == nil {
+		return constants.ErrRPCServerNotInitialized
+	}
+
+	r, err := route.Decode(routeStr)
+	if err != nil {
+		return err
+	}
+
+	if r.SvType == "" {
+		return constants.ErrNoServerTypeChosenForRPC
+	}
+
+	if (r.SvType == app.server.Type && serverID == "") || serverID == app.server.ID {
+		return constants.ErrNonsenseRPC
+	}
+
+	return app.remoteService.Notify(ctx, serverID, r, arg)
 }

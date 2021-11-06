@@ -11,7 +11,7 @@ require (
 	github.com/customerio/gospec v0.0.0-20130710230057-a5cc0e48aa39 // indirect
 	github.com/garyburd/redigo v1.6.0 // indirect
 	github.com/go-playground/validator/v10 v10.4.1
-	github.com/golang/mock v1.4.4
+	github.com/golang/mock v1.6.0
 	github.com/golang/protobuf v1.5.2
 	github.com/google/uuid v1.1.4
 	github.com/gorilla/websocket v1.4.2
@@ -31,7 +31,9 @@ require (
 	go.etcd.io/etcd/api/v3 v3.5.0
 	go.etcd.io/etcd/client/v3 v3.5.0
 	go.etcd.io/etcd/tests/v3 v3.5.0
-	golang.org/x/net v0.0.0-20210405180319-a5a99cb37ef4
+	golang.org/x/net v0.0.0-20210805182204-aaa1db679c0d
+	golang.org/x/sys v0.0.0-20211103235746-7861aae1554b // indirect
+	golang.org/x/tools v0.1.7 // indirect
 	google.golang.org/grpc v1.38.0
 	google.golang.org/protobuf v1.26.0
 )

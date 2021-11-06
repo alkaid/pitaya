@@ -175,6 +175,16 @@ func (ns *NatsRPCClient) Call(
 			metrics.ReportTimingFromCtx(ctx, ns.metricsReporters, typ, err)
 		}()
 	}
+
+	//support notify type.  notify msg don't need wait response
+	if msg.Type == message.Notify {
+		err = ns.Send(getChannel(server.Type, server.ID), marshalledData)
+		if err != nil {
+			return nil, err
+		}
+		return &protos.Response{}, nil
+	}
+
 	m, err = ns.conn.Request(getChannel(server.Type, server.ID), marshalledData, ns.reqTimeout)
 	if err != nil {
 		return nil, err

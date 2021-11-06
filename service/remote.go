@@ -222,6 +222,28 @@ func (r *RemoteService) DoRPC(ctx context.Context, serverID string, route *route
 	return r.remoteCall(ctx, target, protos.RPCType_User, route, nil, msg)
 }
 
+// DoNotify only support nats,don't use grpc.(copy then modify from DoRPC)
+func (r *RemoteService) DoNotify(ctx context.Context, serverID string, route *route.Route, protoData []byte) error {
+	msg := &message.Message{
+		Type:  message.Notify,
+		Route: route.Short(),
+		Data:  protoData,
+	}
+
+	if serverID == "" {
+		_, err := r.remoteCall(ctx, nil, protos.RPCType_User, route, nil, msg)
+		return err
+	}
+
+	target, _ := r.serviceDiscovery.GetServer(serverID)
+	if target == nil {
+		return constants.ErrServerNotFound
+	}
+
+	_, err := r.remoteCall(ctx, target, protos.RPCType_User, route, nil, msg)
+	return err
+}
+
 // RPC makes rpcs
 func (r *RemoteService) RPC(ctx context.Context, serverID string, route *route.Route, reply proto.Message, arg proto.Message) error {
 	var data []byte
@@ -250,6 +272,23 @@ func (r *RemoteService) RPC(ctx context.Context, serverID string, route *route.R
 		if err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// Notify only support nats,don't use grpc.(copy then modify from RPC)
+func (r *RemoteService) Notify(ctx context.Context, serverID string, route *route.Route, arg proto.Message) error {
+	var data []byte
+	var err error
+	if arg != nil {
+		data, err = proto.Marshal(arg)
+		if err != nil {
+			return err
+		}
+	}
+	err = r.DoNotify(ctx, serverID, route, data)
+	if err != nil {
+		return err
 	}
 	return nil
 }

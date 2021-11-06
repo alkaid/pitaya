@@ -1,7 +1,8 @@
 syntax = "proto3";
 
-package protos;
-
+//package protos;
+package demo.pb.protos;
+option go_package = "examples/demo/cluster_protobuf/protos";
 // Response represents a rpc message
 message Response {
   int32 Code = 1;
@@ -27,4 +28,14 @@ message RPCMsg{
 // AllMembers contains all members uid
 message AllMembers {
   repeated string Members = 1;
+}
+
+
+message LoginReq {
+  string token = 1;
+}
+message LoginResponse {
+  int32 Code = 1;
+  string Msg = 2;
+  string uid=3;
 }
