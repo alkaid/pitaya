@@ -371,15 +371,33 @@ func TestNatsRPCClientBuildRequest(t *testing.T) {
 				},
 			},
 		},
+		{
+			"test-notify-user", false, protos.RPCType_User, rt,
+			&message.Message{Type: message.Notify, ID: messageID, Data: data},
+			protos.Request{
+				Type: protos.RPCType_User,
+				Msg: &protos.Msg{
+					Route: rt.String(),
+					Data:  data,
+					Type:  protos.MsgType_MsgNotify,
+					Id:    0,
+				},
+				FrontendID: "",
+			},
+		},
 	}
 	for _, table := range tables {
 		t.Run(table.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 
 			ss := sessionmocks.NewMockSession(ctrl)
-			ss.EXPECT().ID().Return(sessionID).Times(1)
-			ss.EXPECT().UID().Return(uid).Times(1)
-			ss.EXPECT().GetDataEncoded().Return(data2).Times(1)
+			time := 1
+			if table.expected.Type == protos.RPCType_User {
+				time = 0
+			}
+			ss.EXPECT().ID().Return(sessionID).Times(time)
+			ss.EXPECT().UID().Return(uid).Times(time)
+			ss.EXPECT().GetDataEncoded().Return(data2).Times(time)
 
 			rpcClient.server.Frontend = table.frontendServer
 			req, err := buildRequest(context.Background(), table.rpcType, table.route, ss, table.msg, rpcClient.server)

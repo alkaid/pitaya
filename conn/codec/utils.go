@@ -8,7 +8,7 @@ func ParseHeader(header []byte) (int, packet.Type, error) {
 		return 0, 0x00, packet.ErrInvalidPomeloHeader
 	}
 	typ := header[0]
-	if typ < packet.Handshake || typ > packet.Kick {
+	if typ < packet.Handshake || typ > packet.HeartbeatAck {
 		return 0, 0x00, packet.ErrWrongPomeloPacketType
 	}
 

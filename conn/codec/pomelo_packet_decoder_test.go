@@ -18,7 +18,7 @@ var forwardTables = map[string]struct {
 	"test_data_type":          {[]byte{packet.Data, 0x00, 0x00, 0x00}, nil},
 	"test_kick_type":          {[]byte{packet.Kick, 0x00, 0x00, 0x00}, nil},
 
-	"test_wrong_packet_type": {[]byte{0x06, 0x00, 0x00, 0x00}, packet.ErrWrongPomeloPacketType},
+	"test_wrong_packet_type": {[]byte{0x07, 0x00, 0x00, 0x00}, packet.ErrWrongPomeloPacketType},
 }
 
 var (

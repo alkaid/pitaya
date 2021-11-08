@@ -40,7 +40,7 @@ func NewPomeloPacketEncoder() *PomeloPacketEncoder {
 // --------|------------------------|--------
 // 1 byte packet type, 3 bytes packet data length(big end), and data segment
 func (e *PomeloPacketEncoder) Encode(typ packet.Type, data []byte) ([]byte, error) {
-	if typ < packet.Handshake || typ > packet.Kick {
+	if typ < packet.Handshake || typ > packet.HeartbeatAck {
 		return nil, packet.ErrWrongPomeloPacketType
 	}
 

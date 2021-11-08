@@ -322,7 +322,10 @@ func TestHandlerServiceProcessPacketHeartbeat(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockAgent := agentmocks.NewMockAgent(ctrl)
-	mockAgent.EXPECT().SetLastAt()
+	gomock.InOrder(
+		mockAgent.EXPECT().SendHeartbeatResponse(),
+		mockAgent.EXPECT().SetLastAt(),
+	)
 
 	handlerPool := NewHandlerPool()
 	svc := NewHandlerService(nil, nil, 1, 1, nil, nil, nil, nil, nil, handlerPool)

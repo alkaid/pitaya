@@ -163,3 +163,6 @@ acceptor-mock:
 
 message-mock:
 	@mockgen github.com/topfreegames/pitaya/v2/conn/message Encoder | sed 's/mock_message/mocks/' > conn/message/mocks/message_encoder.go
+
+protos-client-mock:
+	@mockgen github.com/topfreegames/pitaya/v2/protos PitayaClient,PitayaServer  | sed 's/mock_protos/mocks/' > protos/mocks/pitaya.go
