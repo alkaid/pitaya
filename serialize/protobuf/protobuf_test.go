@@ -22,6 +22,7 @@ package protobuf
 
 import (
 	"flag"
+	"github.com/golang/protobuf/proto"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -92,7 +93,7 @@ func TestUnmarshal(t *testing.T) {
 			err := serializer.Unmarshal(table.data, result)
 			assert.Equal(t, table.err, err)
 			if table.err == nil {
-				assert.Equal(t, table.expected, result)
+				assert.True(t, proto.Equal(table.expected.(proto.Message), result.(proto.Message)))
 			}
 		})
 	}

@@ -491,7 +491,7 @@ func TestNatsRPCClientCall(t *testing.T) {
 			if table.msgType == message.Notify {
 				assert.NotEqual(t, table.expected, table.response)
 			}
-			assert.Equal(t, table.expected, res)
+			assert.True(t, proto.Equal(table.expected, res))
 			if table.err != nil {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), table.err.Error())
