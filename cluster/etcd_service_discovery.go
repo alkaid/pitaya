@@ -24,15 +24,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
-	"sync"
-	"time"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/constants"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/util"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/namespace"
+	"strings"
+	"sync"
+	"time"
 )
 
 type etcdServiceDiscovery struct {
@@ -79,20 +79,27 @@ func NewEtcdServiceDiscovery(
 		client = cli[0]
 	}
 	sd := &etcdServiceDiscovery{
-		running:         false,
-		server:          server,
-		serverMapByType: make(map[string]map[string]*Server),
-		listeners:       make([]SDListener, 0),
-		stopChan:        make(chan bool),
-		stopLeaseChan:   make(chan bool),
-		appDieChan:      appDieChan,
-		cli:             client,
+		running:            false,
+		server:             server,
+		serverMapByType:    make(map[string]map[string]*Server),
+		listeners:          make([]SDListener, 0),
+		stopChan:           make(chan bool),
+		stopLeaseChan:      make(chan bool),
+		appDieChan:         appDieChan,
+		cli:                client,
 		syncServersRunning: make(chan bool),
 	}
 
 	sd.configure(config)
 
 	return sd, nil
+}
+
+//GetSelfServer @implement ServiceDiscovery.GetSelfServer
+//  @receiver sd
+//  @return *Server
+func (sd etcdServiceDiscovery) GetSelfServer() *Server {
+	return sd.server
 }
 
 func (sd *etcdServiceDiscovery) configure(config config.EtcdServiceDiscoveryConfig) {
@@ -204,6 +211,15 @@ func (sd *etcdServiceDiscovery) grantLease() error {
 	return nil
 }
 
+//FlushServer2Cluster
+//  @implement ServiceDiscovery.FlushServer2Cluster
+//  @receiver sd
+//  @param server
+//  @return error
+func (sd *etcdServiceDiscovery) FlushServer2Cluster(server *Server) error {
+	return sd.addServerIntoEtcd(server)
+}
+
 func (sd *etcdServiceDiscovery) addServerIntoEtcd(server *Server) error {
 	_, err := sd.cli.Put(
 		context.TODO(),
@@ -232,12 +248,14 @@ func (sd *etcdServiceDiscovery) AddListener(listener SDListener) {
 func (sd *etcdServiceDiscovery) AfterInit() {
 }
 
-func (sd *etcdServiceDiscovery) notifyListeners(act Action, sv *Server) {
+func (sd *etcdServiceDiscovery) notifyListeners(act Action, sv *Server, old ...*Server) {
 	for _, l := range sd.listeners {
 		if act == DEL {
 			l.RemoveServer(sv)
 		} else if act == ADD {
 			l.AddServer(sv)
+		} else if act == Modify {
+			l.ModifyServer(sv, old[0])
 		}
 	}
 }
@@ -296,7 +314,7 @@ func (sd *etcdServiceDiscovery) GetServersByType(serverType string) (map[string]
 		// Create a new map to avoid concurrent read and write access to the
 		// map, this also prevents accidental changes to the list of servers
 		// kept by the service discovery.
-		ret := make(map[string]*Server,len(sd.serverMapByType[serverType]))
+		ret := make(map[string]*Server, len(sd.serverMapByType[serverType]))
 		for k, v := range sd.serverMapByType[serverType] {
 			ret[k] = v
 		}
@@ -312,6 +330,19 @@ func (sd *etcdServiceDiscovery) GetServers() []*Server {
 		ret = append(ret, v.(*Server))
 		return true
 	})
+	return ret
+}
+
+//GetServerTypes
+//  @implement ServiceDiscovery.GetServerTypes
+func (sd *etcdServiceDiscovery) GetServerTypes() map[string]*Server {
+	ret := make(map[string]*Server, len(sd.serverMapByType))
+	for t, m := range sd.serverMapByType {
+		for _, server := range m {
+			ret[t] = server
+			break
+		}
+	}
 	return ret
 }
 
@@ -622,17 +653,21 @@ func (sd *etcdServiceDiscovery) revoke() error {
 }
 
 func (sd *etcdServiceDiscovery) addServer(sv *Server) {
-	if _, loaded := sd.serverMapByID.LoadOrStore(sv.ID, sv); !loaded {
-		sd.writeLockScope(func() {
-			mapSvByType, ok := sd.serverMapByType[sv.Type]
-			if !ok {
-				mapSvByType = make(map[string]*Server)
-				sd.serverMapByType[sv.Type] = mapSvByType
-			}
-			mapSvByType[sv.ID] = sv
-		})
-		if sv.ID != sd.server.ID {
+	old, loaded := sd.serverMapByID.Load(sv.ID)
+	sd.writeLockScope(func() {
+		sd.serverMapByID.Store(sv.ID, sv)
+		mapSvByType, ok := sd.serverMapByType[sv.Type]
+		if !ok {
+			mapSvByType = make(map[string]*Server)
+			sd.serverMapByType[sv.Type] = mapSvByType
+		}
+		mapSvByType[sv.ID] = sv
+	})
+	if sv.ID != sd.server.ID {
+		if !loaded {
 			sd.notifyListeners(ADD, sv)
+		} else {
+			sd.notifyListeners(Modify, sv, old.(*Server))
 		}
 	}
 }

@@ -162,7 +162,7 @@ func (r *Room) Message(ctx context.Context, msg *UserMessage) {
 // SendRPC sends rpc
 func (r *Room) SendRPC(ctx context.Context, msg *protos.RPCMsg) (*protos.RPCRes, error) {
 	ret := &protos.RPCRes{}
-	err := r.app.RPC(ctx, "connector.connectorremote.remotefunc", ret, msg)
+	err := r.app.RPC(ctx, "connector.connectorremote.remotefunc", ret, msg, "")
 	if err != nil {
 		return nil, pitaya.Error(err, "RPC-000")
 	}

@@ -27,7 +27,6 @@ import (
 	"math"
 	"time"
 
-	"github.com/golang/protobuf/proto"
 	nats "github.com/nats-io/nats.go"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/constants"
@@ -37,6 +36,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/protos"
 	"github.com/topfreegames/pitaya/v2/session"
 	"github.com/topfreegames/pitaya/v2/util"
+	"google.golang.org/protobuf/proto"
 )
 
 // NatsRPCServer struct
@@ -58,6 +58,7 @@ type NatsRPCServer struct {
 	userPushCh             chan *protos.Push
 	userKickCh             chan *protos.KickMsg
 	sub                    *nats.Subscription
+	broadcastSubs          []*nats.Subscription //广播订阅
 	dropped                int
 	pitayaServer           protos.PitayaServer
 	metricsReporters       []metrics.Reporter
@@ -82,6 +83,7 @@ func NewNatsRPCServer(
 		appDieChan:        appDieChan,
 		connectionTimeout: nats.DefaultTimeout,
 		sessionPool:       sessionPool,
+		broadcastSubs:     make([]*nats.Subscription, 4),
 	}
 	if err := ns.configure(config); err != nil {
 		return nil, err
@@ -135,6 +137,10 @@ func GetUserKickTopic(uid string, svType string) string {
 // GetBindBroadcastTopic gets the topic on which bind events will be broadcasted
 func GetBindBroadcastTopic(svType string) string {
 	return fmt.Sprintf("pitaya/%s/bindings", svType)
+}
+
+func GetForkTopic(svrType string) string {
+	return fmt.Sprintf("pitaya.fork.%s", svrType)
 }
 
 // onSessionBind should be called on each session bind
@@ -205,6 +211,14 @@ func (ns *NatsRPCServer) handleMessages() {
 			dropped, err := ns.sub.Dropped()
 			if err != nil {
 				logger.Log.Errorf("error getting number of dropped messages: %s", err.Error())
+			}
+			//添加广播订阅的消息丢失日志和统计
+			for i := 0; i < len(ns.broadcastSubs); i++ {
+				tmpDropped, err := ns.broadcastSubs[i].Dropped()
+				if err != nil {
+					logger.Log.Errorf("error getting number of dropped messages: %s", err.Error())
+				}
+				dropped += tmpDropped
 			}
 			if dropped > ns.dropped {
 				logger.Log.Warnf("[rpc server] some messages were dropped! numDropped: %d", dropped)
@@ -278,7 +292,7 @@ func (ns *NatsRPCServer) processMessages(threadID int) {
 		//notify server don't need to publish
 		if ns.requests[threadID].GetMsg().Type == protos.MsgType_MsgNotify {
 			logger.Log.Debugf("message is notify,no publish")
-			break
+			continue
 		}
 
 		p, err := ns.marshalResponse(ns.responses[threadID])
@@ -337,9 +351,33 @@ func (ns *NatsRPCServer) Init() error {
 		return err
 	}
 	ns.conn = conn
-	if ns.sub, err = ns.subscribe(getChannel(ns.server.Type, ns.server.ID)); err != nil {
+	if ns.sub, err = ns.subscribe(getChannel(ns.server.Type, ns.server.ID), false); err != nil {
 		return err
 	}
+	//fork订阅
+	var bcstSub *nats.Subscription
+	topic := GetForkTopic(ns.server.Type)
+	if bcstSub, err = ns.subscribe(topic, false); err != nil {
+		return err
+	}
+	ns.broadcastSubs = append(ns.broadcastSubs, bcstSub)
+	//topic = GetForkTopic("", false)
+	//queue = NeedQueueSubscribe(ns.server, true, false)
+	//if bcstSub, err = ns.subscribe(topic, queue); err != nil {
+	//	return err
+	//}
+	//ns.broadcastSubs = append(ns.broadcastSubs, bcstSub)
+	//topic = GetForkTopic(ns.server.Type)
+	//if bcstSub, err = ns.subscribe(topic, false); err != nil {
+	//	return err
+	//}
+	//ns.broadcastSubs = append(ns.broadcastSubs, bcstSub)
+	//topic = GetForkTopic("", true)
+	//queue = NeedQueueSubscribe(ns.server, true, true)
+	//if bcstSub, err = ns.subscribe(topic, queue); err != nil {
+	//	return err
+	//}
+	//ns.broadcastSubs = append(ns.broadcastSubs, bcstSub)
 
 	err = ns.subscribeToBindingsChannel()
 	if err != nil {
@@ -372,7 +410,10 @@ func (ns *NatsRPCServer) Shutdown() error {
 	return nil
 }
 
-func (ns *NatsRPCServer) subscribe(topic string) (*nats.Subscription, error) {
+func (ns *NatsRPCServer) subscribe(topic string, queue bool) (*nats.Subscription, error) {
+	if queue {
+		return ns.conn.ChanQueueSubscribe(topic, ns.server.Type, ns.subChan)
+	}
 	return ns.conn.ChanSubscribe(topic, ns.subChan)
 }
 

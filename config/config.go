@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"github.com/go-redis/redis/v8"
 	"time"
 
 	"github.com/topfreegames/pitaya/v2/metrics/models"
@@ -33,9 +34,17 @@ type PitayaConfig struct {
 	}
 	Session struct {
 		Unique bool
+		//CacheTTL 缓存过期时间
+		CacheTTL time.Duration
 	}
 	Metrics struct {
 		Period time.Duration
+	}
+	Conf struct {
+		FilePath []string      //配置文件路径,不为空表明使用本地文件配置
+		EtcdAddr string        //Etcd地址,不为空表明使用远程etcd配置
+		EtcdKeys []string      //要读取监听的etcd key列表
+		Interval time.Duration //重载间隔
 	}
 }
 
@@ -90,14 +99,24 @@ func NewDefaultPitayaConfig() *PitayaConfig {
 			},
 		},
 		Session: struct {
-			Unique bool
+			Unique   bool
+			CacheTTL time.Duration
 		}{
-			Unique: true,
+			Unique:   true,
+			CacheTTL: time.Duration(time.Hour * 24 * 3),
 		},
 		Metrics: struct {
 			Period time.Duration
 		}{
 			Period: time.Duration(15 * time.Second),
+		},
+		Conf: struct {
+			FilePath []string
+			EtcdAddr string
+			EtcdKeys []string
+			Interval time.Duration
+		}{
+			Interval: time.Duration(5 * time.Minute),
 		},
 	}
 }
@@ -333,6 +352,26 @@ type EtcdServiceDiscoveryConfig struct {
 		Delay time.Duration
 	}
 	ServerTypesBlacklist []string
+}
+
+type RedisConfig struct {
+	redis.ClusterOptions
+}
+
+func NewDefaultRedisConfig() *RedisConfig {
+	return &RedisConfig{
+		redis.ClusterOptions{
+			Addrs:    []string{"localhost:6379"},
+			Password: "",
+		},
+	}
+}
+func NewRedisConfig(config *Config) *RedisConfig {
+	conf := NewDefaultRedisConfig()
+	if err := config.UnmarshalKey("pitaya.storage.redis", &conf); err != nil {
+		panic(err)
+	}
+	return conf
 }
 
 // NewDefaultEtcdServiceDiscoveryConfig Etcd service discovery default config

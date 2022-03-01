@@ -51,17 +51,21 @@ func (mr *MockAgentMockRecorder) AnswerWithError(arg0, arg1, arg2 interface{}) *
 }
 
 // Close mocks base method.
-func (m *MockAgent) Close() error {
+func (m *MockAgent) Close(arg0 ...int) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Close")
+	varargs := []interface{}{}
+	for _, a := range arg0 {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "Close", varargs...)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // Close indicates an expected call of Close.
-func (mr *MockAgentMockRecorder) Close() *gomock.Call {
+func (mr *MockAgentMockRecorder) Close(arg0 ...interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Close", reflect.TypeOf((*MockAgent)(nil).Close))
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Close", reflect.TypeOf((*MockAgent)(nil).Close), arg0...)
 }
 
 // GetSession mocks base method.

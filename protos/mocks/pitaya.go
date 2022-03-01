@@ -198,3 +198,15 @@ func (mr *MockPitayaServerMockRecorder) SessionBindRemote(arg0, arg1 interface{}
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SessionBindRemote", reflect.TypeOf((*MockPitayaServer)(nil).SessionBindRemote), arg0, arg1)
 }
+
+// mustEmbedUnimplementedPitayaServer mocks base method.
+func (m *MockPitayaServer) mustEmbedUnimplementedPitayaServer() {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "mustEmbedUnimplementedPitayaServer")
+}
+
+// mustEmbedUnimplementedPitayaServer indicates an expected call of mustEmbedUnimplementedPitayaServer.
+func (mr *MockPitayaServerMockRecorder) mustEmbedUnimplementedPitayaServer() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "mustEmbedUnimplementedPitayaServer", reflect.TypeOf((*MockPitayaServer)(nil).mustEmbedUnimplementedPitayaServer))
+}

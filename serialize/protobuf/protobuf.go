@@ -21,8 +21,8 @@
 package protobuf
 
 import (
-	"github.com/golang/protobuf/proto"
 	"github.com/topfreegames/pitaya/v2/constants"
+	"google.golang.org/protobuf/proto"
 )
 
 // Serializer implements the serialize.Serializer interface

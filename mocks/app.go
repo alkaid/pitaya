@@ -9,6 +9,7 @@ import (
 	reflect "reflect"
 	time "time"
 
+	redis "github.com/go-redis/redis/v8"
 	gomock "github.com/golang/mock/gomock"
 	cluster "github.com/topfreegames/pitaya/v2/cluster"
 	component "github.com/topfreegames/pitaya/v2/component"
@@ -18,7 +19,7 @@ import (
 	router "github.com/topfreegames/pitaya/v2/router"
 	session "github.com/topfreegames/pitaya/v2/session"
 	worker "github.com/topfreegames/pitaya/v2/worker"
-	protoiface "google.golang.org/protobuf/runtime/protoiface"
+	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // MockPitaya is a mock of Pitaya interface.
@@ -44,6 +45,18 @@ func (m *MockPitaya) EXPECT() *MockPitayaMockRecorder {
 	return m.recorder
 }
 
+// AddConfLoader mocks base method.
+func (m *MockPitaya) AddConfLoader(arg0 config.ConfLoader) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "AddConfLoader", arg0)
+}
+
+// AddConfLoader indicates an expected call of AddConfLoader.
+func (mr *MockPitayaMockRecorder) AddConfLoader(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddConfLoader", reflect.TypeOf((*MockPitaya)(nil).AddConfLoader), arg0)
+}
+
 // AddRoute mocks base method.
 func (m *MockPitaya) AddRoute(arg0 string, arg1 router.RoutingFunc) error {
 	m.ctrl.T.Helper()
@@ -56,6 +69,30 @@ func (m *MockPitaya) AddRoute(arg0 string, arg1 router.RoutingFunc) error {
 func (mr *MockPitayaMockRecorder) AddRoute(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddRoute", reflect.TypeOf((*MockPitaya)(nil).AddRoute), arg0, arg1)
+}
+
+// AddServerDiscoveryListener mocks base method.
+func (m *MockPitaya) AddServerDiscoveryListener(arg0 cluster.SDListener) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "AddServerDiscoveryListener", arg0)
+}
+
+// AddServerDiscoveryListener indicates an expected call of AddServerDiscoveryListener.
+func (mr *MockPitayaMockRecorder) AddServerDiscoveryListener(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddServerDiscoveryListener", reflect.TypeOf((*MockPitaya)(nil).AddServerDiscoveryListener), arg0)
+}
+
+// AddSessionListener mocks base method.
+func (m *MockPitaya) AddSessionListener(arg0 cluster.RemoteSessionListener) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "AddSessionListener", arg0)
+}
+
+// AddSessionListener indicates an expected call of AddSessionListener.
+func (mr *MockPitayaMockRecorder) AddSessionListener(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddSessionListener", reflect.TypeOf((*MockPitaya)(nil).AddSessionListener), arg0)
 }
 
 // Documentation mocks base method.
@@ -71,6 +108,34 @@ func (m *MockPitaya) Documentation(arg0 bool) (map[string]interface{}, error) {
 func (mr *MockPitayaMockRecorder) Documentation(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Documentation", reflect.TypeOf((*MockPitaya)(nil).Documentation), arg0)
+}
+
+// FlushServer2Cluster mocks base method.
+func (m *MockPitaya) FlushServer2Cluster(arg0 *cluster.Server) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "FlushServer2Cluster", arg0)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// FlushServer2Cluster indicates an expected call of FlushServer2Cluster.
+func (mr *MockPitayaMockRecorder) FlushServer2Cluster(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FlushServer2Cluster", reflect.TypeOf((*MockPitaya)(nil).FlushServer2Cluster), arg0)
+}
+
+// Fork mocks base method.
+func (m *MockPitaya) Fork(arg0 context.Context, arg1 string, arg2 protoreflect.ProtoMessage, arg3 string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Fork", arg0, arg1, arg2, arg3)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Fork indicates an expected call of Fork.
+func (mr *MockPitayaMockRecorder) Fork(arg0, arg1, arg2, arg3 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Fork", reflect.TypeOf((*MockPitaya)(nil).Fork), arg0, arg1, arg2, arg3)
 }
 
 // GetDieChan mocks base method.
@@ -116,6 +181,20 @@ func (mr *MockPitayaMockRecorder) GetModule(arg0 interface{}) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetModule", reflect.TypeOf((*MockPitaya)(nil).GetModule), arg0)
 }
 
+// GetRedis mocks base method.
+func (m *MockPitaya) GetRedis() redis.Cmdable {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetRedis")
+	ret0, _ := ret[0].(redis.Cmdable)
+	return ret0
+}
+
+// GetRedis indicates an expected call of GetRedis.
+func (mr *MockPitayaMockRecorder) GetRedis() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRedis", reflect.TypeOf((*MockPitaya)(nil).GetRedis))
+}
+
 // GetServer mocks base method.
 func (m *MockPitaya) GetServer() *cluster.Server {
 	m.ctrl.T.Helper()
@@ -157,6 +236,20 @@ func (m *MockPitaya) GetServerID() string {
 func (mr *MockPitayaMockRecorder) GetServerID() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetServerID", reflect.TypeOf((*MockPitaya)(nil).GetServerID))
+}
+
+// GetServerTypes mocks base method.
+func (m *MockPitaya) GetServerTypes() map[string]*cluster.Server {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetServerTypes")
+	ret0, _ := ret[0].(map[string]*cluster.Server)
+	return ret0
+}
+
+// GetServerTypes indicates an expected call of GetServerTypes.
+func (mr *MockPitayaMockRecorder) GetServerTypes() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetServerTypes", reflect.TypeOf((*MockPitaya)(nil).GetServerTypes))
 }
 
 // GetServers mocks base method.
@@ -374,21 +467,35 @@ func (mr *MockPitayaMockRecorder) IsRunning() *gomock.Call {
 }
 
 // Notify mocks base method.
-func (m *MockPitaya) Notify(arg0 context.Context, arg1 string, arg2 protoiface.MessageV1) error {
+func (m *MockPitaya) Notify(arg0 context.Context, arg1 string, arg2 protoreflect.ProtoMessage, arg3 string) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Notify", arg0, arg1, arg2)
+	ret := m.ctrl.Call(m, "Notify", arg0, arg1, arg2, arg3)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // Notify indicates an expected call of Notify.
-func (mr *MockPitayaMockRecorder) Notify(arg0, arg1, arg2 interface{}) *gomock.Call {
+func (mr *MockPitayaMockRecorder) Notify(arg0, arg1, arg2, arg3 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Notify", reflect.TypeOf((*MockPitaya)(nil).Notify), arg0, arg1, arg2)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Notify", reflect.TypeOf((*MockPitaya)(nil).Notify), arg0, arg1, arg2, arg3)
+}
+
+// NotifyAll mocks base method.
+func (m *MockPitaya) NotifyAll(arg0 context.Context, arg1 string, arg2 protoreflect.ProtoMessage, arg3 string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "NotifyAll", arg0, arg1, arg2, arg3)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// NotifyAll indicates an expected call of NotifyAll.
+func (mr *MockPitayaMockRecorder) NotifyAll(arg0, arg1, arg2, arg3 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NotifyAll", reflect.TypeOf((*MockPitaya)(nil).NotifyAll), arg0, arg1, arg2, arg3)
 }
 
 // NotifyTo mocks base method.
-func (m *MockPitaya) NotifyTo(arg0 context.Context, arg1, arg2 string, arg3 protoiface.MessageV1) error {
+func (m *MockPitaya) NotifyTo(arg0 context.Context, arg1, arg2 string, arg3 protoreflect.ProtoMessage) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "NotifyTo", arg0, arg1, arg2, arg3)
 	ret0, _ := ret[0].(error)
@@ -402,21 +509,21 @@ func (mr *MockPitayaMockRecorder) NotifyTo(arg0, arg1, arg2, arg3 interface{}) *
 }
 
 // RPC mocks base method.
-func (m *MockPitaya) RPC(arg0 context.Context, arg1 string, arg2, arg3 protoiface.MessageV1) error {
+func (m *MockPitaya) RPC(arg0 context.Context, arg1 string, arg2, arg3 protoreflect.ProtoMessage, arg4 string) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "RPC", arg0, arg1, arg2, arg3)
+	ret := m.ctrl.Call(m, "RPC", arg0, arg1, arg2, arg3, arg4)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // RPC indicates an expected call of RPC.
-func (mr *MockPitayaMockRecorder) RPC(arg0, arg1, arg2, arg3 interface{}) *gomock.Call {
+func (mr *MockPitayaMockRecorder) RPC(arg0, arg1, arg2, arg3, arg4 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RPC", reflect.TypeOf((*MockPitaya)(nil).RPC), arg0, arg1, arg2, arg3)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RPC", reflect.TypeOf((*MockPitaya)(nil).RPC), arg0, arg1, arg2, arg3, arg4)
 }
 
 // RPCTo mocks base method.
-func (m *MockPitaya) RPCTo(arg0 context.Context, arg1, arg2 string, arg3, arg4 protoiface.MessageV1) error {
+func (m *MockPitaya) RPCTo(arg0 context.Context, arg1, arg2 string, arg3, arg4 protoreflect.ProtoMessage) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "RPCTo", arg0, arg1, arg2, arg3, arg4)
 	ret0, _ := ret[0].(error)
@@ -520,7 +627,7 @@ func (mr *MockPitayaMockRecorder) RegisterRemote(arg0 interface{}, arg1 ...inter
 }
 
 // ReliableRPC mocks base method.
-func (m *MockPitaya) ReliableRPC(arg0 string, arg1 map[string]interface{}, arg2, arg3 protoiface.MessageV1) (string, error) {
+func (m *MockPitaya) ReliableRPC(arg0 string, arg1 map[string]interface{}, arg2, arg3 protoreflect.ProtoMessage) (string, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ReliableRPC", arg0, arg1, arg2, arg3)
 	ret0, _ := ret[0].(string)
@@ -535,7 +642,7 @@ func (mr *MockPitayaMockRecorder) ReliableRPC(arg0, arg1, arg2, arg3 interface{}
 }
 
 // ReliableRPCWithOptions mocks base method.
-func (m *MockPitaya) ReliableRPCWithOptions(arg0 string, arg1 map[string]interface{}, arg2, arg3 protoiface.MessageV1, arg4 *config.EnqueueOpts) (string, error) {
+func (m *MockPitaya) ReliableRPCWithOptions(arg0 string, arg1 map[string]interface{}, arg2, arg3 protoreflect.ProtoMessage, arg4 *config.EnqueueOpts) (string, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ReliableRPCWithOptions", arg0, arg1, arg2, arg3, arg4)
 	ret0, _ := ret[0].(string)

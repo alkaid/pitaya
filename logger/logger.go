@@ -18,26 +18,28 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
+//logger
+//Deprecated: user package log instead
 package logger
 
 import (
-	"github.com/sirupsen/logrus"
 	"github.com/topfreegames/pitaya/v2/logger/interfaces"
-	logruswrapper "github.com/topfreegames/pitaya/v2/logger/logrus"
+	"github.com/topfreegames/pitaya/v2/logger/zapw"
 )
 
 // Log is the default logger
 var Log = initLogger()
 
 func initLogger() interfaces.Logger {
-	plog := logrus.New()
-	plog.Formatter = new(logrus.TextFormatter)
-	plog.Level = logrus.DebugLevel
-
-	log := plog.WithFields(logrus.Fields{
-		"source": "pitaya",
-	})
-	return logruswrapper.NewWithFieldLogger(log)
+	//plog := logrus.New()
+	//plog.Formatter = new(logrus.TextFormatter)
+	//plog.Level = logrus.DebugLevel
+	//
+	//log := plog.WithFields(logrus.Fields{
+	//	"source": "pitaya",
+	//})
+	//return logruswrapper.NewWithFieldLogger(log)
+	return zapw.Default()
 }
 
 // SetLogger rewrites the default logger
@@ -45,4 +47,8 @@ func SetLogger(l interfaces.Logger) {
 	if l != nil {
 		Log = l
 	}
+}
+
+func SetLevel(level interfaces.Level) {
+	Log.SetLevel(level)
 }

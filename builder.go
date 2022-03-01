@@ -1,6 +1,7 @@
 package pitaya
 
 import (
+	"github.com/go-redis/redis/v8"
 	"github.com/google/uuid"
 	"github.com/topfreegames/pitaya/v2/acceptor"
 	"github.com/topfreegames/pitaya/v2/agent"
@@ -42,6 +43,8 @@ type Builder struct {
 	SessionPool      session.SessionPool
 	Worker           *worker.Worker
 	HandlerHooks     *pipeline.HandlerHooks
+	Redis            redis.Cmdable
+	conf             *config.Config
 }
 
 // PitayaBuilder Builder interface
@@ -68,7 +71,8 @@ func NewBuilderWithConfigs(
 	workerConfig := config.NewWorkerConfig(conf)
 	enqueueOpts := config.NewEnqueueOpts(conf)
 	groupServiceConfig := config.NewMemoryGroupConfig(conf)
-	return NewBuilder(
+	redisConfig := config.NewRedisConfig(conf)
+	b := NewBuilder(
 		isFrontend,
 		serverType,
 		serverMode,
@@ -83,7 +87,10 @@ func NewBuilderWithConfigs(
 		*workerConfig,
 		*enqueueOpts,
 		*groupServiceConfig,
+		*redisConfig,
 	)
+	b.conf = conf
+	return b
 }
 
 // NewDefaultBuilder return a builder instance with default dependency instances for a pitaya App,
@@ -98,6 +105,7 @@ func NewDefaultBuilder(isFrontend bool, serverType string, serverMode ServerMode
 	workerConfig := config.NewDefaultWorkerConfig()
 	enqueueOpts := config.NewDefaultEnqueueOpts()
 	groupServiceConfig := config.NewDefaultMemoryGroupConfig()
+	redisConfig := config.NewDefaultRedisConfig()
 	return NewBuilder(
 		isFrontend,
 		serverType,
@@ -113,6 +121,7 @@ func NewDefaultBuilder(isFrontend bool, serverType string, serverMode ServerMode
 		*workerConfig,
 		*enqueueOpts,
 		*groupServiceConfig,
+		*redisConfig,
 	)
 }
 
@@ -132,6 +141,7 @@ func NewBuilder(isFrontend bool,
 	workerConfig config.WorkerConfig,
 	enqueueOpts config.EnqueueOpts,
 	groupServiceConfig config.MemoryGroupConfig,
+	redisConfig config.RedisConfig,
 ) *Builder {
 	server := cluster.NewServer(uuid.New().String(), serverType, isFrontend, serverMetadata)
 	dieChan := make(chan bool)
@@ -150,7 +160,11 @@ func NewBuilder(isFrontend bool,
 		configureDefaultPipelines(handlerHooks)
 	}
 
+	//session 后端redis落地实例
+	redisClient := redis.NewClusterClient(&redisConfig.ClusterOptions)
+	sessPoolStorage := session.NewRedisStorage(redisClient, config.Pitaya.Session.CacheTTL)
 	sessionPool := session.NewSessionPool()
+	sessionPool.SetClusterStorage(sessPoolStorage)
 
 	var serviceDiscovery cluster.ServiceDiscovery
 	var rpcServer cluster.RPCServer
@@ -202,6 +216,7 @@ func NewBuilder(isFrontend bool,
 		ServiceDiscovery: serviceDiscovery,
 		SessionPool:      sessionPool,
 		Worker:           worker,
+		Redis:            redisClient,
 	}
 }
 
@@ -270,7 +285,7 @@ func (builder *Builder) Build() Pitaya {
 		handlerPool,
 	)
 
-	return NewApp(
+	app := NewApp(
 		builder.ServerMode,
 		builder.Serializer,
 		builder.acceptors,
@@ -288,6 +303,9 @@ func (builder *Builder) Build() Pitaya {
 		builder.MetricsReporters,
 		builder.Config.Pitaya,
 	)
+	app.SetRedis(builder.Redis)
+	app.conf = builder.conf
+	return app
 }
 
 // NewDefaultApp returns a default pitaya app instance

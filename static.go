@@ -24,7 +24,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/spf13/viper"
 	"github.com/topfreegames/pitaya/v2/cluster"
 	"github.com/topfreegames/pitaya/v2/component"
@@ -34,6 +33,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/router"
 	"github.com/topfreegames/pitaya/v2/session"
 	"github.com/topfreegames/pitaya/v2/worker"
+	"google.golang.org/protobuf/proto"
 )
 
 var DefaultApp Pitaya
@@ -130,7 +130,7 @@ func IsRunning() bool {
 }
 
 func RPC(ctx context.Context, routeStr string, reply proto.Message, arg proto.Message) error {
-	return DefaultApp.RPC(ctx, routeStr, reply, arg)
+	return DefaultApp.RPC(ctx, routeStr, reply, arg, "")
 }
 
 func RPCTo(ctx context.Context, serverID, routeStr string, reply proto.Message, arg proto.Message) error {

@@ -1,32 +1,125 @@
 package interfaces
 
-// Logger interface for pitaya loggers
+// Logger
+//Deprecated:use log.Log instead
+//
+//interface for pitaya loggers
 type Logger interface {
+	//Fatal
+	// Deprecated
 	Fatal(format ...interface{})
+	//Fatalf
+	// Deprecated
+	//  @param format
+	//  @param args
 	Fatalf(format string, args ...interface{})
-	Fatalln(args ...interface{})
-
+	//Fatalln
+	// Deprecated
+	Fatalln(format ...interface{})
+	//Debug
+	// Deprecated
+	//  @param args
 	Debug(args ...interface{})
+	//Debugf
+	// Deprecated
+	//  @param format
+	//  @param args
 	Debugf(format string, args ...interface{})
-	Debugln(args ...interface{})
+	//Debugln
+	// Deprecated
+	Debugln(format ...interface{})
 
+	//Error
+	// Deprecated
+	//  @param args
 	Error(args ...interface{})
+	//Errorf
+	// Deprecated
+	//  @param format
+	//  @param args
 	Errorf(format string, args ...interface{})
-	Errorln(args ...interface{})
-
+	//Errorln
+	// Deprecated
+	Errorln(format ...interface{})
+	//Info
+	// Deprecated
+	//  @param args
 	Info(args ...interface{})
+	//Infof
+	// Deprecated
+	//  @param format
+	//  @param args
 	Infof(format string, args ...interface{})
-	Infoln(args ...interface{})
-
+	//Infoln
+	// Deprecated
+	Infoln(format ...interface{})
+	//Warn
+	// Deprecated
+	//  @param args
 	Warn(args ...interface{})
+	//Warnf
+	// Deprecated
+	//  @param format
+	//  @param args
 	Warnf(format string, args ...interface{})
-	Warnln(args ...interface{})
-
+	//Warnln
+	// Deprecated
+	Warnln(format ...interface{})
+	//Panic
+	// Deprecated
+	//  @param args
 	Panic(args ...interface{})
+	//Panicf
+	// Deprecated
+	//  @param format
+	//  @param args
 	Panicf(format string, args ...interface{})
-	Panicln(args ...interface{})
-
+	//Panicln
+	// Deprecated
+	Panicln(format ...interface{})
+	//WithFields
+	// Deprecated
+	//  @param fields
+	//  @return Logger
 	WithFields(fields map[string]interface{}) Logger
+	//WithField
+	// Deprecated
+	//  @param key
+	//  @param value
+	//  @return Logger
 	WithField(key string, value interface{}) Logger
+	//WithError
+	// Deprecated
+	//  @param err
+	//  @return Logger
 	WithError(err error) Logger
+
+	//SetLevel
+	//  @param level
+	SetLevel(level Level)
 }
+type Level string
+
+const (
+	// DebugLevel logs are typically voluminous, and are usually disabled in
+	// production.
+	DebugLevel Level = "DEBUG"
+	// InfoLevel is the default logging priority.
+	InfoLevel Level = "INFO"
+	// WarnLevel logs are more important than Info, but don't need individual
+	// human review.
+	WarnLevel Level = "WARN"
+	// ErrorLevel logs are high-priority. If an application is running smoothly,
+	// it shouldn't generate any error-level logs.
+	ErrorLevel Level = "ERROR"
+	// DPanicLevel logs are particularly important errors. In development the
+	// logger panics after writing the message.
+	DPanicLevel Level = "DPANIC"
+	// PanicLevel logs a message, then panics.
+	PanicLevel Level = "PANIC"
+	// FatalLevel logs a message, then calls os.Exit(1).
+	FatalLevel Level = "FATAL"
+
+	_minLevel = DebugLevel
+	_maxLevel = FatalLevel
+)

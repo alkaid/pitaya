@@ -23,7 +23,6 @@ package agent
 import (
 	"context"
 	gojson "encoding/json"
-	e "errors"
 	"fmt"
 	"net"
 	"strings"
@@ -102,7 +101,7 @@ type (
 		GetSession() session.Session
 		Push(route string, v interface{}) error
 		ResponseMID(ctx context.Context, mid uint, v interface{}, isError ...bool) error
-		Close() error
+		Close(reason ...session.CloseReason) error
 		RemoteAddr() net.Addr
 		String() string
 		GetStatus() int32
@@ -333,7 +332,7 @@ func (a *agentImpl) ResponseMID(ctx context.Context, mid uint, v interface{}, is
 
 // Close closes the agent, cleans inner state and closes low-level connection.
 // Any blocked Read or Write operations will be unblocked and return errors.
-func (a *agentImpl) Close() error {
+func (a *agentImpl) Close(reason ...session.CloseReason) error {
 	a.closeMutex.Lock()
 	defer a.closeMutex.Unlock()
 	if a.GetStatus() == constants.StatusClosed {
@@ -352,7 +351,7 @@ func (a *agentImpl) Close() error {
 		close(a.chStopWrite)
 		close(a.chStopHeartbeat)
 		close(a.chDie)
-		a.onSessionClosed(a.Session)
+		a.onSessionClosed(a.Session, reason...)
 	}
 
 	metrics.ReportNumberOfConnectedClients(a.metricsReporters, a.sessionPool.GetSessionCount())
@@ -459,7 +458,7 @@ func (a *agentImpl) heartbeat() {
 	}
 }
 
-func (a *agentImpl) onSessionClosed(s session.Session) {
+func (a *agentImpl) onSessionClosed(s session.Session, reason ...session.CloseReason) {
 	defer func() {
 		if err := recover(); err != nil {
 			logger.Log.Errorf("pitaya/onSessionClosed: %v", err)
@@ -471,7 +470,11 @@ func (a *agentImpl) onSessionClosed(s session.Session) {
 	}
 
 	for _, fn2 := range a.sessionPool.GetSessionCloseCallbacks() {
-		fn2(s)
+		rea := session.CloseReasonNormal
+		if len(reason) > 0 {
+			rea = reason[0]
+		}
+		fn2(s, rea)
 	}
 }
 
@@ -512,7 +515,7 @@ func (a *agentImpl) write() {
 
 // SendRequest sends a request to a server
 func (a *agentImpl) SendRequest(ctx context.Context, serverID, route string, v interface{}) (*protos.Response, error) {
-	return nil, e.New("not implemented")
+	return nil, constants.ErrNotImplemented
 }
 
 // AnswerWithError answers with an error

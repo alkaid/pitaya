@@ -3,10 +3,10 @@ package services
 import (
 	"context"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/topfreegames/pitaya/v2"
 	"github.com/topfreegames/pitaya/v2/component"
 	"github.com/topfreegames/pitaya/v2/examples/demo/worker/protos"
+	"google.golang.org/protobuf/proto"
 )
 
 // Worker server

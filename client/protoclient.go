@@ -31,14 +31,14 @@ import (
 	"strings"
 	"time"
 
-	"github.com/golang/protobuf/proto"
-	protobuf "github.com/golang/protobuf/protoc-gen-go/descriptor"
 	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/dynamic"
 	"github.com/sirupsen/logrus"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/protos"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/descriptorpb"
 )
 
 // Command struct. Save the input and output type and proto descriptor for each
@@ -74,7 +74,7 @@ func (pc *ProtoClient) MsgChannel() chan *message.Message {
 }
 
 // Receive a compressed byte slice and unpack it to a FileDescriptorProto
-func unpackDescriptor(compressedDescriptor []byte) (*protobuf.FileDescriptorProto, error) {
+func unpackDescriptor(compressedDescriptor []byte) (*descriptorpb.FileDescriptorProto, error) {
 	r, err := gzip.NewReader(bytes.NewReader(compressedDescriptor))
 	if err != nil {
 		return nil, err
@@ -86,7 +86,7 @@ func unpackDescriptor(compressedDescriptor []byte) (*protobuf.FileDescriptorProt
 		return nil, err
 	}
 
-	var fileDescriptorProto protobuf.FileDescriptorProto
+	var fileDescriptorProto descriptorpb.FileDescriptorProto
 
 	if err = proto.Unmarshal(b, &fileDescriptorProto); err != nil {
 		return nil, err
@@ -97,7 +97,7 @@ func unpackDescriptor(compressedDescriptor []byte) (*protobuf.FileDescriptorProt
 
 // Receive an array of descriptors in binary format. The function creates the
 // protobuffer from this data and associates it to the message.
-func (pc *ProtoClient) buildProtosFromDescriptor(descriptorArray []*protobuf.FileDescriptorProto) error {
+func (pc *ProtoClient) buildProtosFromDescriptor(descriptorArray []*descriptorpb.FileDescriptorProto) error {
 
 	descriptorsMap := make(map[string]*desc.MessageDescriptor)
 
@@ -270,7 +270,7 @@ func (pc *ProtoClient) getDescriptors(data string) error {
 	}
 
 	// get all proto types
-	descriptorArray := make([]*protobuf.FileDescriptorProto, 0)
+	descriptorArray := make([]*descriptorpb.FileDescriptorProto, 0)
 	for i := range descriptors.Desc {
 		fileDescriptorProto, err := unpackDescriptor(descriptors.Desc[i])
 		if err != nil {

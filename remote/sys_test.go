@@ -22,11 +22,14 @@ package remote
 
 import (
 	"encoding/json"
+	"github.com/topfreegames/pitaya/v2/cluster"
+	"github.com/topfreegames/pitaya/v2/session"
 	"testing"
 
 	"github.com/golang/mock/gomock"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	clustermocks "github.com/topfreegames/pitaya/v2/cluster/mocks"
 	"github.com/topfreegames/pitaya/v2/constants"
 	"github.com/topfreegames/pitaya/v2/protos"
 	"github.com/topfreegames/pitaya/v2/session/mocks"
@@ -48,7 +51,7 @@ func TestBindSession(t *testing.T) {
 	sessionPool := mocks.NewMockSessionPool(ctrl)
 	sessionPool.EXPECT().GetSessionByID(id).Return(ss).Times(1)
 
-	s := NewSys(sessionPool)
+	s := NewSys(sessionPool, nil, nil)
 	data := &protos.Session{
 		Id:   id,
 		Uid:  uid,
@@ -58,6 +61,42 @@ func TestBindSession(t *testing.T) {
 	ss.EXPECT().Bind(nil, uid).Times(1)
 
 	res, err := s.BindSession(nil, data)
+	assert.NoError(t, err)
+	assert.Equal(t, []byte("ack"), res.Data)
+}
+
+func TestBindBackendSession(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	id := int64(1)
+	uid := uuid.New().String()
+	thisSvrId := "thisServerId1"
+	sessData := map[string]interface{}{
+		"hello":                      "test",
+		session.FieldKeyTmpBackendID: "thisServerId1",
+	}
+	svr := cluster.NewServer(thisSvrId, "anyType", false)
+	d, err := json.Marshal(sessData)
+	assert.NoError(t, err)
+
+	ss := mocks.NewMockSession(ctrl)
+	sd := clustermocks.NewMockServiceDiscovery(ctrl)
+	sd.EXPECT().GetServer(thisSvrId).Return(svr, nil).Times(1)
+
+	sessionPool := mocks.NewMockSessionPool(ctrl)
+	sessionPool.EXPECT().GetSessionByUID(uid).Return(ss).Times(1)
+	sessionPool.EXPECT().DecodeSessionData(gomock.Any()).Return(sessData, nil).Times(1)
+
+	s := NewSys(sessionPool, svr, sd)
+	data := &protos.Session{
+		Id:   id,
+		Uid:  uid,
+		Data: d,
+	}
+	//BindBackend(ctx context.Context, thisServerID string, targetServerType string, targetServerID string)
+	ss.EXPECT().BindBackend(nil, thisSvrId, svr.Type, thisSvrId).Times(1)
+
+	res, err := s.BindBackendSession(nil, data)
 	assert.NoError(t, err)
 	assert.Equal(t, []byte("ack"), res.Data)
 }
@@ -75,7 +114,7 @@ func TestBindSessionShouldErrorIfNotExists(t *testing.T) {
 	sessionPool := mocks.NewMockSessionPool(ctrl)
 	sessionPool.EXPECT().GetSessionByID(gomock.Any()).Return(nil)
 
-	s := NewSys(sessionPool)
+	s := NewSys(sessionPool, nil, nil)
 	data := &protos.Session{
 		Id:   133,
 		Uid:  uid,
@@ -109,7 +148,7 @@ func TestBindSessionShouldErrorIfAlreadyBound(t *testing.T) {
 	sessionPool := mocks.NewMockSessionPool(ctrl)
 	sessionPool.EXPECT().GetSessionByID(ss.ID()).Return(ss).Times(2)
 
-	s := NewSys(sessionPool)
+	s := NewSys(sessionPool, nil, nil)
 	res, err := s.BindSession(nil, data)
 	assert.NoError(t, err)
 	assert.Equal(t, []byte("ack"), res.Data)
@@ -141,7 +180,7 @@ func TestPushSession(t *testing.T) {
 	sessionPool := mocks.NewMockSessionPool(ctrl)
 	sessionPool.EXPECT().GetSessionByID(id).Return(ss).Times(1)
 
-	s := NewSys(sessionPool)
+	s := NewSys(sessionPool, nil, nil)
 	res, err := s.PushSession(nil, data)
 	assert.NoError(t, err)
 	assert.Equal(t, []byte("ack"), res.Data)
@@ -166,7 +205,7 @@ func TestPushSessionShouldFailIfSessionDoesntExists(t *testing.T) {
 	sessionPool := mocks.NewMockSessionPool(ctrl)
 	sessionPool.EXPECT().GetSessionByID(data.Id).Return(nil).Times(1)
 
-	s := NewSys(sessionPool)
+	s := NewSys(sessionPool, nil, nil)
 	_, err = s.PushSession(nil, data)
 	assert.EqualError(t, constants.ErrSessionNotFound, err.Error())
 }
@@ -184,7 +223,7 @@ func TestKick(t *testing.T) {
 	sessionPool := mocks.NewMockSessionPool(ctrl)
 	sessionPool.EXPECT().GetSessionByUID(uid).Return(ss).Times(1)
 
-	s := NewSys(sessionPool)
+	s := NewSys(sessionPool, nil, nil)
 
 	res, err := s.Kick(nil, &protos.KickMsg{UserId: uid})
 	assert.NoError(t, err)
@@ -199,7 +238,7 @@ func TestKickSessionShouldFailIfSessionDoesntExists(t *testing.T) {
 	sessionPool := mocks.NewMockSessionPool(ctrl)
 	sessionPool.EXPECT().GetSessionByUID(uid).Return(nil).Times(1)
 
-	s := NewSys(sessionPool)
+	s := NewSys(sessionPool, nil, nil)
 	_, err := s.Kick(nil, &protos.KickMsg{UserId: uid})
 	assert.EqualError(t, constants.ErrSessionNotFound, err.Error())
 }

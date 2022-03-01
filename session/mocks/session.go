@@ -52,6 +52,20 @@ func (mr *MockSessionMockRecorder) Bind(arg0, arg1 interface{}) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Bind", reflect.TypeOf((*MockSession)(nil).Bind), arg0, arg1)
 }
 
+// BindBackend mocks base method.
+func (m *MockSession) BindBackend(arg0 context.Context, arg1, arg2 string) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "BindBackend", arg0, arg1, arg2)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// BindBackend indicates an expected call of BindBackend.
+func (mr *MockSessionMockRecorder) BindBackend(arg0, arg1, arg2 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "BindBackend", reflect.TypeOf((*MockSession)(nil).BindBackend), arg0, arg1, arg2)
+}
+
 // Clear mocks base method.
 func (m *MockSession) Clear() {
 	m.ctrl.T.Helper()
@@ -65,15 +79,19 @@ func (mr *MockSessionMockRecorder) Clear() *gomock.Call {
 }
 
 // Close mocks base method.
-func (m *MockSession) Close() {
+func (m *MockSession) Close(arg0 ...int) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "Close")
+	varargs := []interface{}{}
+	for _, a := range arg0 {
+		varargs = append(varargs, a)
+	}
+	m.ctrl.Call(m, "Close", varargs...)
 }
 
 // Close indicates an expected call of Close.
-func (mr *MockSessionMockRecorder) Close() *gomock.Call {
+func (mr *MockSessionMockRecorder) Close(arg0 ...interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Close", reflect.TypeOf((*MockSession)(nil).Close))
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Close", reflect.TypeOf((*MockSession)(nil).Close), arg0...)
 }
 
 // Float32 mocks base method.
@@ -104,6 +122,20 @@ func (mr *MockSessionMockRecorder) Float64(arg0 interface{}) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Float64", reflect.TypeOf((*MockSession)(nil).Float64), arg0)
 }
 
+// Flush2Cluster mocks base method.
+func (m *MockSession) Flush2Cluster() error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Flush2Cluster")
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Flush2Cluster indicates an expected call of Flush2Cluster.
+func (mr *MockSessionMockRecorder) Flush2Cluster() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Flush2Cluster", reflect.TypeOf((*MockSession)(nil).Flush2Cluster))
+}
+
 // Get mocks base method.
 func (m *MockSession) Get(arg0 string) interface{} {
 	m.ctrl.T.Helper()
@@ -116,6 +148,20 @@ func (m *MockSession) Get(arg0 string) interface{} {
 func (mr *MockSessionMockRecorder) Get(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Get", reflect.TypeOf((*MockSession)(nil).Get), arg0)
+}
+
+// GetBackendID mocks base method.
+func (m *MockSession) GetBackendID(arg0 string) string {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GetBackendID", arg0)
+	ret0, _ := ret[0].(string)
+	return ret0
+}
+
+// GetBackendID indicates an expected call of GetBackendID.
+func (mr *MockSessionMockRecorder) GetBackendID(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetBackendID", reflect.TypeOf((*MockSession)(nil).GetBackendID), arg0)
 }
 
 // GetData mocks base method.
@@ -301,17 +347,55 @@ func (mr *MockSessionMockRecorder) Int8(arg0 interface{}) *gomock.Call {
 }
 
 // Kick mocks base method.
-func (m *MockSession) Kick(arg0 context.Context) error {
+func (m *MockSession) Kick(arg0 context.Context, arg1 ...int) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Kick", arg0)
+	varargs := []interface{}{arg0}
+	for _, a := range arg1 {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "Kick", varargs...)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // Kick indicates an expected call of Kick.
-func (mr *MockSessionMockRecorder) Kick(arg0 interface{}) *gomock.Call {
+func (mr *MockSessionMockRecorder) Kick(arg0 interface{}, arg1 ...interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Kick", reflect.TypeOf((*MockSession)(nil).Kick), arg0)
+	varargs := append([]interface{}{arg0}, arg1...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Kick", reflect.TypeOf((*MockSession)(nil).Kick), varargs...)
+}
+
+// KickBackend mocks base method.
+func (m *MockSession) KickBackend(arg0 context.Context, arg1 string, arg2 ...int) error {
+	m.ctrl.T.Helper()
+	varargs := []interface{}{arg0, arg1}
+	for _, a := range arg2 {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "KickBackend", varargs...)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// KickBackend indicates an expected call of KickBackend.
+func (mr *MockSessionMockRecorder) KickBackend(arg0, arg1 interface{}, arg2 ...interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	varargs := append([]interface{}{arg0, arg1}, arg2...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "KickBackend", reflect.TypeOf((*MockSession)(nil).KickBackend), varargs...)
+}
+
+// ObtainFromCluster mocks base method.
+func (m *MockSession) ObtainFromCluster() error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ObtainFromCluster")
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// ObtainFromCluster indicates an expected call of ObtainFromCluster.
+func (mr *MockSessionMockRecorder) ObtainFromCluster() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ObtainFromCluster", reflect.TypeOf((*MockSession)(nil).ObtainFromCluster))
 }
 
 // OnClose mocks base method.
@@ -652,6 +736,36 @@ func (mr *MockSessionPoolMockRecorder) CloseAll() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "CloseAll", reflect.TypeOf((*MockSessionPool)(nil).CloseAll))
 }
 
+// DecodeSessionData mocks base method.
+func (m *MockSessionPool) DecodeSessionData(arg0 []byte) (map[string]interface{}, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "DecodeSessionData", arg0)
+	ret0, _ := ret[0].(map[string]interface{})
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// DecodeSessionData indicates an expected call of DecodeSessionData.
+func (mr *MockSessionPoolMockRecorder) DecodeSessionData(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "DecodeSessionData", reflect.TypeOf((*MockSessionPool)(nil).DecodeSessionData), arg0)
+}
+
+// EncodeSessionData mocks base method.
+func (m *MockSessionPool) EncodeSessionData(arg0 map[string]interface{}) ([]byte, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "EncodeSessionData", arg0)
+	ret0, _ := ret[0].([]byte)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// EncodeSessionData indicates an expected call of EncodeSessionData.
+func (mr *MockSessionPoolMockRecorder) EncodeSessionData(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EncodeSessionData", reflect.TypeOf((*MockSessionPool)(nil).EncodeSessionData), arg0)
+}
+
 // GetSessionByID mocks base method.
 func (m *MockSessionPool) GetSessionByID(arg0 int64) session.Session {
 	m.ctrl.T.Helper()
@@ -681,10 +795,10 @@ func (mr *MockSessionPoolMockRecorder) GetSessionByUID(arg0 interface{}) *gomock
 }
 
 // GetSessionCloseCallbacks mocks base method.
-func (m *MockSessionPool) GetSessionCloseCallbacks() []func(session.Session) {
+func (m *MockSessionPool) GetSessionCloseCallbacks() []func(session.Session, int) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetSessionCloseCallbacks")
-	ret0, _ := ret[0].([]func(session.Session))
+	ret0, _ := ret[0].([]func(session.Session, int))
 	return ret0
 }
 
@@ -706,6 +820,21 @@ func (m *MockSessionPool) GetSessionCount() int64 {
 func (mr *MockSessionPoolMockRecorder) GetSessionCount() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetSessionCount", reflect.TypeOf((*MockSessionPool)(nil).GetSessionCount))
+}
+
+// ImperfectSessionFromCluster mocks base method.
+func (m *MockSessionPool) ImperfectSessionFromCluster(arg0 string) (session.Session, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ImperfectSessionFromCluster", arg0)
+	ret0, _ := ret[0].(session.Session)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ImperfectSessionFromCluster indicates an expected call of ImperfectSessionFromCluster.
+func (mr *MockSessionPoolMockRecorder) ImperfectSessionFromCluster(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ImperfectSessionFromCluster", reflect.TypeOf((*MockSessionPool)(nil).ImperfectSessionFromCluster), arg0)
 }
 
 // NewSession mocks base method.
@@ -739,6 +868,30 @@ func (mr *MockSessionPoolMockRecorder) OnAfterSessionBind(arg0 interface{}) *gom
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnAfterSessionBind", reflect.TypeOf((*MockSessionPool)(nil).OnAfterSessionBind), arg0)
 }
 
+// OnBindBackend mocks base method.
+func (m *MockSessionPool) OnBindBackend(arg0 func(context.Context, session.Session, string, string) error) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "OnBindBackend", arg0)
+}
+
+// OnBindBackend indicates an expected call of OnBindBackend.
+func (mr *MockSessionPoolMockRecorder) OnBindBackend(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnBindBackend", reflect.TypeOf((*MockSessionPool)(nil).OnBindBackend), arg0)
+}
+
+// OnKickBackend mocks base method.
+func (m *MockSessionPool) OnKickBackend(arg0 func(context.Context, session.Session, string, string, int) error) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "OnKickBackend", arg0)
+}
+
+// OnKickBackend indicates an expected call of OnKickBackend.
+func (mr *MockSessionPoolMockRecorder) OnKickBackend(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnKickBackend", reflect.TypeOf((*MockSessionPool)(nil).OnKickBackend), arg0)
+}
+
 // OnSessionBind mocks base method.
 func (m *MockSessionPool) OnSessionBind(arg0 func(context.Context, session.Session) error) {
 	m.ctrl.T.Helper()
@@ -752,7 +905,7 @@ func (mr *MockSessionPoolMockRecorder) OnSessionBind(arg0 interface{}) *gomock.C
 }
 
 // OnSessionClose mocks base method.
-func (m *MockSessionPool) OnSessionClose(arg0 func(session.Session)) {
+func (m *MockSessionPool) OnSessionClose(arg0 func(session.Session, int)) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "OnSessionClose", arg0)
 }
@@ -761,4 +914,42 @@ func (m *MockSessionPool) OnSessionClose(arg0 func(session.Session)) {
 func (mr *MockSessionPoolMockRecorder) OnSessionClose(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnSessionClose", reflect.TypeOf((*MockSessionPool)(nil).OnSessionClose), arg0)
+}
+
+// RemoveSessionLocal mocks base method.
+func (m *MockSessionPool) RemoveSessionLocal(arg0 session.Session) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "RemoveSessionLocal", arg0)
+}
+
+// RemoveSessionLocal indicates an expected call of RemoveSessionLocal.
+func (mr *MockSessionPoolMockRecorder) RemoveSessionLocal(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RemoveSessionLocal", reflect.TypeOf((*MockSessionPool)(nil).RemoveSessionLocal), arg0)
+}
+
+// SetClusterStorage mocks base method.
+func (m *MockSessionPool) SetClusterStorage(arg0 session.StorageInterface) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetClusterStorage", arg0)
+}
+
+// SetClusterStorage indicates an expected call of SetClusterStorage.
+func (mr *MockSessionPoolMockRecorder) SetClusterStorage(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetClusterStorage", reflect.TypeOf((*MockSessionPool)(nil).SetClusterStorage), arg0)
+}
+
+// StoreSessionLocal mocks base method.
+func (m *MockSessionPool) StoreSessionLocal(arg0 session.Session) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "StoreSessionLocal", arg0)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// StoreSessionLocal indicates an expected call of StoreSessionLocal.
+func (mr *MockSessionPoolMockRecorder) StoreSessionLocal(arg0 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StoreSessionLocal", reflect.TypeOf((*MockSessionPool)(nil).StoreSessionLocal), arg0)
 }

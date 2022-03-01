@@ -25,7 +25,6 @@ import (
 	"testing"
 
 	"github.com/golang/mock/gomock"
-	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/assert"
 	"github.com/topfreegames/pitaya/v2/cluster"
 	clustermocks "github.com/topfreegames/pitaya/v2/cluster/mocks"
@@ -41,12 +40,13 @@ import (
 	serializemocks "github.com/topfreegames/pitaya/v2/serialize/mocks"
 	"github.com/topfreegames/pitaya/v2/service"
 	sessionmocks "github.com/topfreegames/pitaya/v2/session/mocks"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestDoSendRPCNotInitialized(t *testing.T) {
 	config := config.NewDefaultBuilderConfig()
 	app := NewDefaultApp(true, "testtype", Standalone, map[string]string{}, *config).(*App)
-	err := app.doSendRPC(nil, "", "", nil, nil)
+	err := app.doSendRPC(nil, "", "", nil, nil, "")
 	assert.Equal(t, constants.ErrRPCServerNotInitialized, err)
 }
 

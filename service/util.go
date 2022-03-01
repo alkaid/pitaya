@@ -25,7 +25,6 @@ import (
 	"errors"
 	"reflect"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/topfreegames/pitaya/v2/component"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
@@ -38,6 +37,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/serialize"
 	"github.com/topfreegames/pitaya/v2/session"
 	"github.com/topfreegames/pitaya/v2/util"
+	"google.golang.org/protobuf/proto"
 )
 
 var errInvalidMsg = errors.New("invalid message type provided")

@@ -29,7 +29,6 @@ import (
 	"testing"
 
 	"github.com/golang/mock/gomock"
-	"github.com/golang/protobuf/proto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/topfreegames/pitaya/v2/component"
@@ -39,6 +38,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/protos"
 	"github.com/topfreegames/pitaya/v2/protos/test"
 	"github.com/topfreegames/pitaya/v2/serialize/mocks"
+	"google.golang.org/protobuf/proto"
 )
 
 var update = flag.Bool("update", false, "update .golden files")

@@ -22,7 +22,7 @@ package protobuf
 
 import (
 	"flag"
-	"github.com/golang/protobuf/proto"
+	"google.golang.org/protobuf/proto"
 	"testing"
 
 	"github.com/stretchr/testify/assert"

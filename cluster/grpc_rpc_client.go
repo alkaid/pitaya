@@ -149,6 +149,11 @@ func (gs *GRPCClient) Call(
 	return res, nil
 }
 
+// Fork not implemented RPCClient.Fork
+func (gs *GRPCClient) Fork(ctx context.Context, route *route.Route, session session.Session, msg *message.Message) error {
+	return constants.ErrNotImplemented
+}
+
 // Send not implemented in grpc client
 func (gs *GRPCClient) Send(uid string, d []byte) error {
 	return constants.ErrNotImplemented
@@ -257,6 +262,10 @@ func (gs *GRPCClient) RemoveServer(sv *Server) {
 		gs.clientMap.Delete(sv.ID)
 		logger.Log.Debugf("[grpc client] removed server %s", sv.ID)
 	}
+}
+
+func (gs *GRPCClient) ModifyServer(sv *Server, old *Server) {
+	//do nothing
 }
 
 // AfterInit runs after initialization

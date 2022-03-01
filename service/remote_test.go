@@ -28,7 +28,6 @@ import (
 	"testing"
 
 	"github.com/golang/mock/gomock"
-	"github.com/golang/protobuf/proto"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	agentmocks "github.com/topfreegames/pitaya/v2/agent/mocks"
@@ -48,6 +47,7 @@ import (
 	serializemocks "github.com/topfreegames/pitaya/v2/serialize/mocks"
 	"github.com/topfreegames/pitaya/v2/session"
 	sessionmocks "github.com/topfreegames/pitaya/v2/session/mocks"
+	"google.golang.org/protobuf/proto"
 )
 
 func (m *MyComp) Remote1(ctx context.Context, ss *test.SomeStruct) (*test.SomeStruct, error) {
@@ -535,7 +535,7 @@ func TestRemoteServiceRPC(t *testing.T) {
 				assert.NoError(t, err)
 				mockRPCClient.EXPECT().Call(ctx, protos.RPCType_User, rt, gomock.Any(), expectedMsg, gomock.Any()).Return(&protos.Response{Data: b}, table.err)
 			}
-			err := svc.RPC(ctx, table.serverID, rt, table.reply, table.arg)
+			err := svc.RPC(ctx, table.serverID, rt, table.reply, table.arg, nil)
 			assert.Equal(t, table.err, err)
 			if table.reply != nil {
 				assert.Equal(t, table.reply, expected)

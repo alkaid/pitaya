@@ -27,9 +27,14 @@ import (
 	"github.com/spf13/viper"
 )
 
+type ConfLoader interface {
+	Reload(conf *viper.Viper)
+}
+
 // Config is a wrapper around a viper config
 type Config struct {
-	config *viper.Viper
+	config  *viper.Viper
+	loaders []ConfLoader
 }
 
 // NewConfig creates a new config with a given viper config if given
@@ -66,6 +71,7 @@ func (c *Config) fillDefaultValues() {
 	rateLimitingConfig := NewDefaultRateLimitingConfig()
 	infoRetrieverConfig := NewDefaultInfoRetrieverConfig()
 	etcdBindingConfig := NewDefaultETCDBindingConfig()
+	redisConfig := NewDefaultRedisConfig()
 
 	defaultsMap := map[string]interface{}{
 		"pitaya.buffer.agent.messages": pitayaConfig.Buffer.Agent.Messages,
@@ -131,6 +137,7 @@ func (c *Config) fillDefaultValues() {
 		"pitaya.conn.ratelimiting.interval":                rateLimitingConfig.Interval,
 		"pitaya.conn.ratelimiting.forcedisable":            rateLimitingConfig.ForceDisable,
 		"pitaya.session.unique":                            pitayaConfig.Session.Unique,
+		"pitaya.session.cachettl":                          pitayaConfig.Session.CacheTTL,
 		"pitaya.worker.concurrency":                        workerConfig.Concurrency,
 		"pitaya.worker.redis.pool":                         workerConfig.Redis.Pool,
 		"pitaya.worker.redis.url":                          workerConfig.Redis.ServerURL,
@@ -140,6 +147,14 @@ func (c *Config) fillDefaultValues() {
 		"pitaya.worker.retry.maxDelay":                     enqueueOpts.MaxDelay,
 		"pitaya.worker.retry.maxRandom":                    enqueueOpts.MaxRandom,
 		"pitaya.worker.retry.minDelay":                     enqueueOpts.MinDelay,
+
+		"pitaya.storage.redis.addrs":    redisConfig.Addrs,
+		"pitaya.storage.redis.username": redisConfig.Username,
+		"pitaya.storage.redis.password": redisConfig.Password,
+		"pitaya.conf.filepath":          pitayaConfig.Conf.FilePath,
+		"pitaya.conf.etcdaddr":          pitayaConfig.Conf.EtcdAddr,
+		"pitaya.conf.etcdkeys":          pitayaConfig.Conf.EtcdKeys,
+		"pitaya.conf.interval":          pitayaConfig.Conf.Interval,
 	}
 
 	for param := range defaultsMap {
@@ -147,6 +162,44 @@ func (c *Config) fillDefaultValues() {
 			c.config.SetDefault(param, defaultsMap[param])
 		}
 	}
+}
+
+func (c *Config) AddLoader(loader ConfLoader) {
+	c.loaders = append(c.loaders, loader)
+}
+
+func (c *Config) Reload() {
+	for _, loader := range c.loaders {
+		loader.Reload(c.config)
+	}
+}
+
+func (c *Config) LoadAndWatch() {
+	fps := c.config.GetStringSlice("pitaya.conf.filepath")
+	if len(fps) > 0 {
+		for _, fp := range fps {
+			c.config.AddConfigPath(fp)
+		}
+		c.config.ReadInConfig()
+		c.config.WatchConfig()
+	}
+	addr := c.config.GetString("pitaya.conf.etcdaddr")
+	keys := c.config.GetStringSlice("pitaya.conf.etcdkeys")
+	if len(keys) > 0 && addr != "" {
+		for _, key := range keys {
+			c.config.AddRemoteProvider("etcd", addr, key)
+		}
+		c.config.ReadRemoteConfig()
+		c.config.WatchRemoteConfigOnChannel()
+	}
+	c.Reload()
+	go func() {
+		for {
+			interval := c.config.GetDuration("pitaya.conf.interval")
+			time.Sleep(interval)
+			c.Reload()
+		}
+	}()
 }
 
 // GetDuration returns a duration from the inner config

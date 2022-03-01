@@ -132,21 +132,25 @@ func (r *Room) Join(ctx context.Context) (*protos.JoinResponse, error) {
 	if err != nil {
 		logger.Error("Failed to join room")
 		logger.Error(err)
-		return nil, err
+		//return nil, err
 	}
 	members, err := r.app.GroupMembers(ctx, "room")
 	if err != nil {
 		logger.Error("Failed to get members")
 		logger.Error(err)
-		return nil, err
+		//return nil, err
 	}
 	s.Push("onMembers", &protos.AllMembers{Members: members})
 	err = r.app.GroupBroadcast(ctx, "connector", "room", "onNewUser", &protos.NewUser{Content: fmt.Sprintf("New user: %d", s.ID())})
 	if err != nil {
 		logger.Error("Failed to broadcast onNewUser")
 		logger.Error(err)
-		return nil, err
+		//return nil, err
 	}
+	s.OnClose(func() {
+		logger.Debug("on session close %v", s.UID())
+		r.app.GroupRemoveMember(ctx, "room", s.UID())
+	})
 	return &protos.JoinResponse{Result: "success"}, nil
 }
 

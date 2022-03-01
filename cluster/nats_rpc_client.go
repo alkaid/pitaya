@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/golang/protobuf/proto"
 	nats "github.com/nats-io/nats.go"
 	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/topfreegames/pitaya/v2/config"
@@ -39,6 +38,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/route"
 	"github.com/topfreegames/pitaya/v2/session"
 	"github.com/topfreegames/pitaya/v2/tracing"
+	"google.golang.org/protobuf/proto"
 )
 
 // NatsRPCClient struct
@@ -187,6 +187,11 @@ func (ns *NatsRPCClient) Call(
 
 	m, err = ns.conn.Request(getChannel(server.Type, server.ID), marshalledData, ns.reqTimeout)
 	if err != nil {
+		//针对超时封装一层error便于上层判断
+		if err == nats.ErrTimeout {
+			constants.ErrRPCTimeout.Wrap(err)
+			err = constants.ErrRPCTimeout
+		}
 		return nil, err
 	}
 
@@ -208,6 +213,51 @@ func (ns *NatsRPCClient) Call(
 		return nil, err
 	}
 	return res, nil
+}
+
+// Fork implement RPCClient.Fork
+func (ns *NatsRPCClient) Fork(
+	ctx context.Context,
+	route *route.Route,
+	session session.Session,
+	msg *message.Message,
+) error {
+	msg.Type = message.Notify
+	parent, err := tracing.ExtractSpan(ctx)
+	if err != nil {
+		logger.Log.Warnf("failed to retrieve parent span: %s", err.Error())
+	}
+	tags := opentracing.Tags{
+		"span.kind":       "client",
+		"local.id":        ns.server.ID,
+		"peer.serverType": "broadcast",
+		"peer.id":         "",
+	}
+	ctx = tracing.StartSpan(ctx, "NATS Fork", tags, parent)
+	defer tracing.FinishSpan(ctx, err)
+
+	if !ns.running {
+		err = constants.ErrRPCClientNotInitialized
+		return err
+	}
+	req, err := buildRequest(ctx, protos.RPCType_User, route, session, msg, ns.server)
+	if err != nil {
+		return err
+	}
+	marshalledData, err := proto.Marshal(&req)
+	if err != nil {
+		return err
+	}
+	if ns.metricsReporters != nil {
+		startTime := time.Now()
+		ctx = pcontext.AddToPropagateCtx(ctx, constants.StartTimeKey, startTime.UnixNano())
+		ctx = pcontext.AddToPropagateCtx(ctx, constants.RouteKey, route.String())
+		defer func() {
+			typ := "rpc"
+			metrics.ReportTimingFromCtx(ctx, ns.metricsReporters, typ, err)
+		}()
+	}
+	return ns.Send(GetForkTopic(route.SvType), marshalledData)
 }
 
 // Init inits nats rpc client

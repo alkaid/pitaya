@@ -28,7 +28,6 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
-	"github.com/golang/protobuf/proto"
 	"github.com/google/uuid"
 	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
@@ -42,6 +41,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/protos"
 	"github.com/topfreegames/pitaya/v2/route"
 	sessionmocks "github.com/topfreegames/pitaya/v2/session/mocks"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestNewNatsRPCClient(t *testing.T) {
@@ -350,6 +350,11 @@ func TestNatsRPCClientBuildRequest(t *testing.T) {
 					Type:  protos.MsgType_MsgRequest,
 				},
 				FrontendID: "",
+				Session: &protos.Session{
+					Id:   sessionID,
+					Uid:  uid,
+					Data: data2,
+				},
 			},
 		},
 		{
@@ -383,6 +388,11 @@ func TestNatsRPCClientBuildRequest(t *testing.T) {
 					Id:    0,
 				},
 				FrontendID: "",
+				Session: &protos.Session{
+					Id:   sessionID,
+					Uid:  uid,
+					Data: data2,
+				},
 			},
 		},
 	}
@@ -391,20 +401,20 @@ func TestNatsRPCClientBuildRequest(t *testing.T) {
 			ctrl := gomock.NewController(t)
 
 			ss := sessionmocks.NewMockSession(ctrl)
-			time := 1
-			if table.expected.Type == protos.RPCType_User {
-				time = 0
+			ss.EXPECT().ID().Return(sessionID)
+			ss.EXPECT().UID().Return(uid)
+			ss.EXPECT().GetDataEncoded().Return(data2)
+			if table.frontendServer {
+				ss.EXPECT().SetFrontendData(gomock.Any(), gomock.Any())
+				ss.EXPECT().ID().Return(sessionID)
 			}
-			ss.EXPECT().ID().Return(sessionID).Times(time)
-			ss.EXPECT().UID().Return(uid).Times(time)
-			ss.EXPECT().GetDataEncoded().Return(data2).Times(time)
 
 			rpcClient.server.Frontend = table.frontendServer
 			req, err := buildRequest(context.Background(), table.rpcType, table.route, ss, table.msg, rpcClient.server)
 			assert.NoError(t, err)
 			assert.NotNil(t, req.Metadata)
 			req.Metadata = nil
-			assert.Equal(t, table.expected, req)
+			assert.True(t, proto.Equal(&table.expected, &req))
 		})
 	}
 }
@@ -483,9 +493,13 @@ func TestNatsRPCClientCall(t *testing.T) {
 			time.Sleep(50 * time.Millisecond)
 
 			ss := sessionmocks.NewMockSession(ctrl)
-			ss.EXPECT().ID().Return(sessionID).Times(1)
-			ss.EXPECT().UID().Return(uid).Times(1)
-			ss.EXPECT().GetDataEncoded().Return(data2).Times(1)
+			ss.EXPECT().ID().Return(sessionID)
+			ss.EXPECT().UID().Return(uid)
+			ss.EXPECT().GetDataEncoded().Return(data2)
+			if sv2.Frontend {
+				ss.EXPECT().SetFrontendData(gomock.Any(), gomock.Any())
+				ss.EXPECT().ID().Return(sessionID)
+			}
 
 			res, err := rpcClient.Call(context.Background(), protos.RPCType_Sys, rt, ss, msg, sv2)
 			if table.msgType == message.Notify {
@@ -496,6 +510,83 @@ func TestNatsRPCClientCall(t *testing.T) {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), table.err.Error())
 			}
+			err = subs.Unsubscribe()
+			assert.NoError(t, err)
+			conn.Close()
+		})
+	}
+}
+
+func TestNatsRPCClientBroadcast(t *testing.T) {
+	s := helpers.GetTestNatsServer(t)
+	sv := getServer()
+	defer s.Shutdown()
+	cfg := config.NewDefaultNatsRPCClientConfig()
+	cfg.Connect = fmt.Sprintf("nats://%s", s.Addr())
+	cfg.RequestTimeout = time.Duration(300 * time.Millisecond)
+	rpcClient, _ := NewNatsRPCClient(*cfg, sv, nil, nil)
+	rpcClient.Init()
+
+	rt := route.NewRoute("sv", "svc", "method")
+
+	sessionID := int64(1)
+	uid := "uid"
+	data2 := []byte("data2")
+
+	msg := &message.Message{
+		Type: message.Request,
+		ID:   uint(123),
+		Data: []byte("data"),
+	}
+
+	tables := []struct {
+		name       string
+		hasSession bool
+		isGlobal   bool
+		msgType    message.Type
+	}{
+		//非session全局广播
+		{"test_global", false, true, message.Request},
+		//带session非全局广播
+		{"test_session", true, false, message.Notify},
+		//非session非全局广播
+		{"test_no_session", false, false, message.Request},
+		//带session全局广播
+		{"test_global_session", true, true, message.Notify},
+	}
+
+	for _, table := range tables {
+		t.Run(table.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			conn, err := setupNatsConn(fmt.Sprintf("nats://%s", s.Addr()), nil)
+			assert.NoError(t, err)
+
+			sv2 := getServer()
+			sv2.Type = uuid.New().String()
+			sv2.ID = uuid.New().String()
+			msg.Type = table.msgType
+			if table.isGlobal {
+				rt.SvType = ""
+			}
+			subs, err := conn.Subscribe(GetForkTopic(rt.SvType, table.hasSession), func(m *nats.Msg) {
+				assert.Equal(t, msg.Data, m.Data)
+			})
+			assert.NoError(t, err)
+			// TODO this is ugly, can lead to flaky tests and we could probably do it better
+			time.Sleep(50 * time.Millisecond)
+
+			ss := sessionmocks.NewMockSession(ctrl)
+			ss.EXPECT().ID().Return(sessionID)
+			ss.EXPECT().UID().Return(uid)
+			ss.EXPECT().GetDataEncoded().Return(data2)
+			if sv2.Frontend {
+				ss.EXPECT().SetFrontendData(gomock.Any(), gomock.Any())
+				ss.EXPECT().ID().Return(sessionID)
+			}
+
+			err = rpcClient.Fork(context.Background(), rt, ss, msg)
+			assert.NoError(t, err)
+			assert.Equal(t, message.Notify, msg.Type)
 			err = subs.Unsubscribe()
 			assert.NoError(t, err)
 			conn.Close()

@@ -59,9 +59,12 @@ func TestCall(t *testing.T) {
 	r := route.NewRoute("sv", "svc", "meth")
 
 	sess := sessionmocks.NewMockSession(ctrl)
-	sess.EXPECT().ID().Return(int64(1)).Times(2)
-	sess.EXPECT().UID().Return(uid).Times(2)
-	sess.EXPECT().GetDataEncoded().Return(nil).Times(2)
+	//buildReuquest 2次
+	buildTime := 2
+	sess.EXPECT().ID().Return(int64(1)).MinTimes(buildTime).MaxTimes(buildTime * 2)
+	sess.EXPECT().UID().Return(uid).Times(buildTime)
+	sess.EXPECT().GetDataEncoded().Return(nil).Times(buildTime)
+	sess.EXPECT().SetFrontendData(gomock.Any(), gomock.Any()).MinTimes(0).MaxTimes(buildTime)
 
 	expected, err := buildRequest(ctx, rpcType, r, sess, msg, g.server)
 	assert.NoError(t, err)

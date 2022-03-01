@@ -25,13 +25,13 @@ import (
 	"fmt"
 	"time"
 
-	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/client/v3/namespace"
 	"github.com/topfreegames/pitaya/v2/cluster"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/constants"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/session"
+	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.etcd.io/etcd/client/v3/namespace"
 )
 
 // ETCDBindingStorage module that uses etcd to keep in which frontend server each user is bound
@@ -92,8 +92,8 @@ func (b *ETCDBindingStorage) GetUserFrontendID(uid, frontendType string) (string
 }
 
 func (b *ETCDBindingStorage) setupOnSessionCloseCB() {
-	b.sessionPool.OnSessionClose(func(s session.Session) {
-		if s.UID() != "" {
+	b.sessionPool.OnSessionClose(func(s session.Session, reason session.CloseReason) {
+		if s.UID() != "" && reason != session.CloseReasonRebind {
 			err := b.removeBinding(s.UID())
 			if err != nil {
 				logger.Log.Errorf("error removing binding info from storage: %v", err)

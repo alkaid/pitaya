@@ -37,17 +37,21 @@ func (m *MockNetworkEntity) EXPECT() *MockNetworkEntityMockRecorder {
 }
 
 // Close mocks base method.
-func (m *MockNetworkEntity) Close() error {
+func (m *MockNetworkEntity) Close(arg0 ...int) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Close")
+	varargs := []interface{}{}
+	for _, a := range arg0 {
+		varargs = append(varargs, a)
+	}
+	ret := m.ctrl.Call(m, "Close", varargs...)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // Close indicates an expected call of Close.
-func (mr *MockNetworkEntityMockRecorder) Close() *gomock.Call {
+func (mr *MockNetworkEntityMockRecorder) Close(arg0 ...interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Close", reflect.TypeOf((*MockNetworkEntity)(nil).Close))
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Close", reflect.TypeOf((*MockNetworkEntity)(nil).Close), arg0...)
 }
 
 // Kick mocks base method.

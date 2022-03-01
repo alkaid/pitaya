@@ -26,7 +26,7 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/golang/protobuf/proto"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/topfreegames/pitaya/v2/agent"
 	"github.com/topfreegames/pitaya/v2/cluster"
@@ -50,6 +50,7 @@ import (
 // RemoteService struct
 type RemoteService struct {
 	baseService
+	protos.UnimplementedPitayaServer
 	rpcServer              cluster.RPCServer
 	serviceDiscovery       cluster.ServiceDiscovery
 	serializer             serialize.Serializer
@@ -58,11 +59,12 @@ type RemoteService struct {
 	services               map[string]*component.Service // all registered service
 	router                 *router.Router
 	messageEncoder         message.Encoder
-	server                 *cluster.Server // server obj
-	remoteBindingListeners []cluster.RemoteBindingListener
+	server                 *cluster.Server                 // server obj
+	remoteBindingListeners []cluster.RemoteSessionListener //绑定发生时的回调，内部使用，仅用于相同serverType间的广播
 	sessionPool            session.SessionPool
 	handlerPool            *HandlerPool
-	remotes                map[string]*component.Remote // all remote method
+	remotes                map[string]*component.Remote    // all remote method
+	remoteSessionListeners []cluster.RemoteSessionListener //session生命周期监听,这里只是代持,实际调用在 remote.Sys
 }
 
 // NewRemoteService creates and return a new RemoteService
@@ -89,10 +91,11 @@ func NewRemoteService(
 		router:                 router,
 		messageEncoder:         messageEncoder,
 		server:                 server,
-		remoteBindingListeners: make([]cluster.RemoteBindingListener, 0),
+		remoteBindingListeners: make([]cluster.RemoteSessionListener, 0),
 		sessionPool:            sessionPool,
 		handlerPool:            handlerPool,
 		remotes:                make(map[string]*component.Remote),
+		remoteSessionListeners: make([]cluster.RemoteSessionListener, 0),
 	}
 
 	remote.handlerHooks = handlerHooks
@@ -131,9 +134,21 @@ func (r *RemoteService) remoteProcess(
 	}
 }
 
-// AddRemoteBindingListener adds a listener
-func (r *RemoteService) AddRemoteBindingListener(bindingListener cluster.RemoteBindingListener) {
+// AddRemoteBindingListener 添加绑定发生时的回调，内部使用，仅用于相同serverType间的广播
+func (r *RemoteService) AddRemoteBindingListener(bindingListener cluster.RemoteSessionListener) {
 	r.remoteBindingListeners = append(r.remoteBindingListeners, bindingListener)
+}
+
+// AddRemoteSessionListener 添加session各个生命周期完成时的回调
+func (r *RemoteService) AddRemoteSessionListener(sessionListener cluster.RemoteSessionListener) {
+	r.remoteSessionListeners = append(r.remoteSessionListeners, sessionListener)
+}
+
+func (r *RemoteService) GetRemoteSessionListener() []cluster.RemoteSessionListener {
+	return r.remoteSessionListeners
+}
+func (r *RemoteService) GetRemoteBindingListener() []cluster.RemoteSessionListener {
+	return r.remoteBindingListeners
 }
 
 // Call processes a remote call
@@ -203,7 +218,7 @@ func (r *RemoteService) KickUser(ctx context.Context, kick *protos.KickMsg) (*pr
 }
 
 // DoRPC do rpc and get answer
-func (r *RemoteService) DoRPC(ctx context.Context, serverID string, route *route.Route, protoData []byte) (*protos.Response, error) {
+func (r *RemoteService) DoRPC(ctx context.Context, serverID string, route *route.Route, protoData []byte, session session.Session) (*protos.Response, error) {
 	msg := &message.Message{
 		Type:  message.Request,
 		Route: route.Short(),
@@ -211,7 +226,7 @@ func (r *RemoteService) DoRPC(ctx context.Context, serverID string, route *route
 	}
 
 	if serverID == "" {
-		return r.remoteCall(ctx, nil, protos.RPCType_User, route, nil, msg)
+		return r.remoteCall(ctx, nil, protos.RPCType_User, route, session, msg)
 	}
 
 	target, _ := r.serviceDiscovery.GetServer(serverID)
@@ -219,11 +234,11 @@ func (r *RemoteService) DoRPC(ctx context.Context, serverID string, route *route
 		return nil, constants.ErrServerNotFound
 	}
 
-	return r.remoteCall(ctx, target, protos.RPCType_User, route, nil, msg)
+	return r.remoteCall(ctx, target, protos.RPCType_User, route, session, msg)
 }
 
 // DoNotify only support nats,don't use grpc.(copy then modify from DoRPC)
-func (r *RemoteService) DoNotify(ctx context.Context, serverID string, route *route.Route, protoData []byte) error {
+func (r *RemoteService) DoNotify(ctx context.Context, serverID string, route *route.Route, protoData []byte, session session.Session) error {
 	msg := &message.Message{
 		Type:  message.Notify,
 		Route: route.Short(),
@@ -231,7 +246,7 @@ func (r *RemoteService) DoNotify(ctx context.Context, serverID string, route *ro
 	}
 
 	if serverID == "" {
-		_, err := r.remoteCall(ctx, nil, protos.RPCType_User, route, nil, msg)
+		_, err := r.remoteCall(ctx, nil, protos.RPCType_User, route, session, msg)
 		return err
 	}
 
@@ -240,12 +255,27 @@ func (r *RemoteService) DoNotify(ctx context.Context, serverID string, route *ro
 		return constants.ErrServerNotFound
 	}
 
-	_, err := r.remoteCall(ctx, target, protos.RPCType_User, route, nil, msg)
+	_, err := r.remoteCall(ctx, target, protos.RPCType_User, route, session, msg)
 	return err
 }
 
+// DoFork only support nats,don't use grpc.(copy then modify from DoRPC)
+func (r *RemoteService) DoFork(ctx context.Context, route *route.Route, protoData []byte, session session.Session) error {
+	msg := &message.Message{
+		Type:  message.Notify,
+		Route: route.Short(),
+		Data:  protoData,
+	}
+	err := r.rpcClient.Fork(ctx, route, session, msg)
+	if err != nil {
+		logger.Log.Errorf("error making broadcast to target with route %s: %w", route.String(), err)
+		return err
+	}
+	return nil
+}
+
 // RPC makes rpcs
-func (r *RemoteService) RPC(ctx context.Context, serverID string, route *route.Route, reply proto.Message, arg proto.Message) error {
+func (r *RemoteService) RPC(ctx context.Context, serverID string, route *route.Route, reply proto.Message, arg proto.Message, session session.Session) error {
 	var data []byte
 	var err error
 	if arg != nil {
@@ -254,7 +284,7 @@ func (r *RemoteService) RPC(ctx context.Context, serverID string, route *route.R
 			return err
 		}
 	}
-	res, err := r.DoRPC(ctx, serverID, route, data)
+	res, err := r.DoRPC(ctx, serverID, route, data, session)
 	if err != nil {
 		return err
 	}
@@ -277,7 +307,7 @@ func (r *RemoteService) RPC(ctx context.Context, serverID string, route *route.R
 }
 
 // Notify only support nats,don't use grpc.(copy then modify from RPC)
-func (r *RemoteService) Notify(ctx context.Context, serverID string, route *route.Route, arg proto.Message) error {
+func (r *RemoteService) Notify(ctx context.Context, serverID string, ro *route.Route, arg proto.Message, session session.Session) error {
 	var data []byte
 	var err error
 	if arg != nil {
@@ -286,7 +316,34 @@ func (r *RemoteService) Notify(ctx context.Context, serverID string, route *rout
 			return err
 		}
 	}
-	err = r.DoNotify(ctx, serverID, route, data)
+	//服务器为空 全局广播(每种服务器只有一个实例消费)
+	if ro.SvType == "" && serverID == "" {
+		for _, server := range r.serviceDiscovery.GetServerTypes() {
+			newRoute, err := route.Decode(server.Type + "." + ro.Short())
+			if err != nil {
+				return err
+			}
+			r.DoNotify(ctx, "", newRoute, data, session)
+		}
+	} else {
+		err = r.DoNotify(ctx, serverID, ro, data, session)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *RemoteService) Fork(ctx context.Context, ro *route.Route, arg proto.Message, session session.Session) error {
+	var data []byte
+	var err error
+	if arg != nil {
+		data, err = proto.Marshal(arg)
+		if err != nil {
+			return err
+		}
+	}
+	err = r.DoFork(ctx, ro, data, session)
 	if err != nil {
 		return err
 	}
@@ -333,7 +390,13 @@ func processRemoteMessage(ctx context.Context, req *protos.Request, r *RemoteSer
 	case req.Type == protos.RPCType_Sys:
 		return r.handleRPCSys(ctx, req, rt)
 	case req.Type == protos.RPCType_User:
-		return r.handleRPCUser(ctx, req, rt)
+		//原逻辑是只调用handleRPCUser,这里为了使得rpcClient.Call(uid)这种形式的rpc可用(主要是stateful backend调用)，
+		//这里改成判断有session则按sys类型处理,这样业务层context里就可以拿到session了.handleHooks也会调用
+		if req.Session == nil {
+			return r.handleRPCUser(ctx, req, rt)
+		} else {
+			return r.handleRPCSys(ctx, req, rt)
+		}
 	default:
 		return &protos.Response{
 			Error: &protos.Error{
@@ -484,7 +547,7 @@ func (r *RemoteService) remoteCall(
 	target := server
 
 	if target == nil {
-		target, err = r.router.Route(ctx, rpcType, svType, route, msg)
+		target, err = r.router.Route(ctx, rpcType, svType, route, msg, session)
 		if err != nil {
 			return nil, e.NewError(err, e.ErrInternalCode)
 		}

@@ -22,6 +22,7 @@ package errors
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/google/uuid"
@@ -142,6 +143,87 @@ func TestCodeFromError(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			code := CodeFromError(table.err)
 			assert.Equal(t, table.code, code)
+		})
+	}
+}
+
+func TestWrap(t *testing.T) {
+	t.Parallel()
+
+	const code = "code"
+	const msg = "msg"
+	err1 := errors.New(uuid.New().String())
+	err2 := Wrap(err1, "code2", "msg2")
+	err3 := fmt.Errorf("code3:%w", err2)
+
+	type (
+		input struct {
+			err      error
+			code     string
+			msg      string
+			metadata map[string]string
+		}
+
+		expected struct {
+			code     string
+			msg      string
+			metadata map[string]string
+			isTarget error
+			is       bool
+			asTarget interface{}
+			as       bool
+		}
+	)
+
+	tables := []struct {
+		name     string
+		input    input
+		expected expected
+	}{
+		{"level1",
+			input{err: err1, code: code, msg: msg, metadata: nil},
+			expected{code: code, msg: msg, metadata: nil, isTarget: err1, is: true, asTarget: err1, as: true},
+		},
+		{"level2-cmperr1",
+			input{err: err2, code: code, metadata: map[string]string{}},
+			expected{code: code, metadata: map[string]string{}, isTarget: err1, is: true, asTarget: err1, as: true},
+		},
+		{"level2-cmperr2",
+			input{err: err2, code: code, metadata: map[string]string{}},
+			expected{code: code, metadata: map[string]string{}, isTarget: err2, is: true, asTarget: err2, as: true},
+		},
+		{"level3-cmperr1",
+			input{err: err3, code: code, metadata: map[string]string{}},
+			expected{code: code, metadata: map[string]string{}, isTarget: err1, is: true, asTarget: err1, as: true},
+		},
+		{"level3-cmperr2",
+			input{err: err3, code: code, metadata: map[string]string{}},
+			expected{code: code, metadata: map[string]string{}, isTarget: err2, is: true, asTarget: err2, as: true},
+		},
+		{"level3-cmperr3",
+			input{err: err3, code: code, metadata: map[string]string{}},
+			expected{code: code, metadata: map[string]string{}, isTarget: err3, is: true, asTarget: err3, as: true},
+		},
+		{"level3-cmperrx",
+			input{err: err3, code: code, metadata: map[string]string{}},
+			expected{code: code, metadata: map[string]string{}, isTarget: errors.New(code), is: false, asTarget: errors.New(code), as: true},
+		},
+	}
+	for _, table := range tables {
+		t.Run(table.name, func(t *testing.T) {
+			var err *Error
+			if table.input.metadata != nil {
+				err = Wrap(table.input.err, table.input.code, table.input.msg, table.input.metadata)
+			} else {
+				err = Wrap(table.input.err, table.input.code, table.input.msg)
+			}
+			assert.NotNil(t, err)
+			assert.Equal(t, table.input.msg, err.Message)
+			assert.Equal(t, table.input.msg, err.Error())
+			assert.Equal(t, table.expected.code, err.Code)
+			assert.Equal(t, table.expected.metadata, err.Metadata)
+			assert.Equal(t, errors.Is(err, table.expected.isTarget), table.expected.is)
+			assert.Equal(t, errors.As(err, &table.expected.asTarget), table.expected.as)
 		})
 	}
 }

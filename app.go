@@ -22,6 +22,8 @@ package pitaya
 
 import (
 	"context"
+	"github.com/go-redis/redis/v8"
+	"github.com/topfreegames/pitaya/v2/log"
 	"os"
 	"os/signal"
 	"reflect"
@@ -30,7 +32,6 @@ import (
 
 	"time"
 
-	"github.com/golang/protobuf/proto"
 	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/topfreegames/pitaya/v2/acceptor"
 	"github.com/topfreegames/pitaya/v2/cluster"
@@ -55,6 +56,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/timer"
 	"github.com/topfreegames/pitaya/v2/tracing"
 	"github.com/topfreegames/pitaya/v2/worker"
+	"google.golang.org/protobuf/proto"
 )
 
 // ServerMode represents a server mode
@@ -78,7 +80,22 @@ type Pitaya interface {
 	GetServer() *cluster.Server
 	GetServerByID(id string) (*cluster.Server, error)
 	GetServersByType(t string) (map[string]*cluster.Server, error)
+	//GetServerTypes 获得serverType列表,取每种serverType的第一个Server
+	//  @receiver sd
+	//  @return map[string]*Server 索引为serverType,元素为Server
+	GetServerTypes() map[string]*cluster.Server
 	GetServers() []*cluster.Server
+	//FlushServer2Cluster 将修改后的server数据保存到云端(etcd)
+	//  @param server
+	//  @return error
+	FlushServer2Cluster(server *cluster.Server) error
+	//AddServerDiscoveryListener 添加服务发现中服务的生命周期监听
+	//  @receiver app
+	//  @param listener
+	AddServerDiscoveryListener(listener cluster.SDListener)
+	//AddConfLoader 添加配置重载回调
+	//  @param loader
+	AddConfLoader(loader config.ConfLoader)
 	GetSessionFromCtx(ctx context.Context) session.Session
 	Start()
 	SetDictionary(dict map[string]uint16) error
@@ -88,12 +105,47 @@ type Pitaya interface {
 	RegisterRPCJob(rpcJob worker.RPCJob) error
 	Documentation(getPtrNames bool) (map[string]interface{}, error)
 	IsRunning() bool
-
-	//Notify calls a method in a different server not waitting for response
-	Notify(ctx context.Context, routeStr string, arg proto.Message) error
-	// NotifyTo send a rpc to a specific server not waitting for response
+	//GetRedis 获取redis客户端
+	//  @return redis.Cmdable
+	GetRedis() redis.Cmdable
+	//AddSessionListener 添加session状态监听
+	//  @param listener
+	AddSessionListener(listener cluster.RemoteSessionListener)
+	//Notify 通知其他服务,无阻塞,无返回值。如果session绑定了backend,则会路由到持有session引用的backend
+	//  @param ctx
+	//  @param routeStr
+	//  @param arg
+	//  @param uid 若不为空会携带session数据
+	//  @return error
+	Notify(ctx context.Context, routeStr string, arg proto.Message, uid string) error
+	//NotifyTo 通知指定服务,无阻塞,无返回值
+	//  @param ctx
+	//  @param serverID
+	//  @param routeStr
+	//  @param arg
+	//  @return error
 	NotifyTo(ctx context.Context, serverID, routeStr string, arg proto.Message) error
-	RPC(ctx context.Context, routeStr string, reply proto.Message, arg proto.Message) error
+	//NotifyAll 通知集群内所有服务，每种服务只有一个实例消费
+	//  @param ctx
+	//  @param routeStr 不能带有serverType,否则报错
+	//  @param arg
+	//  @param uid
+	//  @return error
+	NotifyAll(ctx context.Context, routeStr string, arg proto.Message, uid string) error
+	//Fork rpc调用同一类服务的所有实例,非阻塞.一般来说仅适用于目标服务为stateful类型时
+	//  @param ctx
+	//  @param routeStr
+	//  @param arg
+	//  @param uid 若不为空会携带session数据
+	Fork(ctx context.Context, routeStr string, arg proto.Message, uid string) error
+	//RPC 根据route调用remote,会阻塞等待 reply 。如果uid不为空且目标服务器是stateful,则会路由到持有session引用的服
+	//  @param ctx
+	//  @param routeStr
+	//  @param reply
+	//  @param arg
+	//  @param uid 若不为空会携带session数据
+	//  @return error
+	RPC(ctx context.Context, routeStr string, reply proto.Message, arg proto.Message, uid string) error
 	RPCTo(ctx context.Context, serverID, routeStr string, reply proto.Message, arg proto.Message) error
 	ReliableRPC(
 		routeStr string,
@@ -138,7 +190,6 @@ type App struct {
 	debug            bool
 	dieChan          chan bool
 	heartbeat        time.Duration
-	onSessionBind    func(session.Session)
 	router           *router.Router
 	rpcClient        cluster.RPCClient
 	rpcServer        cluster.RPCServer
@@ -158,6 +209,8 @@ type App struct {
 	modulesArr       []moduleWrapper
 	groups           groups.GroupService
 	sessionPool      session.SessionPool
+	redis            redis.Cmdable
+	conf             *config.Config
 }
 
 // NewApp is the base constructor for a pitaya app instance
@@ -252,9 +305,44 @@ func (app *App) GetServersByType(t string) (map[string]*cluster.Server, error) {
 	return app.serviceDiscovery.GetServersByType(t)
 }
 
+//GetServerTypes
+//  @implement App.GetServerTypes
+func (app *App) GetServerTypes() map[string]*cluster.Server {
+	return app.serviceDiscovery.GetServerTypes()
+}
+
 // GetServers get all servers
 func (app *App) GetServers() []*cluster.Server {
 	return app.serviceDiscovery.GetServers()
+}
+
+//FlushServer2Cluster
+//  @implement Pitaya.FlushServer2Cluster
+//  @receiver app
+//  @param server
+//  @return error
+func (app *App) FlushServer2Cluster(server *cluster.Server) error {
+	return app.serviceDiscovery.FlushServer2Cluster(server)
+}
+
+//AddServerDiscoveryListener
+//  @implement Pitaya.AddServerDiscoveryListener
+//  @receiver app
+//  @param listener
+func (app *App) AddServerDiscoveryListener(listener cluster.SDListener) {
+	app.serviceDiscovery.AddListener(listener)
+}
+
+//AddConfLoader
+//  @implement Pitaya.AddConfLoader
+//  @receiver app
+//  @param loader
+func (app *App) AddConfLoader(loader config.ConfLoader) {
+	if app.conf == nil {
+		log.Log.Error("app conf is nil!")
+		return
+	}
+	app.conf.AddLoader(loader)
 }
 
 // IsRunning indicates if the Pitaya app has been initialized. Note: This
@@ -264,13 +352,24 @@ func (app *App) IsRunning() bool {
 	return app.running
 }
 
+func (app *App) SetRedis(client redis.Cmdable) {
+	app.redis = client
+}
+func (app *App) GetRedis() redis.Cmdable {
+	return app.redis
+}
+
+func (app *App) AddSessionListener(listener cluster.RemoteSessionListener) {
+	app.remoteService.AddRemoteSessionListener(listener)
+}
+
 // SetLogger logger setter
 func SetLogger(l logging.Logger) {
 	logger.Log = l
 }
 
 func (app *App) initSysRemotes() {
-	sys := remote.NewSys(app.sessionPool)
+	sys := remote.NewSys(app.sessionPool, app.server, app.serviceDiscovery, app.rpcClient, app.remoteService)
 	app.RegisterRemote(sys,
 		component.WithName("sys"),
 		component.WithNameFunc(strings.ToLower),
@@ -368,7 +467,7 @@ func (app *App) listen() {
 		logger.Log.Infof("listening with acceptor %s on addr %s", reflect.TypeOf(a), a.GetAddr())
 	}
 
-	if app.serverMode == Cluster && app.server.Frontend && app.config.Session.Unique {
+	if app.serverMode == Cluster && app.config.Session.Unique {
 		unique := mods.NewUniqueSession(app.server, app.rpcServer, app.rpcClient, app.sessionPool)
 		app.remoteService.AddRemoteBindingListener(unique)
 		app.RegisterModule(unique, "uniqueSession")

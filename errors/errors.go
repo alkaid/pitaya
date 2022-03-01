@@ -20,6 +20,8 @@
 
 package errors
 
+import "errors"
+
 // ErrUnknownCode is a string code representing an unknown error
 // This will be used when no error code is sent by the handler
 const ErrUnknownCode = "PIT-000"
@@ -38,12 +40,80 @@ const ErrClientClosedRequest = "PIT-499"
 
 // Error is an error with a code, message and metadata
 type Error struct {
+	err      error
 	Code     string
 	Message  string
 	Metadata map[string]string
 }
 
-//NewError ctor
+var Is = errors.Is
+var As = errors.As
+
+func New(code string, msg string, metadata ...map[string]string) *Error {
+	e := &Error{
+		Code:    code,
+		Message: msg,
+	}
+	if len(metadata) > 0 {
+		e.Metadata = metadata[0]
+	}
+	return e
+}
+
+//Wrap 将 err 作为底层 error,若底层 error 已存在则覆盖
+//  @receiver e
+//  @param err
+func (e *Error) Wrap(err error) {
+	e.err = err
+}
+
+//Wrap 包装error
+//  @param err 原error
+//  @param code 业务code
+//  @param msg
+//  @param metadata
+//  @return *Error
+func Wrap(err error, code string, msg string, metadata ...map[string]string) *Error {
+	e := &Error{
+		Code:    code,
+		Message: msg,
+		err:     err,
+	}
+	if len(metadata) > 0 {
+		e.Metadata = metadata[0]
+	}
+	if pitayaErr, ok := err.(*Error); ok {
+		if len(pitayaErr.Metadata) > 0 {
+			mergeMetadatas(e, pitayaErr.Metadata)
+		}
+	}
+	return e
+}
+
+//WithCode Wrap with code 使用err的Message作为wrapped的Message
+//  @param err
+//  @param code
+//  @return *Error
+func WithCode(err error, code string) *Error {
+	return Wrap(err, code, err.Error())
+}
+
+//WithMessage wrap with message 使用err的Code作为wrapped的Code
+//  @param err
+//  @param msg
+//  @return *Error
+func WithMessage(err error, msg string) *Error {
+	code := ErrUnknownCode
+	if pitayaErr, ok := err.(*Error); ok {
+		code = pitayaErr.Code
+	}
+	return Wrap(err, code, msg)
+}
+
+//NewError
+// 用err新建 Error. 和 Wrap 不同, NewError 不会包装原 err ,只会使用 err.Error()来作为自己的Error()输出
+//
+// Deprecated: use Wrap instead
 func NewError(err error, code string, metadata ...map[string]string) *Error {
 	if pitayaErr, ok := err.(*Error); ok {
 		if len(metadata) > 0 {
@@ -63,8 +133,20 @@ func NewError(err error, code string, metadata ...map[string]string) *Error {
 
 }
 
+//Error
+//  @implement go builtin error.Error
+//  @receiver e
+//  @return string
 func (e *Error) Error() string {
 	return e.Message
+}
+
+//Unwrap implement Unwrap to use errors.Is & errors.As
+//  @implement go builtin errors/wrap.go Unwrap
+//  @receiver e
+//  @return error
+func (e *Error) Unwrap() error {
+	return e.err
 }
 
 func mergeMetadatas(pitayaErr *Error, metadata map[string]string) {

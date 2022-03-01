@@ -24,6 +24,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/topfreegames/pitaya/v2/session"
 	"net"
 	"os"
 	"reflect"
@@ -179,19 +180,19 @@ func TestAddRoute(t *testing.T) {
 	builderConfig := config.NewDefaultBuilderConfig()
 	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
 	app.router = nil
-	err := app.AddRoute("somesv", func(ctx context.Context, route *route.Route, payload []byte, servers map[string]*cluster.Server) (*cluster.Server, error) {
+	err := app.AddRoute("somesv", func(ctx context.Context, route *route.Route, payload []byte, servers map[string]*cluster.Server, session session.Session) (*cluster.Server, error) {
 		return nil, nil
 	})
 	assert.EqualError(t, constants.ErrRouterNotInitialized, err.Error())
 
 	app.router = router.New()
-	err = app.AddRoute("somesv", func(ctx context.Context, route *route.Route, payload []byte, servers map[string]*cluster.Server) (*cluster.Server, error) {
+	err = app.AddRoute("somesv", func(ctx context.Context, route *route.Route, payload []byte, servers map[string]*cluster.Server, session session.Session) (*cluster.Server, error) {
 		return nil, nil
 	})
 	assert.NoError(t, err)
 
 	app.running = true
-	err = app.AddRoute("somesv", func(ctx context.Context, route *route.Route, payload []byte, servers map[string]*cluster.Server) (*cluster.Server, error) {
+	err = app.AddRoute("somesv", func(ctx context.Context, route *route.Route, payload []byte, servers map[string]*cluster.Server, session session.Session) (*cluster.Server, error) {
 		return nil, nil
 	})
 	assert.EqualError(t, constants.ErrChangeRouteWhileRunning, err.Error())
@@ -479,6 +480,24 @@ func TestDocumentation(t *testing.T) {
 					"error",
 				},
 			},
+			"testtype.sys.bindbackendsession": map[string]interface{}{
+				"input": map[string]interface{}{
+					"uid":  "string",
+					"data": "[]byte",
+					"id":   "int64",
+				},
+				"output": []interface{}{
+					map[string]interface{}{
+						"error": map[string]interface{}{
+							"msg":      "string",
+							"code":     "string",
+							"metadata": "map[string]string",
+						},
+						"data": "[]byte",
+					},
+					"error",
+				},
+			},
 		},
 	}, doc)
 }
@@ -529,6 +548,29 @@ func TestDocumentationTrue(t *testing.T) {
 				},
 			},
 			"testtype.sys.pushsession": map[string]interface{}{
+				"input": map[string]interface{}{
+					"*protos.Session": map[string]interface{}{
+						"data": "[]byte",
+						"id":   "int64",
+						"uid":  "string",
+					},
+				},
+				"output": []interface{}{map[string]interface{}{
+					"*protos.Response": map[string]interface{}{
+						"data": "[]byte",
+						"error": map[string]interface{}{
+							"*protos.Error": map[string]interface{}{
+								"code":     "string",
+								"metadata": "map[string]string",
+								"msg":      "string",
+							},
+						},
+					},
+				},
+					"error",
+				},
+			},
+			"testtype.sys.bindbackendsession": map[string]interface{}{
 				"input": map[string]interface{}{
 					"*protos.Session": map[string]interface{}{
 						"data": "[]byte",

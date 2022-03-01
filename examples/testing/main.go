@@ -25,6 +25,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/topfreegames/pitaya/v2/logger"
+	"github.com/topfreegames/pitaya/v2/logger/interfaces"
+	"github.com/topfreegames/pitaya/v2/logger/zapw"
+	"go.uber.org/zap"
 	"strings"
 
 	"github.com/google/uuid"
@@ -38,7 +42,6 @@ import (
 	"github.com/topfreegames/pitaya/v2/constants"
 	"github.com/topfreegames/pitaya/v2/examples/testing/protos"
 	"github.com/topfreegames/pitaya/v2/groups"
-	logruswrapper "github.com/topfreegames/pitaya/v2/logger/logrus"
 	"github.com/topfreegames/pitaya/v2/modules"
 	"github.com/topfreegames/pitaya/v2/protos/test"
 	"github.com/topfreegames/pitaya/v2/serialize/json"
@@ -227,7 +230,7 @@ func (t *TestSvc) TestSendToUsers(ctx context.Context, msg *TestSendToUsers) {
 // TestSendRPC tests sending a RPC
 func (t *TestSvc) TestSendRPC(ctx context.Context, msg *TestRPCRequest) (*protos.TestResponse, error) {
 	rep := &protos.TestResponse{}
-	err := t.app.RPC(ctx, msg.Route, rep, &protos.TestRequest{Msg: msg.Data})
+	err := t.app.RPC(ctx, msg.Route, rep, &protos.TestRequest{Msg: msg.Data}, "")
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +240,7 @@ func (t *TestSvc) TestSendRPC(ctx context.Context, msg *TestRPCRequest) (*protos
 // TestSendRPCNoArgs tests sending a RPC
 func (t *TestSvc) TestSendRPCNoArgs(ctx context.Context, msg *TestRPCRequest) (*protos.TestResponse, error) {
 	rep := &protos.TestResponse{}
-	err := t.app.RPC(ctx, msg.Route, rep, nil)
+	err := t.app.RPC(ctx, msg.Route, rep, nil, "")
 	if err != nil {
 		return nil, err
 	}
@@ -255,21 +258,35 @@ func main() {
 	debug := flag.Bool("debug", false, "turn on debug logging")
 	grpc := flag.Bool("grpc", false, "turn on grpc")
 	grpcPort := flag.Int("grpcport", 3434, "the grpc server port")
+	natsurl := flag.String("natsurl", "nats://localhost:4222", "the nats server addr")
+	etcdurl := flag.String("etcdurl", "localhost:2379", "the etcd server addr")
+	redisurl := flag.String("redisurl", "localhost:6379", "the redis server addr")
 
 	flag.Parse()
 
+	etcdEndpoints := strings.Split(*etcdurl, ",")
+	redisAddrs := strings.Split(*redisurl, ",")
 	cfg := viper.New()
 	cfg.Set("pitaya.cluster.sd.etcd.prefix", *sdPrefix)
 	cfg.Set("pitaya.cluster.rpc.server.grpc.port", *grpcPort)
+	cfg.Set("pitaya.cluster.rpc.server.nats.connect", *natsurl)
+	cfg.Set("pitaya.cluster.rpc.client.nats.connect", *natsurl)
+	cfg.Set("pitaya.cluster.sd.etcd.endpoints", etcdEndpoints)
+	cfg.Set("pitaya.groups.etcd.endpoints", etcdEndpoints)
+	cfg.Set("pitaya.modules.bindingstorage.etcd.endpoints", etcdEndpoints)
+	cfg.Set("pitaya.storage.redis.addrs", redisAddrs)
+	cfg.Set("pitaya.worker.redis.url", redisAddrs)
 
 	l := logrus.New()
 	l.Formatter = &logrus.TextFormatter{}
 	l.SetLevel(logrus.InfoLevel)
 	if *debug {
 		l.SetLevel(logrus.DebugLevel)
+		pitaya.SetLogger(zapw.New(zap.NewDevelopmentConfig()))
 	}
-
-	pitaya.SetLogger(logruswrapper.NewWithFieldLogger(l))
+	pitaya.SetLogger(zapw.New(zap.NewDevelopmentConfig()))
+	logger.SetLevel(interfaces.DebugLevel)
+	//pitaya.SetLogger(logruswrapper.NewWithFieldLogger(l))
 
 	app, bs, sessionPool := createApp(*serializer, *port, *grpc, *isFrontend, *svType, pitaya.Cluster, map[string]string{
 		constants.GRPCHostKey: "127.0.0.1",

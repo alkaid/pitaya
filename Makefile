@@ -1,7 +1,11 @@
 TESTABLE_PACKAGES = `go list ./... | grep -v examples | grep -v constants | grep -v mocks | grep -v helpers | grep -v interfaces | grep -v protos | grep -v e2e | grep -v benchmark`
 
+init-toolchain:
+	#download protoc  url=https://github.com/protocolbuffers/protobuf/releases  then add bin to PATH
+	@go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
 setup: init-submodules
-	@go get ./...
+	@go mod tidy
 
 init-submodules:
 	@git submodule init
@@ -52,10 +56,15 @@ run-rate-limiting-example:
 
 protos-compile-demo:
 	@protoc -I examples/demo/protos examples/demo/protos/*.proto --go_out=.
+	@protoc -I examples/testing/protos examples/testing/protos/*.proto --go_out=.
+	@protoc -I examples/demo/cluster_protobuf/protos examples/demo/cluster_protobuf/protos/*.proto --go_out=.
+	@protoc -I examples/demo/worker/protos examples/demo/worker/protos/*.proto --go_out=.
+	@#protoc -I examples/demo/cluster_ak/protos examples/demo/cluster_ak/protos/*.proto --go_out=.
 
 protos-compile:
 	@cd benchmark/testdata && ./gen_proto.sh
-	@protoc -I pitaya-protos/ pitaya-protos/*.proto --go_out=plugins=grpc:protos
+	@protoc -I pitaya-protos/ pitaya-protos/*.proto --go_out=protos
+	@protoc -I pitaya-protos/ pitaya-protos/*.proto --go-grpc_out=protos
 	@protoc -I pitaya-protos/test pitaya-protos/test/*.proto --go_out=protos/test
 
 rm-test-temp-files:
@@ -141,7 +150,7 @@ test-coverage-func coverage-func: test-coverage merge-profiles
 	@echo "\033[1;34m=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\033[0m"
 	@go tool cover -func=coverage-all.out | egrep -v "100.0[%]"
 
-mocks: agent-mock session-mock networkentity-mock pitaya-mock serializer-mock acceptor-mock
+mocks: agent-mock session-mock networkentity-mock pitaya-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock
 
 agent-mock:
 	@mockgen github.com/topfreegames/pitaya/v2/agent Agent,AgentFactory | sed 's/mock_agent/mocks/' > agent/mocks/agent.go
@@ -166,3 +175,18 @@ message-mock:
 
 protos-client-mock:
 	@mockgen github.com/topfreegames/pitaya/v2/protos PitayaClient,PitayaServer  | sed 's/mock_protos/mocks/' > protos/mocks/pitaya.go
+
+cluster-mock:
+	@mockgen -source=cluster/cluster.go | sed 's/mock_cluster/mocks/' > cluster/mocks/cluster.go
+
+discovery-mock:
+	@mockgen -source=cluster/service_discovery.go | sed 's/mock_cluster/mocks/' > cluster/mocks/service_discovery.go
+
+build-dev-image:
+	@docker build . -f dev.Dockerfile -t pitaya-dev:latest --build-arg GOPROXY=https://goproxy.io,direct --build-arg GOPRIVATE=git.mycompany.com,github.com/my/private
+
+ensure-dev-image-exists:
+	@docker images | grep pitaya-dev || make build-dev-image
+
+test-many-clients-in-container:ensure-dev-image-exists
+	@docker run pitaya-dev go test -v benchmark/benchmark_test.go -bench=CreateManyClients -benchmem -benchtime=50x

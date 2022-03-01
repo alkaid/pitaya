@@ -22,6 +22,7 @@ package router
 
 import (
 	"context"
+	"github.com/topfreegames/pitaya/v2/session"
 	"math/rand"
 	"time"
 
@@ -45,6 +46,7 @@ type RoutingFunc func(
 	route *route.Route,
 	payload []byte,
 	servers map[string]*cluster.Server,
+	session session.Session,
 ) (*cluster.Server, error)
 
 // New returns the router
@@ -59,9 +61,24 @@ func (r *Router) SetServiceDiscovery(sd cluster.ServiceDiscovery) {
 	r.serviceDiscovery = sd
 }
 
+//defaultRoute
+//
+//-目标服是stateless : 随机
+//-目标服是stateful:
+//	-payload with session: 路由到session绑定的backend
+//	-payload without session: 随机
 func (r *Router) defaultRoute(
+	svType string,
 	servers map[string]*cluster.Server,
-) *cluster.Server {
+	session session.Session,
+) (*cluster.Server, error) {
+	if session != nil {
+		bid := session.GetBackendID(svType)
+		if bid != "" {
+			return servers[bid], nil
+		}
+		return nil, constants.ErrNoServersAvailableOfType
+	}
 	srvList := make([]*cluster.Server, 0)
 	s := rand.NewSource(time.Now().Unix())
 	rnd := rand.New(s)
@@ -69,16 +86,22 @@ func (r *Router) defaultRoute(
 		srvList = append(srvList, v)
 	}
 	server := srvList[rnd.Intn(len(srvList))]
-	return server
+	return server, nil
 }
 
 // Route gets the right server to use in the call
+//
+//-目标服是stateless : 随机
+//-目标服是stateful:
+//	-payload with session: 路由到session绑定的backend
+//	-payload without session: 随机
 func (r *Router) Route(
 	ctx context.Context,
 	rpcType protos.RPCType,
 	svType string,
 	route *route.Route,
 	msg *message.Message,
+	session session.Session,
 ) (*cluster.Server, error) {
 	if r.serviceDiscovery == nil {
 		return nil, constants.ErrServiceDiscoveryNotInitialized
@@ -87,17 +110,21 @@ func (r *Router) Route(
 	if err != nil {
 		return nil, err
 	}
-	if rpcType == protos.RPCType_User {
-		server := r.defaultRoute(serversOfType)
-		return server, nil
-	}
+	//RPCType_Usser类型的route改成也允许使用自定义route
+	//if rpcType == protos.RPCType_User {
+	//	server := r.defaultRoute(serversOfType)
+	//	return server, nil
+	//}
 	routeFunc, ok := r.routesMap[svType]
 	if !ok {
 		logger.Log.Debugf("no specific route for svType: %s, using default route", svType)
-		server := r.defaultRoute(serversOfType)
+		server, err := r.defaultRoute(svType, serversOfType, session)
+		if err != nil {
+			return nil, err
+		}
 		return server, nil
 	}
-	return routeFunc(ctx, route, msg.Data, serversOfType)
+	return routeFunc(ctx, route, msg.Data, serversOfType, session)
 }
 
 // AddRoute adds a routing function to a server type

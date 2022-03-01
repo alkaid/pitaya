@@ -39,8 +39,26 @@ const (
 	// SessionBindRoute is the route used for binding session
 	SessionBindRoute = "sys.bindsession"
 
+	// SessionBoundRoute session成功绑定的路由
+	SessionBoundRoute = "sys.sessionbound"
+
 	// KickRoute is the route used for kicking an user
 	KickRoute = "sys.kick"
+
+	// SessionClosedRoute session关闭后的路由
+	SessionClosedRoute = "sys.sessionclosed"
+
+	// SessionBindBackendRoute is the route used for binding session with stateful backend
+	SessionBindBackendRoute = "sys.bindbackendsession"
+
+	//SessionBoundBackendRoute session成功绑定到stateful backend后的广播路由
+	SessionBoundBackendRoute = "sys.sessionboundbackend"
+
+	// KickBackendRoute is the route used for kicking an user from stateful backend
+	KickBackendRoute = "sys.kickbackend"
+
+	// SessionKickedBackendRoute session与stateful backend解绑后的路由
+	SessionKickedBackendRoute = "sys.sessionkickedbackend"
 )
 
 // SessionCtxKey is the context key where the session will be set

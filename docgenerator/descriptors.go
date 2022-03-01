@@ -1,17 +1,22 @@
 package docgenerator
 
 import (
-	"reflect"
+	"google.golang.org/protobuf/reflect/protoreflect"
 	"strings"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/topfreegames/pitaya/v2/constants"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/reflect/protoregistry"
 )
 
 // ProtoDescriptors returns the descriptor for a given message name or .proto file
 func ProtoDescriptors(protoName string) ([]byte, error) {
 	if strings.HasSuffix(protoName, ".proto") {
-		descriptor := proto.FileDescriptor(protoName)
+		desc, err := protoregistry.GlobalFiles.FindFileByPath(protoName)
+		if err != nil {
+			return nil, err
+		}
+		descriptor, _ := protodesc.ToFileDescriptorProto(desc).Descriptor()
 		if descriptor == nil {
 			return nil, constants.ErrProtodescriptor
 		}
@@ -21,20 +26,14 @@ func ProtoDescriptors(protoName string) ([]byte, error) {
 	if strings.HasPrefix(protoName, "types.") {
 		protoName = strings.Replace(protoName, "types.", "google.protobuf.", 1)
 	}
-	protoReflectTypePointer := proto.MessageType(protoName)
-	if protoReflectTypePointer == nil {
+	protoReflectTypePointer, err := protoregistry.GlobalTypes.FindMessageByName(protoreflect.FullName(protoName))
+	if err != nil {
+		return nil, err
+	}
+	protoReflectType := protoReflectTypePointer.Descriptor()
+	protoDescriptor, _ := protodesc.ToDescriptorProto(protoReflectType).Descriptor()
+	if protoDescriptor == nil {
 		return nil, constants.ErrProtodescriptor
 	}
-
-	protoReflectType := protoReflectTypePointer.Elem()
-	protoValue := reflect.New(protoReflectType)
-	descriptorMethod, ok := protoReflectTypePointer.MethodByName("Descriptor")
-	if !ok {
-		return nil, constants.ErrProtodescriptor
-	}
-
-	descriptorValue := descriptorMethod.Func.Call([]reflect.Value{protoValue})
-	protoDescriptor := descriptorValue[0].Bytes()
-
 	return protoDescriptor, nil
 }

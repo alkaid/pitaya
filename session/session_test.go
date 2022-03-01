@@ -32,7 +32,6 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
-	"github.com/golang/protobuf/proto"
 	"github.com/google/uuid"
 	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
@@ -40,6 +39,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/helpers"
 	"github.com/topfreegames/pitaya/v2/networkentity/mocks"
 	"github.com/topfreegames/pitaya/v2/protos"
+	"google.golang.org/protobuf/proto"
 )
 
 var update = flag.Bool("update", false, "update .golden files")

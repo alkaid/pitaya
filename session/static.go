@@ -28,9 +28,9 @@ func OnAfterSessionBind(f func(ctx context.Context, s Session) error) {
 }
 
 // OnSessionClose adds a method that will be called when every session closes
-func OnSessionClose(f func(s Session)) {
-	DefaultSessionPool.OnSessionClose(f)
-}
+//func OnSessionClose(f func(s Session)) {
+//	DefaultSessionPool.OnSessionClose(f)
+//}
 
 // CloseAll calls Close on all sessions
 func CloseAll() {

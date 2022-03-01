@@ -25,7 +25,6 @@ import (
 	"net"
 	"reflect"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/topfreegames/pitaya/v2/cluster"
 	"github.com/topfreegames/pitaya/v2/conn/codec"
 	"github.com/topfreegames/pitaya/v2/conn/message"
@@ -37,6 +36,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/serialize"
 	"github.com/topfreegames/pitaya/v2/session"
 	"github.com/topfreegames/pitaya/v2/util"
+	"google.golang.org/protobuf/proto"
 )
 
 // Remote corresponding to another server
@@ -151,7 +151,7 @@ func (a *Remote) ResponseMID(ctx context.Context, mid uint, v interface{}, isErr
 }
 
 // Close closes the remote
-func (a *Remote) Close() error { return nil }
+func (a *Remote) Close(reason ...session.CloseReason) error { return nil }
 
 // RemoteAddr returns the remote address of the user
 func (a *Remote) RemoteAddr() net.Addr { return nil }

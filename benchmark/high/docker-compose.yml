@@ -1,0 +1,76 @@
+version: '2'
+services:
+  nats:
+    image: nats
+    ports:
+      - "8222:8222"
+    command: "--cluster_name NATS --cluster nats://0.0.0.0:6222 --http_port 8222 "
+# nats test
+#  docker run --network nats --rm -it synadia/nats-box
+#  nats sub -s nats://nats:4222 hello &
+#  nats pub -s "nats://nats-1:4222" hello first
+#  nats pub -s "nats://nats-2:4222" hello second
+
+#  nats-1:
+#    image: nats
+#    command: "--cluster_name NATS --cluster nats://0.0.0.0:6222 --routes=nats://nats:6222"
+#    depends_on: ["nats"]
+#    networks: ["high-testing"]
+#  nats-2:
+#    image: nats
+#    command: "--cluster_name NATS --cluster nats://0.0.0.0:6222 --routes=nats://nats:6222"
+#    depends_on: ["nats"]
+#    networks: ["high-testing"]
+  etcd:
+    image: appcelerator/etcd
+#    ports:
+#      - "2379:2379"
+  redis:
+    image: redis
+    ports:
+      - "6379:6379"
+  netutils:
+    image: getsatheeshin/network-utils-image
+  pitaya-bench-frontend:
+    image: pitaya-dev
+    ports:
+      - "32222:32222"
+    depends_on:
+      - nats
+      - etcd
+      - redis
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    sysctls:
+      net.ipv4.ip_local_port_range: "1024 65515"
+      net.ipv4.tcp_abort_on_overflow: 1
+      net.ipv4.tcp_max_syn_backlog: 10000
+      net.core.somaxconn: 10000
+# 非安全选项,需要root权限,只能在宿主机上单独设置
+#      net.netfilter.nf_conntrack_max: 1048576
+    command: ./examples/testing/server -type connector -frontend=true -natsurl=nats://nats:4222 -etcdurl=etcd:2379 -redisurl=redis:6379 -debug=true
+  pitaya-bench-backend:
+    image: pitaya-dev
+    depends_on:
+      - nats
+      - etcd
+      - redis
+    command: ./examples/testing/server -type game -frontend=false -natsurl=nats://nats:4222 -etcdurl=etcd:2379 -redisurl=redis:6379
+  pitaya-bench-client:
+    image: pitaya-dev
+    scale: 3
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    sysctls:
+      net.ipv4.ip_local_port_range: "1024 65515"
+      net.ipv4.tcp_abort_on_overflow: 1
+      net.ipv4.tcp_max_syn_backlog: 10000
+      net.core.somaxconn: 10000
+    depends_on:
+      - pitaya-bench-frontend
+      - pitaya-bench-backend
+    command: go test -v benchmark/benchmark_test.go -bench=CreateManyClients -benchmem -host=pitaya-bench-frontend -port=32222 -benchtime=10000x

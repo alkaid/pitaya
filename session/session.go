@@ -23,43 +23,85 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"github.com/topfreegames/pitaya/v2/log"
 	"net"
 	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/golang/protobuf/proto"
 	nats "github.com/nats-io/nats.go"
 	"github.com/topfreegames/pitaya/v2/constants"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/networkentity"
 	"github.com/topfreegames/pitaya/v2/protos"
+	"google.golang.org/protobuf/proto"
+)
+
+const (
+	storageKeyPrefix   = "sess:"
+	fieldKeyFrontendID = "_fid"
+	fieldKeyBackends   = "_backends"
+	fieldKeyUID        = "_uid"
+)
+
+type CloseReason = int
+
+const (
+	CloseReasonNormal CloseReason = iota
+	CloseReasonRebind
 )
 
 type sessionPoolImpl struct {
 	sessionBindCallbacks []func(ctx context.Context, s Session) error
 	afterBindCallbacks   []func(ctx context.Context, s Session) error
 	// SessionCloseCallbacks contains global session close callbacks
-	SessionCloseCallbacks []func(s Session)
+	SessionCloseCallbacks []func(s Session, reason CloseReason)
 	sessionsByUID         sync.Map
 	sessionsByID          sync.Map
 	sessionIDSvc          *sessionIDService
 	// SessionCount keeps the current number of sessions
-	SessionCount int64
+	SessionCount         int64
+	storage              StorageInterface
+	bindBackendCallbacks []func(ctx context.Context, s Session, serverType, serverId string) error
+	kickBackendCallbacks []func(ctx context.Context, s Session, serverType, serverId string, reason CloseReason) error
 }
 
 // SessionPool centralizes all sessions within a Pitaya app
 type SessionPool interface {
+	// NewSession returns a new session instance 或者缓存
+	// a networkentity.NetworkEntity is a low-level network instance
 	NewSession(entity networkentity.NetworkEntity, frontend bool, UID ...string) Session
 	GetSessionCount() int64
-	GetSessionCloseCallbacks() []func(s Session)
+	GetSessionCloseCallbacks() []func(s Session, reason CloseReason)
 	GetSessionByUID(uid string) Session
 	GetSessionByID(id int64) Session
 	OnSessionBind(f func(ctx context.Context, s Session) error)
 	OnAfterSessionBind(f func(ctx context.Context, s Session) error)
-	OnSessionClose(f func(s Session))
+	OnSessionClose(f func(s Session, reason CloseReason))
+	OnBindBackend(f func(ctx context.Context, s Session, serverType, serverId string) error)
+	OnKickBackend(f func(ctx context.Context, s Session, serverType, serverId string, reason CloseReason) error)
 	CloseAll()
+	EncodeSessionData(data map[string]interface{}) ([]byte, error)
+	DecodeSessionData(encodedData []byte) (map[string]interface{}, error)
+	//StoreSessionLocal 将session存储到本的缓存 session必须已经绑定过UID
+	//  @param session
+	//  @return error
+	StoreSessionLocal(session Session) error
+	//RemoveSessionLocal 将session从本地缓存删除
+	//  @param session
+	RemoveSessionLocal(session Session)
+	//SetClusterStorage 设置后端缓存存储服务
+	//  @param storage
+	SetClusterStorage(storage StorageInterface)
+	//ImperfectSessionFromCluster
+	//  @Description:从后端存储的session数据构造出一个不健全的session.需要注意该session仅仅持有数据而没有agent网络代理,若调用 Session.Push() 等网络方法将引发空指针异常
+	//  @receiver pool
+	//  @param uid
+	//  @return Session
+	//  @return error
+	ImperfectSessionFromCluster(uid string) (Session, error)
 }
 
 // HandshakeClientData represents information about the client sent on the handshake.
@@ -112,14 +154,28 @@ type Session interface {
 	ID() int64
 	UID() string
 	GetData() map[string]interface{}
+	// Deprecated: 由于session数据的redis存储依赖于session.data,故这里不能让上层改变data实例
 	SetData(data map[string]interface{}) error
 	GetDataEncoded() []byte
 	SetDataEncoded(encodedData []byte) error
 	SetFrontendData(frontendID string, frontendSessionID int64)
 	Bind(ctx context.Context, uid string) error
-	Kick(ctx context.Context) error
+	//BindBackend
+	//  @Description: bind session in stateful backend 注意业务层若当前服务是frontend时请勿调用。frontend时仅框架内自己调用
+	//  @param ctx
+	//  @param targetServerType 要绑定的stateful backend服务
+	//  @param targetServerID 要绑定的stateful backend id
+	//  @return error
+	BindBackend(ctx context.Context, targetServerType string, targetServerID string) error
+	Kick(ctx context.Context, reason ...CloseReason) error
+	//KickBackend 解绑backend
+	//  @param ctx
+	//  @param targetServerType 目标服
+	//  @param reason
+	//  @return error
+	KickBackend(ctx context.Context, targetServerType string, reason ...CloseReason) error
 	OnClose(c func()) error
-	Close()
+	Close(reason ...CloseReason)
 	RemoteAddr() net.Addr
 	Remove(key string) error
 	Set(key string, value interface{}) error
@@ -143,6 +199,21 @@ type Session interface {
 	Clear()
 	SetHandshakeData(data *HandshakeData)
 	GetHandshakeData() *HandshakeData
+	//GetBackendID
+	//  @Description:获取绑定的后端服务id
+	//  @param svrType
+	//  @return string
+	GetBackendID(svrType string) string
+	//Flush2Cluster
+	//  @Description: 打包session数据到存储服务
+	//  @receiver s
+	//  @return error
+	Flush2Cluster() error
+	//ObtainFromCluster
+	//  @Description:从存储服务获取并解包session数据
+	//  @receiver s
+	//  @return error
+	ObtainFromCluster() error
 }
 
 type sessionIDService struct {
@@ -160,9 +231,16 @@ func (c *sessionIDService) sessionID() int64 {
 	return atomic.AddInt64(&c.sid, 1)
 }
 
-// NewSession returns a new session instance
-// a networkentity.NetworkEntity is a low-level network instance
+//NewSession
+//  @implement SessionPool.NewSession
 func (pool *sessionPoolImpl) NewSession(entity networkentity.NetworkEntity, frontend bool, UID ...string) Session {
+	//stateful类型的backend服务会绑定并缓存session 所以这里有缓存直接取缓存
+	if len(UID) > 0 {
+		sess := pool.GetSessionByUID(UID[0])
+		if sess != nil {
+			return sess
+		}
+	}
 	s := &sessionImpl{
 		id:               pool.sessionIDSvc.sessionID(),
 		entity:           entity,
@@ -188,8 +266,10 @@ func NewSessionPool() SessionPool {
 	return &sessionPoolImpl{
 		sessionBindCallbacks:  make([]func(ctx context.Context, s Session) error, 0),
 		afterBindCallbacks:    make([]func(ctx context.Context, s Session) error, 0),
-		SessionCloseCallbacks: make([]func(s Session), 0),
+		SessionCloseCallbacks: make([]func(s Session, reason CloseReason), 0),
 		sessionIDSvc:          newSessionIDService(),
+		bindBackendCallbacks:  make([]func(ctx context.Context, s Session, serverType, serverId string) error, 0),
+		kickBackendCallbacks:  make([]func(ctx context.Context, s Session, serverType, serverId string, reason CloseReason) error, 0),
 	}
 }
 
@@ -197,7 +277,7 @@ func (pool *sessionPoolImpl) GetSessionCount() int64 {
 	return pool.SessionCount
 }
 
-func (pool *sessionPoolImpl) GetSessionCloseCallbacks() []func(s Session) {
+func (pool *sessionPoolImpl) GetSessionCloseCallbacks() []func(s Session, reason CloseReason) {
 	return pool.SessionCloseCallbacks
 }
 
@@ -232,6 +312,28 @@ func (pool *sessionPoolImpl) OnSessionBind(f func(ctx context.Context, s Session
 	}
 	pool.sessionBindCallbacks = append(pool.sessionBindCallbacks, f)
 }
+func (pool *sessionPoolImpl) OnBindBackend(f func(ctx context.Context, s Session, serverType, serverId string) error) {
+	// Prevents the same function to be added twice in onSessionBind
+	sf1 := reflect.ValueOf(f)
+	for _, fun := range pool.bindBackendCallbacks {
+		sf2 := reflect.ValueOf(fun)
+		if sf1.Pointer() == sf2.Pointer() {
+			return
+		}
+	}
+	pool.bindBackendCallbacks = append(pool.bindBackendCallbacks, f)
+}
+func (pool *sessionPoolImpl) OnKickBackend(f func(ctx context.Context, s Session, serverType, serverId string, reason CloseReason) error) {
+	// Prevents the same function to be added twice in onSessionBind
+	sf1 := reflect.ValueOf(f)
+	for _, fun := range pool.kickBackendCallbacks {
+		sf2 := reflect.ValueOf(fun)
+		if sf1.Pointer() == sf2.Pointer() {
+			return
+		}
+	}
+	pool.kickBackendCallbacks = append(pool.kickBackendCallbacks, f)
+}
 
 // OnAfterSessionBind adds a method to be called when session is bound and after all sessionBind callbacks
 func (pool *sessionPoolImpl) OnAfterSessionBind(f func(ctx context.Context, s Session) error) {
@@ -247,7 +349,7 @@ func (pool *sessionPoolImpl) OnAfterSessionBind(f func(ctx context.Context, s Se
 }
 
 // OnSessionClose adds a method that will be called when every session closes
-func (pool *sessionPoolImpl) OnSessionClose(f func(s Session)) {
+func (pool *sessionPoolImpl) OnSessionClose(f func(s Session, reason CloseReason)) {
 	sf1 := reflect.ValueOf(f)
 	for _, fun := range pool.SessionCloseCallbacks {
 		sf2 := reflect.ValueOf(fun)
@@ -269,9 +371,81 @@ func (pool *sessionPoolImpl) CloseAll() {
 	logger.Log.Debug("finished closing sessions")
 }
 
+func (pool *sessionPoolImpl) EncodeSessionData(data map[string]interface{}) ([]byte, error) {
+	return json.Marshal(data)
+}
+
+func (pool *sessionPoolImpl) DecodeSessionData(encodedData []byte) (map[string]interface{}, error) {
+	if len(encodedData) == 0 {
+		return nil, nil
+	}
+	var data map[string]interface{}
+	err := json.Unmarshal(encodedData, &data)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+//StoreSessionLocal
+// @implement SessionPool.StoreSessionLocal
+//  @receiver pool
+//  @param session
+//  @return error
+func (pool *sessionPoolImpl) StoreSessionLocal(session Session) error {
+	if len(session.UID()) <= 0 {
+		return constants.ErrEmptyUID
+	}
+	pool.sessionsByUID.Store(session.UID(), session)
+	if _, ok := pool.sessionsByID.Load(session.ID()); ok {
+		return nil
+	}
+	pool.sessionsByID.Store(session.ID(), session)
+	atomic.AddInt64(&pool.SessionCount, 1)
+	return nil
+}
+
+//RemoveSessionLocal
+// @implement SessionPool.RemoveSessionLocal
+//  @receiver pool
+//  @param session
+func (pool *sessionPoolImpl) RemoveSessionLocal(session Session) {
+	if len(session.UID()) > 0 {
+		pool.sessionsByUID.Delete(session.UID())
+	}
+	if _, ok := pool.sessionsByID.Load(session.ID()); ok {
+		return
+	}
+	atomic.AddInt64(&pool.SessionCount, -1)
+	pool.sessionsByID.Delete(session.ID())
+}
+
+func (pool *sessionPoolImpl) SetClusterStorage(storage StorageInterface) {
+	pool.storage = storage
+}
+
+//ImperfectSessionFromCluster
+//  @implement SessionPool.ImperfectSessionFromCluster
+func (pool *sessionPoolImpl) ImperfectSessionFromCluster(uid string) (Session, error) {
+	v, err := pool.storage.Get(pool.getSessionStorageKey(uid))
+	if err != nil {
+		return nil, err
+	}
+	s := pool.NewSession(nil, false, uid)
+	err = s.SetDataEncoded([]byte(v))
+	if err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (pool *sessionPoolImpl) getSessionStorageKey(uid string) string {
+	return fmt.Sprintf(storageKeyPrefix+"%v"+":", uid)
+}
+
 func (s *sessionImpl) updateEncodedData() error {
 	var b []byte
-	b, err := json.Marshal(s.data)
+	b, err := s.pool.EncodeSessionData(s.data)
 	if err != nil {
 		return err
 	}
@@ -339,16 +513,26 @@ func (s *sessionImpl) GetData() map[string]interface{} {
 }
 
 // SetData sets the whole session data
+//
+// Deprecated: 由于session数据的redis存储依赖于session.data,故这里不能让上层改变data实例
 func (s *sessionImpl) SetData(data map[string]interface{}) error {
 	s.Lock()
 	defer s.Unlock()
 
 	s.data = data
+	s.frontendID = s.stringUnsafe(fieldKeyFrontendID)
+	s.uid = s.stringUnsafe(fieldKeyUID)
 	return s.updateEncodedData()
 }
 
 // GetDataEncoded returns the session data as an encoded value
 func (s *sessionImpl) GetDataEncoded() []byte {
+	s.Lock()
+	defer s.Unlock()
+	//打包
+	s.data[fieldKeyUID] = s.uid
+	s.data[fieldKeyFrontendID] = s.frontendID
+	s.updateEncodedData()
 	return s.encodedData
 }
 
@@ -357,8 +541,7 @@ func (s *sessionImpl) SetDataEncoded(encodedData []byte) error {
 	if len(encodedData) == 0 {
 		return nil
 	}
-	var data map[string]interface{}
-	err := json.Unmarshal(encodedData, &data)
+	data, err := s.pool.DecodeSessionData(encodedData)
 	if err != nil {
 		return err
 	}
@@ -369,6 +552,7 @@ func (s *sessionImpl) SetDataEncoded(encodedData []byte) error {
 func (s *sessionImpl) SetFrontendData(frontendID string, frontendSessionID int64) {
 	s.frontendID = frontendID
 	s.frontendSessionID = frontendSessionID
+	s.Set(fieldKeyFrontendID, frontendID)
 }
 
 // Bind bind UID to current session
@@ -377,7 +561,7 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string) error {
 		return constants.ErrIllegalUID
 	}
 
-	if s.UID() != "" {
+	if s.UID() != "" && s.UID() != uid {
 		return constants.ErrSessionAlreadyBound
 	}
 
@@ -389,7 +573,6 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string) error {
 			return err
 		}
 	}
-
 	for _, cb := range s.pool.afterBindCallbacks {
 		err := cb(ctx, s)
 		if err != nil {
@@ -411,16 +594,91 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string) error {
 			return err
 		}
 	}
+
+	return nil
+}
+
+//BindBackend
+//  @implement Session.BindBackend
+//  @receiver s
+//  @param ctx
+//  @param targetServerType
+//  @param targetServerID
+//  @return error
+func (s *sessionImpl) BindBackend(ctx context.Context, targetServerType string, targetServerID string) error {
+	var err error = nil
+	if s.UID() == "" {
+		return constants.ErrIllegalUID
+	}
+	if s.GetBackendID(targetServerType) != "" {
+		return constants.ErrSessionAlreadyBound
+	}
+	//if !targetServer.StatefulBackend() {
+	//	return constants.ErrSessionCantBindBackend
+	//}
+	s.SetBackendID(targetServerType, targetServerID)
+	for _, cb := range s.pool.bindBackendCallbacks {
+		err := cb(ctx, s, targetServerType, targetServerID)
+		if err != nil {
+			s.uid = ""
+			return err
+		}
+	}
+	if err != nil {
+		log.Log.Error("error while trying to bind backend: " + err.Error())
+		s.RemoveBackendID(targetServerType)
+		return err
+	}
 	return nil
 }
 
 // Kick kicks the user
-func (s *sessionImpl) Kick(ctx context.Context) error {
+func (s *sessionImpl) Kick(ctx context.Context, reason ...CloseReason) error {
 	err := s.entity.Kick(ctx)
 	if err != nil {
 		return err
 	}
-	return s.entity.Close()
+	//TODO 这里理应调用session.close(),不知道为什么原来是这样，测试时注意下是否有问题
+	//return s.entity.Close()
+	s.Close(reason...)
+	return nil
+}
+
+//KickBackend
+//  @implement Session.KickBackend
+//  @receiver s
+//  @param ctx
+//  @param targetServerType
+//  @param reason
+//  @return error
+func (s *sessionImpl) KickBackend(ctx context.Context, targetServerType string, reason ...CloseReason) error {
+	var err error = nil
+	if s.UID() == "" {
+		return constants.ErrIllegalUID
+	}
+	backendID := s.GetBackendID(targetServerType)
+	if backendID == "" {
+		return constants.ErrSessionNotBoundBackend
+	}
+	rea := CloseReasonNormal
+	if len(reason) > 0 {
+		rea = reason[0]
+	}
+	s.RemoveBackendID(targetServerType)
+	for _, cb := range s.pool.kickBackendCallbacks {
+		err := cb(ctx, s, targetServerType, backendID, rea)
+		if err != nil {
+			s.uid = ""
+			return err
+		}
+	}
+	if err != nil {
+		log.Log.Error("error while trying to bind backend: " + err.Error())
+		//回滚
+		s.SetBackendID(targetServerType, backendID)
+		return err
+	}
+	return nil
 }
 
 // OnClose adds the function it receives to the callbacks that will be called
@@ -435,7 +693,7 @@ func (s *sessionImpl) OnClose(c func()) error {
 
 // Close terminates current session, session related data will not be released,
 // all related data should be cleared explicitly in Session closed callback
-func (s *sessionImpl) Close() {
+func (s *sessionImpl) Close(reason ...CloseReason) {
 	atomic.AddInt64(&s.pool.SessionCount, -1)
 	s.pool.sessionsByID.Delete(s.ID())
 	s.pool.sessionsByUID.Delete(s.UID())
@@ -451,7 +709,7 @@ func (s *sessionImpl) Close() {
 			}
 		}
 	}
-	s.entity.Close()
+	s.entity.Close(reason...)
 }
 
 // RemoteAddr returns the remote network address.
@@ -719,6 +977,24 @@ func (s *sessionImpl) String(key string) string {
 	return value
 }
 
+//stringUnsafe
+//  @Description:非线程安全
+//  @receiver s
+//  @param key
+//  @return string
+func (s *sessionImpl) stringUnsafe(key string) string {
+	v, ok := s.data[key]
+	if !ok {
+		return ""
+	}
+
+	value, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	return value
+}
+
 // Value returns the value associated with the key as a interface{}.
 func (s *sessionImpl) Value(key string) interface{} {
 	s.RLock()
@@ -737,6 +1013,10 @@ func (s *sessionImpl) PushToFront(ctx context.Context) error {
 		return constants.ErrFrontSessionCantPushToFront
 	}
 	return s.sendRequestToFront(ctx, constants.SessionPushRoute, true)
+}
+
+func (s *sessionImpl) PushToBackend(ctx context.Context) error {
+	return nil
 }
 
 // Clear releases all data related to current session
@@ -779,5 +1059,100 @@ func (s *sessionImpl) sendRequestToFront(ctx context.Context, route string, incl
 		return err
 	}
 	logger.Log.Debugf("%s Got response: %+v", route, res)
+	return nil
+}
+func (s *sessionImpl) sendRequestToBackend(ctx context.Context, route string, includeData bool, backendID string) error {
+	sessionData := &protos.Session{
+		Id:  s.frontendSessionID,
+		Uid: s.uid,
+	}
+	if includeData {
+		sessionData.Data = s.encodedData
+	}
+	b, err := proto.Marshal(sessionData)
+	if err != nil {
+		return err
+	}
+	res, err := s.entity.SendRequest(ctx, backendID, route, b)
+	if err != nil {
+		return err
+	}
+	logger.Log.Debugf("%s Got response: %+v", route, res)
+	return nil
+}
+
+//GetBackendID
+//  @implement Session.GetBackendID
+func (s *sessionImpl) GetBackendID(svrType string) string {
+	s.RLock()
+	defer s.RUnlock()
+	backends, ok := s.data[fieldKeyBackends]
+	if !ok {
+		return ""
+	}
+	bid, ok := backends.(map[string]string)[svrType]
+	if !ok {
+		return ""
+	}
+	return bid
+}
+func (s *sessionImpl) SetBackendID(svrType string, id string) error {
+	s.RLock()
+	defer s.RUnlock()
+	var backends map[string]string
+	v, ok := s.data[fieldKeyBackends]
+	if !ok {
+		backends = make(map[string]string)
+	} else {
+		backends = v.(map[string]string)
+	}
+	backends[svrType] = id
+	return s.updateEncodedData()
+}
+func (s *sessionImpl) RemoveBackendID(svrType string) error {
+	s.Lock()
+	defer s.Unlock()
+	v, ok := s.data[fieldKeyBackends]
+	var backends map[string]string
+	if !ok {
+		return nil
+	}
+	backends = v.(map[string]string)
+	delete(backends, svrType)
+	return s.updateEncodedData()
+}
+func (s *sessionImpl) getSessionStorageKey() string {
+	return s.pool.getSessionStorageKey(s.uid)
+}
+
+//Flush2Cluster
+//  @Description: 打包session数据到存储服务
+//  @receiver s
+//  @return error
+func (s *sessionImpl) Flush2Cluster() error {
+	if "" == s.uid {
+		return constants.ErrIllegalUID
+	}
+	s.Lock()
+	defer s.Unlock()
+	//TODO GetDataEncoded 内部没有处理错误,本应修正,但是其他地方有引用 暂不改动这里后续考虑优化
+	data := s.GetDataEncoded()
+	//TODO 考虑是否需要redsync锁
+	return s.pool.storage.Set(s.getSessionStorageKey(), string(data))
+}
+
+//ObtainFromCluster
+//  @Description:从存储服务获取并解包session数据
+//  @receiver s
+//  @return error
+func (s *sessionImpl) ObtainFromCluster() error {
+	v, err := s.pool.storage.Get(s.getSessionStorageKey())
+	if err != nil {
+		return err
+	}
+	err = s.SetDataEncoded([]byte(v))
+	if err != nil {
+		return err
+	}
 	return nil
 }

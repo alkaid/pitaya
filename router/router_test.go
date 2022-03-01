@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"errors"
+	"github.com/topfreegames/pitaya/v2/session"
 	"testing"
 
 	"github.com/golang/mock/gomock"
@@ -28,6 +29,7 @@ var (
 		route *route.Route,
 		payload []byte,
 		servers map[string]*cluster.Server,
+		session session.Session,
 	) (*cluster.Server, error) {
 		return server, nil
 	}
@@ -63,7 +65,7 @@ func TestDefaultRoute(t *testing.T) {
 
 	router := New()
 
-	retServer := router.defaultRoute(servers)
+	retServer := router.defaultRoute(serverType, servers, nil)
 	assert.Equal(t, server, retServer)
 }
 
@@ -88,7 +90,7 @@ func TestRoute(t *testing.T) {
 
 			retServer, err := router.Route(ctx, table.rpcType, table.serverType, route, &message.Message{
 				Data: []byte{0x01},
-			})
+			}, nil)
 			assert.Equal(t, table.server, retServer)
 			assert.Equal(t, table.err, err)
 		})
