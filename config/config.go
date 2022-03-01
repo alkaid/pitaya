@@ -62,7 +62,7 @@ func NewDefaultPitayaConfig() *PitayaConfig {
 			Messages: struct {
 				Compression bool
 			}{
-				Compression: true,
+				Compression: false,
 			},
 		},
 		Buffer: struct {
