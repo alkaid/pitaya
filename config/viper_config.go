@@ -30,20 +30,26 @@ import (
 //ConfLoader 重载监听
 type ConfLoader interface {
 	//Reload 重载
-	//  @param conf 反序列化 Provide 提供的 confStruct
-	Reload(confStruct interface{})
+	//  @return key Provide 提供的 key
+	//  @param confStruct 反序列化后的 Provide 提供的 confStruct
+	Reload(key string, confStruct interface{})
 	//Provide 提供给重载前反序列化用的key和struct
 	//  @return key
 	//  @return confStruct
 	Provide() (key string, confStruct interface{})
 }
+
+//LoaderFactory ConfLoader 工厂,用于生成需要动态包装的 ConfLoader 实现
+//  @implement ConfLoader
 type LoaderFactory struct {
-	ReloadApply  func(confStruct interface{})
+	//ConfLoader.Reload 的包装函数
+	ReloadApply func(key string, confStruct interface{})
+	//ConfLoader.Provide 的包装函数
 	ProvideApply func() (key string, confStruct interface{})
 }
 
-func (l LoaderFactory) Reload(confStruct interface{}) {
-	l.ReloadApply(confStruct)
+func (l LoaderFactory) Reload(key string, confStruct interface{}) {
+	l.ReloadApply(key, confStruct)
 }
 func (l LoaderFactory) Provide() (key string, confStruct interface{}) {
 	return l.ProvideApply()
@@ -51,8 +57,9 @@ func (l LoaderFactory) Provide() (key string, confStruct interface{}) {
 
 // Config is a wrapper around a viper config
 type Config struct {
-	config  *viper.Viper
-	loaders []ConfLoader
+	config   *viper.Viper
+	loaders  []ConfLoader
+	confconf *confMap //配置的配置
 }
 
 // NewConfig creates a new config with a given viper config if given
@@ -66,8 +73,9 @@ func NewConfig(cfgs ...*viper.Viper) *Config {
 
 	cfg.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	cfg.AutomaticEnv()
-	c := &Config{config: cfg}
+	c := &Config{config: cfg, confconf: &confMap{}}
 	c.fillDefaultValues()
+	c.AddLoader(c)
 	return c
 }
 
@@ -189,47 +197,84 @@ func (c *Config) AddLoader(loader ConfLoader) {
 	c.loaders = append(c.loaders, loader)
 }
 
-func (c *Config) Reload() {
+func (c *Config) reloadAll() {
 	for _, loader := range c.loaders {
 		key, confStruct := loader.Provide()
 		if confStruct != nil {
 			c.UnmarshalKey(key, confStruct)
 		}
-		loader.Reload(confStruct)
+		loader.Reload(key, confStruct)
 	}
 }
 
-func (c *Config) LoadAndWatch() {
-	fps := c.config.GetStringSlice("pitaya.conf.filepath")
-	if len(fps) > 0 {
-		for _, fp := range fps {
+func (c *Config) Reload(key string, confStruct interface{}) {
+	//cm:=confStruct.(*confMap)
+}
+func (c *Config) Provide() (key string, confStruct interface{}) {
+	return "pitaya.config", c.confconf
+}
+
+type confMap struct {
+	FilePath  []string      //配置文件路径,不为空表明使用本地文件配置
+	EtcdAddr  string        //Etcd地址,不为空表明使用远程etcd配置
+	EtcdKeys  []string      //要读取监听的etcd key列表
+	Interval  time.Duration //重载间隔
+	Formatter string        //配置格式 必须为 viper.SupportedRemoteProviders
+}
+
+//InitLoad 初始化加载本地或远程配置.业务层创建App前调用,仅允许一次
+//  @receiver c
+func (c *Config) InitLoad() error {
+	cm := c.confconf
+	err := c.UnmarshalKey("pitaya.conf", cm)
+	if err != nil {
+		return err
+	}
+	if len(cm.FilePath) > 0 {
+		for _, fp := range cm.FilePath {
 			c.config.AddConfigPath(fp)
 		}
 		c.config.ReadInConfig()
-		c.config.WatchConfig()
 	}
-	addr := c.config.GetString("pitaya.conf.etcdaddr")
-	keys := c.config.GetStringSlice("pitaya.conf.etcdkeys")
-	if len(keys) > 0 && addr != "" {
-		formatter := c.config.GetString("pitaya.conf.formatter")
-		if formatter != "" {
-			c.config.SetConfigType(formatter)
+	if len(cm.EtcdKeys) > 0 && cm.EtcdAddr != "" {
+		if cm.Formatter != "" {
+			c.config.SetConfigType(cm.Formatter)
 		}
-		for _, key := range keys {
-			c.config.AddRemoteProvider("etcd", addr, key)
+		for _, key := range cm.EtcdKeys {
+			c.config.AddRemoteProvider("etcd", cm.EtcdAddr, key)
 		}
 		c.config.ReadRemoteConfig()
-		c.config.WatchRemoteConfigOnChannel()
+	}
+	c.reloadAll()
+	return nil
+}
+
+//Watch 开启监控
+//  @receiver c
+//  @return error
+func (c *Config) watch() error {
+	cm := &confMap{}
+	err := c.UnmarshalKey("pitaya.conf", cm)
+	if err != nil {
+		return err
+	}
+	if len(cm.FilePath) > 0 {
+		c.config.WatchConfig()
+	}
+	if len(cm.EtcdKeys) > 0 && cm.EtcdAddr != "" {
+		err = c.config.WatchRemoteConfigOnChannel()
+		if err != nil {
+			return err
+		}
 	}
 	//TODO 暂时用loop实现配置重载,后期fork viper修改watchKeyValueConfigOnChannel()添加回调来实现
 	go func() {
-		c.Reload()
 		for {
-			interval := c.config.GetDuration("pitaya.conf.interval")
-			time.Sleep(interval)
-			c.Reload()
+			time.Sleep(c.confconf.Interval)
+			c.reloadAll()
 		}
 	}()
+	return nil
 }
 
 // GetDuration returns a duration from the inner config
@@ -278,4 +323,26 @@ func (c *Config) UnmarshalKey(s string, v interface{}) error {
 // Unmarshal unmarshals config into v
 func (c *Config) Unmarshal(v interface{}) error {
 	return c.config.Unmarshal(v)
+}
+
+type _ConfigModule struct {
+	core *Config
+}
+
+func NewConfigModule(core *Config) *_ConfigModule {
+	return &_ConfigModule{core: core}
+}
+
+func (c *_ConfigModule) Init() error {
+	return nil
+}
+func (c *_ConfigModule) AfterInit() {
+	c.core.reloadAll()
+	c.core.watch()
+}
+func (c *_ConfigModule) BeforeShutdown() {
+
+}
+func (c *_ConfigModule) Shutdown() error {
+	return nil
 }

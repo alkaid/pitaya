@@ -458,6 +458,7 @@ func (app *App) listen() {
 		app.remoteService.AddRemoteBindingListener(unique)
 		app.RegisterModule(unique, "uniqueSession")
 	}
+	app.RegisterModule(config.NewConfigModule(app.conf), "configLoader")
 
 	app.startModules()
 
