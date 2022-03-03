@@ -72,6 +72,7 @@ func NewBuilderWithConfigs(
 	enqueueOpts := config.NewEnqueueOpts(conf)
 	groupServiceConfig := config.NewMemoryGroupConfig(conf)
 	redisConfig := config.NewRedisConfig(conf)
+	conf.AddLoader(logger.Manager.ReloadFactory("pitaya.log"))
 	b := NewBuilder(
 		isFrontend,
 		serverType,

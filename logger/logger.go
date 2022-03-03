@@ -23,32 +23,135 @@
 package logger
 
 import (
-	"github.com/topfreegames/pitaya/v2/logger/interfaces"
-	"github.com/topfreegames/pitaya/v2/logger/zapw"
+	"errors"
+	"fmt"
+	"github.com/topfreegames/pitaya/v2/config"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
-// Log is the default logger
-var Log = initLogger()
+var Manager = NewLogger(zap.NewProductionConfig())
+var Zap = Manager.Log
+var Sugar = Manager.Sugar
 
-func initLogger() interfaces.Logger {
-	//plog := logrus.New()
-	//plog.Formatter = new(logrus.TextFormatter)
-	//plog.Level = logrus.DebugLevel
-	//
-	//log := plog.WithFields(logrus.Fields{
-	//	"source": "pitaya",
-	//})
-	//return logruswrapper.NewWithFieldLogger(log)
-	return zapw.Default()
+// Log
+//  @Deprecated use Zap instead
+var Log = newAdapter(Manager)
+
+type Logger struct {
+	Log   *zap.Logger
+	Sugar *zap.SugaredLogger
+	Level zap.AtomicLevel
 }
 
-// SetLogger rewrites the default logger
-func SetLogger(l interfaces.Logger) {
-	if l != nil {
-		Log = l
+func NewLogger(cfg zap.Config) *Logger {
+	log, err := cfg.Build()
+	if err != nil {
+		fmt.Errorf("uber/zap build error: %w", err)
+		return nil
+	}
+	return &Logger{
+		Log:   log,
+		Sugar: log.Sugar(),
+		Level: cfg.Level,
 	}
 }
 
-func SetLevel(level interfaces.Level) {
-	Log.SetLevel(level)
+//
+//type Level = string
+//
+//const (
+//	// DebugLevel logs are typically voluminous, and are usually disabled in
+//	// production.
+//	DebugLevel Level = "DEBUG"
+//	// InfoLevel is the default logging priority.
+//	InfoLevel Level = "INFO"
+//	// WarnLevel logs are more important than Info, but don't need individual
+//	// human review.
+//	WarnLevel Level = "WARN"
+//	// ErrorLevel logs are high-priority. If an application is running smoothly,
+//	// it shouldn't generate any error-level logs.
+//	ErrorLevel Level = "ERROR"
+//	// DPanicLevel logs are particularly important errors. In development the
+//	// logger panics after writing the message.
+//	DPanicLevel Level = "DPANIC"
+//	// PanicLevel logs a message, then panics.
+//	PanicLevel Level = "PANIC"
+//	// FatalLevel logs a message, then calls os.Exit(1).
+//	FatalLevel Level = "FATAL"
+//
+//	_minLevel = DebugLevel
+//	_maxLevel = FatalLevel
+//)
+
+//SetLevel 动态改变打印级别
+//  @param level 支持的类型为int,zapcore.Level,string,int,zap.AtomicLevel. 建议使用string
+//  支持的string为 DEBUG|INFO|WARN|ERROR|DPANIC|PANIC|FATAL
+func (l *Logger) SetLevel(level interface{}) {
+	var err error
+	switch level.(type) {
+	case *zap.AtomicLevel:
+		l.Level.SetLevel(level.(*zap.AtomicLevel).Level())
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		lnew := level.(zapcore.Level)
+		if lnew >= zapcore.DebugLevel && lnew <= zapcore.FatalLevel {
+			l.Level.SetLevel(lnew)
+		} else {
+			err = errors.New("illegal log Level")
+		}
+	case string:
+		lnew := zapcore.ErrorLevel
+		err = lnew.Set(level.(string))
+		if err == nil {
+			l.Level.SetLevel(lnew)
+		}
+	default:
+		err = errors.New("illegal log Level")
+	}
+	if err != nil {
+		l.Log.Error(err.Error())
+	}
+}
+
+//SetDevelopment 是否开启开发者模式 true为development mode 否则为production mode
+//  development mode: zap.NewDevelopmentConfig()模式
+//  production mode:zap.NewProductionConfig()模式
+//  @receiver l
+//  @param enable
+func (l *Logger) SetDevelopment(enable bool) {
+	var cfg zap.Config
+	if enable {
+		cfg = zap.NewDevelopmentConfig()
+	} else {
+		cfg = zap.NewProductionConfig()
+	}
+	cfg.Level = l.Level
+	log, err := cfg.Build()
+	if err != nil {
+		l.Sugar.Errorf("uber/zap build error: %w", err)
+		return
+	}
+	l.Log = log
+	l.Sugar = log.Sugar()
+}
+
+type LogConf struct {
+	Development bool
+	Level       string
+}
+
+func (l *Logger) ReloadFactory(key string) config.LoaderFactory {
+	if key != "" {
+		key += "."
+	}
+	runtimeConf := &LogConf{}
+	return config.LoaderFactory{
+		ReloadApply: func(confStruct interface{}) {
+			l.SetDevelopment(runtimeConf.Development)
+			l.SetLevel(runtimeConf.Level)
+		},
+		ProvideApply: func() (key string, confStruct interface{}) {
+			return key, runtimeConf
+		},
+	}
 }

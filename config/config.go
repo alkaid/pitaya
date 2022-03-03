@@ -41,10 +41,15 @@ type PitayaConfig struct {
 		Period time.Duration
 	}
 	Conf struct {
-		FilePath []string      //配置文件路径,不为空表明使用本地文件配置
-		EtcdAddr string        //Etcd地址,不为空表明使用远程etcd配置
-		EtcdKeys []string      //要读取监听的etcd key列表
-		Interval time.Duration //重载间隔
+		FilePath  []string      //配置文件路径,不为空表明使用本地文件配置
+		EtcdAddr  string        //Etcd地址,不为空表明使用远程etcd配置
+		EtcdKeys  []string      //要读取监听的etcd key列表
+		Interval  time.Duration //重载间隔
+		Formatter string        //配置格式 必须为 viper.SupportedRemoteProviders
+	}
+	Log struct {
+		Development bool   //是否开发模式
+		Level       string //日志等级
 	}
 }
 
@@ -111,13 +116,18 @@ func NewDefaultPitayaConfig() *PitayaConfig {
 			Period: time.Duration(15 * time.Second),
 		},
 		Conf: struct {
-			FilePath []string
-			EtcdAddr string
-			EtcdKeys []string
-			Interval time.Duration
+			FilePath  []string
+			EtcdAddr  string
+			EtcdKeys  []string
+			Interval  time.Duration
+			Formatter string
 		}{
 			Interval: time.Duration(5 * time.Minute),
 		},
+		Log: struct {
+			Development bool
+			Level       string
+		}{Development: false, Level: "ERROR"},
 	}
 }
 

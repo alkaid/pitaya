@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.2.0
 // - protoc             v3.19.1
-// source: pitaya.proto
+// source: pitaya-protos/pitaya.proto
 
 package protos
 
@@ -209,5 +209,5 @@ var Pitaya_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "pitaya.proto",
+	Metadata: "pitaya-protos/pitaya.proto",
 }

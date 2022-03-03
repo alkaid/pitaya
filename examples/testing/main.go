@@ -25,10 +25,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/topfreegames/pitaya/v2/logger"
-	"github.com/topfreegames/pitaya/v2/logger/interfaces"
-	"github.com/topfreegames/pitaya/v2/logger/zapw"
-	"go.uber.org/zap"
 	"strings"
 
 	"github.com/google/uuid"
@@ -281,11 +277,9 @@ func main() {
 	l.Formatter = &logrus.TextFormatter{}
 	l.SetLevel(logrus.InfoLevel)
 	if *debug {
-		l.SetLevel(logrus.DebugLevel)
-		pitaya.SetLogger(zapw.New(zap.NewDevelopmentConfig()))
+		//l.SetLevel(logrus.DebugLevel)
+		//pitaya.SetLogger(zapw.New(zap.NewDevelopmentConfig()))
 	}
-	pitaya.SetLogger(zapw.New(zap.NewDevelopmentConfig()))
-	logger.SetLevel(interfaces.DebugLevel)
 	//pitaya.SetLogger(logruswrapper.NewWithFieldLogger(l))
 
 	app, bs, sessionPool := createApp(*serializer, *port, *grpc, *isFrontend, *svType, pitaya.Cluster, map[string]string{

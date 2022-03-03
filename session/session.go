@@ -24,7 +24,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/topfreegames/pitaya/v2/log"
 	"net"
 	"reflect"
 	"sync"
@@ -625,7 +624,7 @@ func (s *sessionImpl) BindBackend(ctx context.Context, targetServerType string, 
 		}
 	}
 	if err != nil {
-		log.Log.Error("error while trying to bind backend: " + err.Error())
+		logger.Log.Error("error while trying to bind backend: " + err.Error())
 		s.RemoveBackendID(targetServerType)
 		return err
 	}
@@ -673,7 +672,7 @@ func (s *sessionImpl) KickBackend(ctx context.Context, targetServerType string, 
 		}
 	}
 	if err != nil {
-		log.Log.Error("error while trying to bind backend: " + err.Error())
+		logger.Log.Error("error while trying to bind backend: " + err.Error())
 		//回滚
 		s.SetBackendID(targetServerType, backendID)
 		return err

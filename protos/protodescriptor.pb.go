@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.27.1
 // 	protoc        v3.19.1
-// source: protodescriptor.proto
+// source: pitaya-protos/protodescriptor.proto
 
 package protos
 
@@ -32,7 +32,7 @@ type ProtoDescriptor struct {
 func (x *ProtoDescriptor) Reset() {
 	*x = ProtoDescriptor{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_protodescriptor_proto_msgTypes[0]
+		mi := &file_pitaya_protos_protodescriptor_proto_msgTypes[0]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -45,7 +45,7 @@ func (x *ProtoDescriptor) String() string {
 func (*ProtoDescriptor) ProtoMessage() {}
 
 func (x *ProtoDescriptor) ProtoReflect() protoreflect.Message {
-	mi := &file_protodescriptor_proto_msgTypes[0]
+	mi := &file_pitaya_protos_protodescriptor_proto_msgTypes[0]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -58,7 +58,7 @@ func (x *ProtoDescriptor) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProtoDescriptor.ProtoReflect.Descriptor instead.
 func (*ProtoDescriptor) Descriptor() ([]byte, []int) {
-	return file_protodescriptor_proto_rawDescGZIP(), []int{0}
+	return file_pitaya_protos_protodescriptor_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *ProtoDescriptor) GetDesc() []byte {
@@ -79,7 +79,7 @@ type ProtoName struct {
 func (x *ProtoName) Reset() {
 	*x = ProtoName{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_protodescriptor_proto_msgTypes[1]
+		mi := &file_pitaya_protos_protodescriptor_proto_msgTypes[1]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -92,7 +92,7 @@ func (x *ProtoName) String() string {
 func (*ProtoName) ProtoMessage() {}
 
 func (x *ProtoName) ProtoReflect() protoreflect.Message {
-	mi := &file_protodescriptor_proto_msgTypes[1]
+	mi := &file_pitaya_protos_protodescriptor_proto_msgTypes[1]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -105,7 +105,7 @@ func (x *ProtoName) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProtoName.ProtoReflect.Descriptor instead.
 func (*ProtoName) Descriptor() ([]byte, []int) {
-	return file_protodescriptor_proto_rawDescGZIP(), []int{1}
+	return file_pitaya_protos_protodescriptor_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *ProtoName) GetName() string {
@@ -126,7 +126,7 @@ type ProtoDescriptors struct {
 func (x *ProtoDescriptors) Reset() {
 	*x = ProtoDescriptors{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_protodescriptor_proto_msgTypes[2]
+		mi := &file_pitaya_protos_protodescriptor_proto_msgTypes[2]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -139,7 +139,7 @@ func (x *ProtoDescriptors) String() string {
 func (*ProtoDescriptors) ProtoMessage() {}
 
 func (x *ProtoDescriptors) ProtoReflect() protoreflect.Message {
-	mi := &file_protodescriptor_proto_msgTypes[2]
+	mi := &file_pitaya_protos_protodescriptor_proto_msgTypes[2]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -152,7 +152,7 @@ func (x *ProtoDescriptors) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProtoDescriptors.ProtoReflect.Descriptor instead.
 func (*ProtoDescriptors) Descriptor() ([]byte, []int) {
-	return file_protodescriptor_proto_rawDescGZIP(), []int{2}
+	return file_pitaya_protos_protodescriptor_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *ProtoDescriptors) GetDesc() [][]byte {
@@ -173,7 +173,7 @@ type ProtoNames struct {
 func (x *ProtoNames) Reset() {
 	*x = ProtoNames{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_protodescriptor_proto_msgTypes[3]
+		mi := &file_pitaya_protos_protodescriptor_proto_msgTypes[3]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -186,7 +186,7 @@ func (x *ProtoNames) String() string {
 func (*ProtoNames) ProtoMessage() {}
 
 func (x *ProtoNames) ProtoReflect() protoreflect.Message {
-	mi := &file_protodescriptor_proto_msgTypes[3]
+	mi := &file_pitaya_protos_protodescriptor_proto_msgTypes[3]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -199,7 +199,7 @@ func (x *ProtoNames) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProtoNames.ProtoReflect.Descriptor instead.
 func (*ProtoNames) Descriptor() ([]byte, []int) {
-	return file_protodescriptor_proto_rawDescGZIP(), []int{3}
+	return file_pitaya_protos_protodescriptor_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ProtoNames) GetName() []string {
@@ -209,45 +209,46 @@ func (x *ProtoNames) GetName() []string {
 	return nil
 }
 
-var File_protodescriptor_proto protoreflect.FileDescriptor
+var File_pitaya_protos_protodescriptor_proto protoreflect.FileDescriptor
 
-var file_protodescriptor_proto_rawDesc = []byte{
-	0x0a, 0x15, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x64, 0x65, 0x73, 0x63, 0x72, 0x69, 0x70, 0x74, 0x6f,
-	0x72, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x12, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x73, 0x22,
-	0x25, 0x0a, 0x0f, 0x50, 0x72, 0x6f, 0x74, 0x6f, 0x44, 0x65, 0x73, 0x63, 0x72, 0x69, 0x70, 0x74,
-	0x6f, 0x72, 0x12, 0x12, 0x0a, 0x04, 0x64, 0x65, 0x73, 0x63, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0c,
-	0x52, 0x04, 0x64, 0x65, 0x73, 0x63, 0x22, 0x1f, 0x0a, 0x09, 0x50, 0x72, 0x6f, 0x74, 0x6f, 0x4e,
-	0x61, 0x6d, 0x65, 0x12, 0x12, 0x0a, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28,
-	0x09, 0x52, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x22, 0x26, 0x0a, 0x10, 0x50, 0x72, 0x6f, 0x74, 0x6f,
-	0x44, 0x65, 0x73, 0x63, 0x72, 0x69, 0x70, 0x74, 0x6f, 0x72, 0x73, 0x12, 0x12, 0x0a, 0x04, 0x64,
-	0x65, 0x73, 0x63, 0x18, 0x01, 0x20, 0x03, 0x28, 0x0c, 0x52, 0x04, 0x64, 0x65, 0x73, 0x63, 0x22,
-	0x20, 0x0a, 0x0a, 0x50, 0x72, 0x6f, 0x74, 0x6f, 0x4e, 0x61, 0x6d, 0x65, 0x73, 0x12, 0x12, 0x0a,
-	0x04, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x01, 0x20, 0x03, 0x28, 0x09, 0x52, 0x04, 0x6e, 0x61, 0x6d,
-	0x65, 0x42, 0x1c, 0x5a, 0x09, 0x2e, 0x2e, 0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x73, 0xaa, 0x02,
-	0x0e, 0x4e, 0x50, 0x69, 0x74, 0x61, 0x79, 0x61, 0x2e, 0x50, 0x72, 0x6f, 0x74, 0x6f, 0x73, 0x62,
-	0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
+var file_pitaya_protos_protodescriptor_proto_rawDesc = []byte{
+	0x0a, 0x23, 0x70, 0x69, 0x74, 0x61, 0x79, 0x61, 0x2d, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x73, 0x2f,
+	0x70, 0x72, 0x6f, 0x74, 0x6f, 0x64, 0x65, 0x73, 0x63, 0x72, 0x69, 0x70, 0x74, 0x6f, 0x72, 0x2e,
+	0x70, 0x72, 0x6f, 0x74, 0x6f, 0x12, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x73, 0x22, 0x25, 0x0a,
+	0x0f, 0x50, 0x72, 0x6f, 0x74, 0x6f, 0x44, 0x65, 0x73, 0x63, 0x72, 0x69, 0x70, 0x74, 0x6f, 0x72,
+	0x12, 0x12, 0x0a, 0x04, 0x64, 0x65, 0x73, 0x63, 0x18, 0x01, 0x20, 0x01, 0x28, 0x0c, 0x52, 0x04,
+	0x64, 0x65, 0x73, 0x63, 0x22, 0x1f, 0x0a, 0x09, 0x50, 0x72, 0x6f, 0x74, 0x6f, 0x4e, 0x61, 0x6d,
+	0x65, 0x12, 0x12, 0x0a, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52,
+	0x04, 0x6e, 0x61, 0x6d, 0x65, 0x22, 0x26, 0x0a, 0x10, 0x50, 0x72, 0x6f, 0x74, 0x6f, 0x44, 0x65,
+	0x73, 0x63, 0x72, 0x69, 0x70, 0x74, 0x6f, 0x72, 0x73, 0x12, 0x12, 0x0a, 0x04, 0x64, 0x65, 0x73,
+	0x63, 0x18, 0x01, 0x20, 0x03, 0x28, 0x0c, 0x52, 0x04, 0x64, 0x65, 0x73, 0x63, 0x22, 0x20, 0x0a,
+	0x0a, 0x50, 0x72, 0x6f, 0x74, 0x6f, 0x4e, 0x61, 0x6d, 0x65, 0x73, 0x12, 0x12, 0x0a, 0x04, 0x6e,
+	0x61, 0x6d, 0x65, 0x18, 0x01, 0x20, 0x03, 0x28, 0x09, 0x52, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x42,
+	0x1b, 0x5a, 0x08, 0x2e, 0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x73, 0xaa, 0x02, 0x0e, 0x4e, 0x50,
+	0x69, 0x74, 0x61, 0x79, 0x61, 0x2e, 0x50, 0x72, 0x6f, 0x74, 0x6f, 0x73, 0x62, 0x06, 0x70, 0x72,
+	0x6f, 0x74, 0x6f, 0x33,
 }
 
 var (
-	file_protodescriptor_proto_rawDescOnce sync.Once
-	file_protodescriptor_proto_rawDescData = file_protodescriptor_proto_rawDesc
+	file_pitaya_protos_protodescriptor_proto_rawDescOnce sync.Once
+	file_pitaya_protos_protodescriptor_proto_rawDescData = file_pitaya_protos_protodescriptor_proto_rawDesc
 )
 
-func file_protodescriptor_proto_rawDescGZIP() []byte {
-	file_protodescriptor_proto_rawDescOnce.Do(func() {
-		file_protodescriptor_proto_rawDescData = protoimpl.X.CompressGZIP(file_protodescriptor_proto_rawDescData)
+func file_pitaya_protos_protodescriptor_proto_rawDescGZIP() []byte {
+	file_pitaya_protos_protodescriptor_proto_rawDescOnce.Do(func() {
+		file_pitaya_protos_protodescriptor_proto_rawDescData = protoimpl.X.CompressGZIP(file_pitaya_protos_protodescriptor_proto_rawDescData)
 	})
-	return file_protodescriptor_proto_rawDescData
+	return file_pitaya_protos_protodescriptor_proto_rawDescData
 }
 
-var file_protodescriptor_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
-var file_protodescriptor_proto_goTypes = []interface{}{
+var file_pitaya_protos_protodescriptor_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_pitaya_protos_protodescriptor_proto_goTypes = []interface{}{
 	(*ProtoDescriptor)(nil),  // 0: protos.ProtoDescriptor
 	(*ProtoName)(nil),        // 1: protos.ProtoName
 	(*ProtoDescriptors)(nil), // 2: protos.ProtoDescriptors
 	(*ProtoNames)(nil),       // 3: protos.ProtoNames
 }
-var file_protodescriptor_proto_depIdxs = []int32{
+var file_pitaya_protos_protodescriptor_proto_depIdxs = []int32{
 	0, // [0:0] is the sub-list for method output_type
 	0, // [0:0] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
@@ -255,13 +256,13 @@ var file_protodescriptor_proto_depIdxs = []int32{
 	0, // [0:0] is the sub-list for field type_name
 }
 
-func init() { file_protodescriptor_proto_init() }
-func file_protodescriptor_proto_init() {
-	if File_protodescriptor_proto != nil {
+func init() { file_pitaya_protos_protodescriptor_proto_init() }
+func file_pitaya_protos_protodescriptor_proto_init() {
+	if File_pitaya_protos_protodescriptor_proto != nil {
 		return
 	}
 	if !protoimpl.UnsafeEnabled {
-		file_protodescriptor_proto_msgTypes[0].Exporter = func(v interface{}, i int) interface{} {
+		file_pitaya_protos_protodescriptor_proto_msgTypes[0].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*ProtoDescriptor); i {
 			case 0:
 				return &v.state
@@ -273,7 +274,7 @@ func file_protodescriptor_proto_init() {
 				return nil
 			}
 		}
-		file_protodescriptor_proto_msgTypes[1].Exporter = func(v interface{}, i int) interface{} {
+		file_pitaya_protos_protodescriptor_proto_msgTypes[1].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*ProtoName); i {
 			case 0:
 				return &v.state
@@ -285,7 +286,7 @@ func file_protodescriptor_proto_init() {
 				return nil
 			}
 		}
-		file_protodescriptor_proto_msgTypes[2].Exporter = func(v interface{}, i int) interface{} {
+		file_pitaya_protos_protodescriptor_proto_msgTypes[2].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*ProtoDescriptors); i {
 			case 0:
 				return &v.state
@@ -297,7 +298,7 @@ func file_protodescriptor_proto_init() {
 				return nil
 			}
 		}
-		file_protodescriptor_proto_msgTypes[3].Exporter = func(v interface{}, i int) interface{} {
+		file_pitaya_protos_protodescriptor_proto_msgTypes[3].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*ProtoNames); i {
 			case 0:
 				return &v.state
@@ -314,18 +315,18 @@ func file_protodescriptor_proto_init() {
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: file_protodescriptor_proto_rawDesc,
+			RawDescriptor: file_pitaya_protos_protodescriptor_proto_rawDesc,
 			NumEnums:      0,
 			NumMessages:   4,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
-		GoTypes:           file_protodescriptor_proto_goTypes,
-		DependencyIndexes: file_protodescriptor_proto_depIdxs,
-		MessageInfos:      file_protodescriptor_proto_msgTypes,
+		GoTypes:           file_pitaya_protos_protodescriptor_proto_goTypes,
+		DependencyIndexes: file_pitaya_protos_protodescriptor_proto_depIdxs,
+		MessageInfos:      file_pitaya_protos_protodescriptor_proto_msgTypes,
 	}.Build()
-	File_protodescriptor_proto = out.File
-	file_protodescriptor_proto_rawDesc = nil
-	file_protodescriptor_proto_goTypes = nil
-	file_protodescriptor_proto_depIdxs = nil
+	File_pitaya_protos_protodescriptor_proto = out.File
+	file_pitaya_protos_protodescriptor_proto_rawDesc = nil
+	file_pitaya_protos_protodescriptor_proto_goTypes = nil
+	file_pitaya_protos_protodescriptor_proto_depIdxs = nil
 }

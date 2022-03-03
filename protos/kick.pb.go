@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.27.1
 // 	protoc        v3.19.1
-// source: kick.proto
+// source: pitaya-protos/kick.proto
 
 package protos
 
@@ -31,7 +31,7 @@ type KickMsg struct {
 func (x *KickMsg) Reset() {
 	*x = KickMsg{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_kick_proto_msgTypes[0]
+		mi := &file_pitaya_protos_kick_proto_msgTypes[0]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -44,7 +44,7 @@ func (x *KickMsg) String() string {
 func (*KickMsg) ProtoMessage() {}
 
 func (x *KickMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_kick_proto_msgTypes[0]
+	mi := &file_pitaya_protos_kick_proto_msgTypes[0]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -57,7 +57,7 @@ func (x *KickMsg) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KickMsg.ProtoReflect.Descriptor instead.
 func (*KickMsg) Descriptor() ([]byte, []int) {
-	return file_kick_proto_rawDescGZIP(), []int{0}
+	return file_pitaya_protos_kick_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *KickMsg) GetUserId() string {
@@ -78,7 +78,7 @@ type KickAnswer struct {
 func (x *KickAnswer) Reset() {
 	*x = KickAnswer{}
 	if protoimpl.UnsafeEnabled {
-		mi := &file_kick_proto_msgTypes[1]
+		mi := &file_pitaya_protos_kick_proto_msgTypes[1]
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		ms.StoreMessageInfo(mi)
 	}
@@ -91,7 +91,7 @@ func (x *KickAnswer) String() string {
 func (*KickAnswer) ProtoMessage() {}
 
 func (x *KickAnswer) ProtoReflect() protoreflect.Message {
-	mi := &file_kick_proto_msgTypes[1]
+	mi := &file_pitaya_protos_kick_proto_msgTypes[1]
 	if protoimpl.UnsafeEnabled && x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -104,7 +104,7 @@ func (x *KickAnswer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use KickAnswer.ProtoReflect.Descriptor instead.
 func (*KickAnswer) Descriptor() ([]byte, []int) {
-	return file_kick_proto_rawDescGZIP(), []int{1}
+	return file_pitaya_protos_kick_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *KickAnswer) GetKicked() bool {
@@ -114,38 +114,38 @@ func (x *KickAnswer) GetKicked() bool {
 	return false
 }
 
-var File_kick_proto protoreflect.FileDescriptor
+var File_pitaya_protos_kick_proto protoreflect.FileDescriptor
 
-var file_kick_proto_rawDesc = []byte{
-	0x0a, 0x0a, 0x6b, 0x69, 0x63, 0x6b, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x12, 0x06, 0x70, 0x72,
-	0x6f, 0x74, 0x6f, 0x73, 0x22, 0x21, 0x0a, 0x07, 0x4b, 0x69, 0x63, 0x6b, 0x4d, 0x73, 0x67, 0x12,
-	0x16, 0x0a, 0x06, 0x75, 0x73, 0x65, 0x72, 0x49, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52,
-	0x06, 0x75, 0x73, 0x65, 0x72, 0x49, 0x64, 0x22, 0x24, 0x0a, 0x0a, 0x4b, 0x69, 0x63, 0x6b, 0x41,
-	0x6e, 0x73, 0x77, 0x65, 0x72, 0x12, 0x16, 0x0a, 0x06, 0x6b, 0x69, 0x63, 0x6b, 0x65, 0x64, 0x18,
-	0x01, 0x20, 0x01, 0x28, 0x08, 0x52, 0x06, 0x6b, 0x69, 0x63, 0x6b, 0x65, 0x64, 0x42, 0x1c, 0x5a,
-	0x09, 0x2e, 0x2e, 0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x73, 0xaa, 0x02, 0x0e, 0x4e, 0x50, 0x69,
-	0x74, 0x61, 0x79, 0x61, 0x2e, 0x50, 0x72, 0x6f, 0x74, 0x6f, 0x73, 0x62, 0x06, 0x70, 0x72, 0x6f,
-	0x74, 0x6f, 0x33,
+var file_pitaya_protos_kick_proto_rawDesc = []byte{
+	0x0a, 0x18, 0x70, 0x69, 0x74, 0x61, 0x79, 0x61, 0x2d, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x73, 0x2f,
+	0x6b, 0x69, 0x63, 0x6b, 0x2e, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x12, 0x06, 0x70, 0x72, 0x6f, 0x74,
+	0x6f, 0x73, 0x22, 0x21, 0x0a, 0x07, 0x4b, 0x69, 0x63, 0x6b, 0x4d, 0x73, 0x67, 0x12, 0x16, 0x0a,
+	0x06, 0x75, 0x73, 0x65, 0x72, 0x49, 0x64, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x06, 0x75,
+	0x73, 0x65, 0x72, 0x49, 0x64, 0x22, 0x24, 0x0a, 0x0a, 0x4b, 0x69, 0x63, 0x6b, 0x41, 0x6e, 0x73,
+	0x77, 0x65, 0x72, 0x12, 0x16, 0x0a, 0x06, 0x6b, 0x69, 0x63, 0x6b, 0x65, 0x64, 0x18, 0x01, 0x20,
+	0x01, 0x28, 0x08, 0x52, 0x06, 0x6b, 0x69, 0x63, 0x6b, 0x65, 0x64, 0x42, 0x1b, 0x5a, 0x08, 0x2e,
+	0x2f, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x73, 0xaa, 0x02, 0x0e, 0x4e, 0x50, 0x69, 0x74, 0x61, 0x79,
+	0x61, 0x2e, 0x50, 0x72, 0x6f, 0x74, 0x6f, 0x73, 0x62, 0x06, 0x70, 0x72, 0x6f, 0x74, 0x6f, 0x33,
 }
 
 var (
-	file_kick_proto_rawDescOnce sync.Once
-	file_kick_proto_rawDescData = file_kick_proto_rawDesc
+	file_pitaya_protos_kick_proto_rawDescOnce sync.Once
+	file_pitaya_protos_kick_proto_rawDescData = file_pitaya_protos_kick_proto_rawDesc
 )
 
-func file_kick_proto_rawDescGZIP() []byte {
-	file_kick_proto_rawDescOnce.Do(func() {
-		file_kick_proto_rawDescData = protoimpl.X.CompressGZIP(file_kick_proto_rawDescData)
+func file_pitaya_protos_kick_proto_rawDescGZIP() []byte {
+	file_pitaya_protos_kick_proto_rawDescOnce.Do(func() {
+		file_pitaya_protos_kick_proto_rawDescData = protoimpl.X.CompressGZIP(file_pitaya_protos_kick_proto_rawDescData)
 	})
-	return file_kick_proto_rawDescData
+	return file_pitaya_protos_kick_proto_rawDescData
 }
 
-var file_kick_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
-var file_kick_proto_goTypes = []interface{}{
+var file_pitaya_protos_kick_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_pitaya_protos_kick_proto_goTypes = []interface{}{
 	(*KickMsg)(nil),    // 0: protos.KickMsg
 	(*KickAnswer)(nil), // 1: protos.KickAnswer
 }
-var file_kick_proto_depIdxs = []int32{
+var file_pitaya_protos_kick_proto_depIdxs = []int32{
 	0, // [0:0] is the sub-list for method output_type
 	0, // [0:0] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
@@ -153,13 +153,13 @@ var file_kick_proto_depIdxs = []int32{
 	0, // [0:0] is the sub-list for field type_name
 }
 
-func init() { file_kick_proto_init() }
-func file_kick_proto_init() {
-	if File_kick_proto != nil {
+func init() { file_pitaya_protos_kick_proto_init() }
+func file_pitaya_protos_kick_proto_init() {
+	if File_pitaya_protos_kick_proto != nil {
 		return
 	}
 	if !protoimpl.UnsafeEnabled {
-		file_kick_proto_msgTypes[0].Exporter = func(v interface{}, i int) interface{} {
+		file_pitaya_protos_kick_proto_msgTypes[0].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*KickMsg); i {
 			case 0:
 				return &v.state
@@ -171,7 +171,7 @@ func file_kick_proto_init() {
 				return nil
 			}
 		}
-		file_kick_proto_msgTypes[1].Exporter = func(v interface{}, i int) interface{} {
+		file_pitaya_protos_kick_proto_msgTypes[1].Exporter = func(v interface{}, i int) interface{} {
 			switch v := v.(*KickAnswer); i {
 			case 0:
 				return &v.state
@@ -188,18 +188,18 @@ func file_kick_proto_init() {
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: file_kick_proto_rawDesc,
+			RawDescriptor: file_pitaya_protos_kick_proto_rawDesc,
 			NumEnums:      0,
 			NumMessages:   2,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
-		GoTypes:           file_kick_proto_goTypes,
-		DependencyIndexes: file_kick_proto_depIdxs,
-		MessageInfos:      file_kick_proto_msgTypes,
+		GoTypes:           file_pitaya_protos_kick_proto_goTypes,
+		DependencyIndexes: file_pitaya_protos_kick_proto_depIdxs,
+		MessageInfos:      file_pitaya_protos_kick_proto_msgTypes,
 	}.Build()
-	File_kick_proto = out.File
-	file_kick_proto_rawDesc = nil
-	file_kick_proto_goTypes = nil
-	file_kick_proto_depIdxs = nil
+	File_pitaya_protos_kick_proto = out.File
+	file_pitaya_protos_kick_proto_rawDesc = nil
+	file_pitaya_protos_kick_proto_goTypes = nil
+	file_pitaya_protos_kick_proto_depIdxs = nil
 }

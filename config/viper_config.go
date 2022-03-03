@@ -27,8 +27,26 @@ import (
 	"github.com/spf13/viper"
 )
 
+//ConfLoader 重载监听
 type ConfLoader interface {
-	Reload(conf *viper.Viper)
+	//Reload 重载
+	//  @param conf 反序列化 Provide 提供的 confStruct
+	Reload(confStruct interface{})
+	//Provide 提供给重载前反序列化用的key和struct
+	//  @return key
+	//  @return confStruct
+	Provide() (key string, confStruct interface{})
+}
+type LoaderFactory struct {
+	ReloadApply  func(confStruct interface{})
+	ProvideApply func() (key string, confStruct interface{})
+}
+
+func (l LoaderFactory) Reload(confStruct interface{}) {
+	l.ReloadApply(confStruct)
+}
+func (l LoaderFactory) Provide() (key string, confStruct interface{}) {
+	return l.ProvideApply()
 }
 
 // Config is a wrapper around a viper config
@@ -155,6 +173,9 @@ func (c *Config) fillDefaultValues() {
 		"pitaya.conf.etcdaddr":          pitayaConfig.Conf.EtcdAddr,
 		"pitaya.conf.etcdkeys":          pitayaConfig.Conf.EtcdKeys,
 		"pitaya.conf.interval":          pitayaConfig.Conf.Interval,
+		"pitaya.conf.formatter":         pitayaConfig.Conf.Formatter,
+		"pitaya.log.development":        pitayaConfig.Log.Development,
+		"pitaya.log.level":              pitayaConfig.Log.Level,
 	}
 
 	for param := range defaultsMap {
@@ -170,7 +191,11 @@ func (c *Config) AddLoader(loader ConfLoader) {
 
 func (c *Config) Reload() {
 	for _, loader := range c.loaders {
-		loader.Reload(c.config)
+		key, confStruct := loader.Provide()
+		if confStruct != nil {
+			c.UnmarshalKey(key, confStruct)
+		}
+		loader.Reload(confStruct)
 	}
 }
 
@@ -186,14 +211,19 @@ func (c *Config) LoadAndWatch() {
 	addr := c.config.GetString("pitaya.conf.etcdaddr")
 	keys := c.config.GetStringSlice("pitaya.conf.etcdkeys")
 	if len(keys) > 0 && addr != "" {
+		formatter := c.config.GetString("pitaya.conf.formatter")
+		if formatter != "" {
+			c.config.SetConfigType(formatter)
+		}
 		for _, key := range keys {
 			c.config.AddRemoteProvider("etcd", addr, key)
 		}
 		c.config.ReadRemoteConfig()
 		c.config.WatchRemoteConfigOnChannel()
 	}
-	c.Reload()
+	//TODO 暂时用loop实现配置重载,后期fork viper修改watchKeyValueConfigOnChannel()添加回调来实现
 	go func() {
+		c.Reload()
 		for {
 			interval := c.config.GetDuration("pitaya.conf.interval")
 			time.Sleep(interval)
@@ -203,6 +233,9 @@ func (c *Config) LoadAndWatch() {
 }
 
 // GetDuration returns a duration from the inner config
+//  @receiver c
+//  @param s finally call time.ParseDuration
+//  @return time.Duration
 func (c *Config) GetDuration(s string) time.Duration {
 	return c.config.GetDuration(s)
 }

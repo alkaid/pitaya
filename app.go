@@ -23,7 +23,6 @@ package pitaya
 import (
 	"context"
 	"github.com/go-redis/redis/v8"
-	"github.com/topfreegames/pitaya/v2/log"
 	"os"
 	"os/signal"
 	"reflect"
@@ -73,7 +72,6 @@ const (
 // Pitaya App interface
 type Pitaya interface {
 	GetDieChan() chan bool
-	SetDebug(debug bool)
 	SetHeartbeatTime(interval time.Duration)
 	GetServerID() string
 	GetMetricsReporters() []metrics.Reporter
@@ -187,7 +185,6 @@ type Pitaya interface {
 type App struct {
 	acceptors        []acceptor.Acceptor
 	config           config.PitayaConfig
-	debug            bool
 	dieChan          chan bool
 	heartbeat        time.Duration
 	router           *router.Router
@@ -242,7 +239,6 @@ func NewApp(
 		remoteService:    remoteService,
 		handlerService:   handlerService,
 		groups:           groups,
-		debug:            false,
 		startAt:          time.Now(),
 		dieChan:          dieChan,
 		acceptors:        acceptors,
@@ -268,11 +264,6 @@ func NewApp(
 // GetDieChan gets the channel that the app sinalizes when its going to die
 func (app *App) GetDieChan() chan bool {
 	return app.dieChan
-}
-
-// SetDebug toggles debug on/off
-func (app *App) SetDebug(debug bool) {
-	app.debug = debug
 }
 
 // SetHeartbeatTime sets the heartbeat time
@@ -339,7 +330,7 @@ func (app *App) AddServerDiscoveryListener(listener cluster.SDListener) {
 //  @param loader
 func (app *App) AddConfLoader(loader config.ConfLoader) {
 	if app.conf == nil {
-		log.Log.Error("app conf is nil!")
+		logger.Log.Error("app conf is nil!")
 		return
 	}
 	app.conf.AddLoader(loader)
@@ -361,11 +352,6 @@ func (app *App) GetRedis() redis.Cmdable {
 
 func (app *App) AddSessionListener(listener cluster.RemoteSessionListener) {
 	app.remoteService.AddRemoteSessionListener(listener)
-}
-
-// SetLogger logger setter
-func SetLogger(l logging.Logger) {
-	logger.Log = l
 }
 
 func (app *App) initSysRemotes() {

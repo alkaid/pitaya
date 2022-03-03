@@ -61,11 +61,12 @@ protos-compile-demo:
 	@protoc -I examples/demo/worker/protos examples/demo/worker/protos/*.proto --go_out=.
 	@#protoc -I examples/demo/cluster_ak/protos examples/demo/cluster_ak/protos/*.proto --go_out=.
 
+#https://developers.google.com/protocol-buffers/docs/reference/go-generated
 protos-compile:
 	@cd benchmark/testdata && ./gen_proto.sh
-	@protoc -I pitaya-protos/ pitaya-protos/*.proto --go_out=protos
-	@protoc -I pitaya-protos/ pitaya-protos/*.proto --go-grpc_out=protos
-	@protoc -I pitaya-protos/test pitaya-protos/test/*.proto --go_out=protos/test
+	@protoc --proto_path=. pitaya-protos/*.proto --go_out=. --go_opt=paths=import
+	@protoc --proto_path=. pitaya-protos/*.proto --go-grpc_out=.
+	@protoc -I pitaya-protos/test pitaya-protos/test/*.proto --go_out=protos/test --go_opt=paths=import
 
 rm-test-temp-files:
 	@rm -f cluster/127.0.0.1* 127.0.0.1*

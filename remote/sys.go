@@ -25,7 +25,6 @@ import (
 	"github.com/topfreegames/pitaya/v2/cluster"
 	"github.com/topfreegames/pitaya/v2/component"
 	"github.com/topfreegames/pitaya/v2/constants"
-	"github.com/topfreegames/pitaya/v2/log"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/protos"
 	"github.com/topfreegames/pitaya/v2/route"
@@ -91,7 +90,7 @@ func (sys *Sys) Init() {
 		//通知所有 server
 		r, err := route.Decode(constants.SessionClosedRoute)
 		if err != nil {
-			log.Log.Fatal(err.Error())
+			logger.Log.Error(err)
 			return
 		}
 		msg := &protos.KickMsg{
@@ -99,7 +98,7 @@ func (sys *Sys) Init() {
 		}
 		err = sys.remote.Notify(context.Background(), "", r, msg, s)
 		if err != nil {
-			log.Log.Fatal(err.Error())
+			logger.Log.Error(err)
 			return
 		}
 		//这里只可能是frontend 不再考虑stateful backend的处理
@@ -242,12 +241,12 @@ func (s *Sys) BindBackendSession(ctx context.Context, msg *protos.BindBackendMsg
 	if sess == nil {
 		sess = s.getSessionFromCtx(ctx)
 		if sess == nil && sess.UID() != msg.Uid {
-			log.Log.Error(constants.ErrSessionNotFound.Error())
+			logger.Log.Error(constants.ErrSessionNotFound.Error())
 			return nil, constants.ErrSessionNotFound
 		}
 	}
 	if msg.Btype != s.server.Type || msg.Bid != s.server.ID {
-		log.Log.Error(constants.ErrIllegalBindBackendID.Error())
+		logger.Log.Error(constants.ErrIllegalBindBackendID.Error())
 		return nil, constants.ErrIllegalBindBackendID
 	}
 	if err := sess.BindBackend(ctx, s.server.Type, s.server.ID); err != nil {

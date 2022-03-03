@@ -225,3 +225,17 @@ func GetContextFromRequest(req *protos.Request, serverID string) (context.Contex
 	ctx = CtxWithDefaultLogger(ctx, req.GetMsg().GetRoute(), "")
 	return ctx, nil
 }
+
+//SetDevelopment 是否开启开发者模式 true为development mode 否则为production mode
+//  development mode: zap.NewDevelopmentConfig()模式
+//  production mode:zap.NewProductionConfig()模式
+//  @param enable
+func SetDevelopment(enable bool) {
+	logger.Manager.SetDevelopment(true)
+}
+
+//SetLevel 动态改变打印级别
+//  @param level 支持的类型为int,zapcore.Level,string,int,zap.AtomicLevel. 建议使用string,支持的string为
+func SetLevel(level interface{}) {
+	logger.Manager.SetLevel(level)
+}
