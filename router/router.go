@@ -22,6 +22,7 @@ package router
 
 import (
 	"context"
+	"github.com/topfreegames/pitaya/v2/errors"
 	"github.com/topfreegames/pitaya/v2/session"
 	"math/rand"
 	"time"
@@ -72,13 +73,6 @@ func (r *Router) defaultRoute(
 	servers map[string]*cluster.Server,
 	session session.Session,
 ) (*cluster.Server, error) {
-	if session != nil {
-		bid := session.GetBackendID(svType)
-		if bid != "" {
-			return servers[bid], nil
-		}
-		return nil, constants.ErrNoServersAvailableOfType
-	}
 	srvList := make([]*cluster.Server, 0)
 	s := rand.NewSource(time.Now().Unix())
 	rnd := rand.New(s)
@@ -86,6 +80,25 @@ func (r *Router) defaultRoute(
 		srvList = append(srvList, v)
 	}
 	server := srvList[rnd.Intn(len(srvList))]
+	if session != nil {
+		svId := ""
+		if server.Frontend {
+			svId = session.GetFrontendID()
+		} else if server.SessionStickiness {
+			svId = session.GetBackendID(server.Type)
+		} else {
+			return server, nil
+		}
+		if svId != "" {
+			return servers[svId], nil
+		}
+		//return nil,constants.ErrNoServersAvailableOfType
+		//需要路由到绑定session的服务,但是找不到，报错
+		return nil, errors.New(errors.ErrSessionNotFoundInServer, constants.ErrNoServersAvailableOfType.Error(), map[string]string{
+			"server": server.Type,
+		})
+
+	}
 	return server, nil
 }
 

@@ -143,6 +143,7 @@ type sessionImpl struct {
 type Session interface {
 	GetOnCloseCallbacks() []func()
 	GetIsFrontend() bool
+	GetFrontendID() string
 	GetSubscriptions() []*nats.Subscription
 	SetOnCloseCallbacks(callbacks []func())
 	SetIsFrontend(isFrontend bool)
@@ -460,6 +461,9 @@ func (s *sessionImpl) GetOnCloseCallbacks() []func() {
 // GetIsFrontend ...
 func (s *sessionImpl) GetIsFrontend() bool {
 	return s.IsFrontend
+}
+func (s *sessionImpl) GetFrontendID() string {
+	return s.frontendID
 }
 
 // GetSubscriptions ...

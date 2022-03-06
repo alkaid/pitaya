@@ -140,13 +140,18 @@ type LogConf struct {
 	Level       string
 }
 
-func (l *Logger) ReloadFactory(k string) config.LoaderFactory {
+func (l *Logger) ReloadFactory(k string, onReloadeds ...func()) config.LoaderFactory {
 	return config.LoaderFactory{
 		ReloadApply: func(key string, confStruct interface{}) {
 			c := confStruct.(*LogConf)
 			l.SetDevelopment(c.Development)
 			l.SetLevel(c.Level)
 			l.Log.Debug("change log conf", zap.String("key", key), zap.Any("conf", c))
+			if len(onReloadeds) > 0 {
+				for _, reloaded := range onReloadeds {
+					reloaded()
+				}
+			}
 		},
 		ProvideApply: func() (key string, confStruct interface{}) {
 			return k, &LogConf{}

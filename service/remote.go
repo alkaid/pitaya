@@ -113,24 +113,24 @@ func (r *RemoteService) remoteProcess(
 	res, err := r.remoteCall(ctx, server, protos.RPCType_Sys, route, a.GetSession(), msg)
 	switch msg.Type {
 	case message.Request:
-		if err != nil {
-			logger.Log.Errorf("Failed to process remote server: %s", err.Error())
-			a.AnswerWithError(ctx, msg.ID, err)
-			return
-		}
-		err := a.GetSession().ResponseMID(ctx, msg.ID, res.Data)
-		if err != nil {
-			logger.Log.Errorf("Failed to respond to remote server: %s", err.Error())
-			a.AnswerWithError(ctx, msg.ID, err)
-		}
 	case message.Notify:
 		defer tracing.FinishSpan(ctx, err)
-		if err == nil && res.Error != nil {
-			err = errors.New(res.Error.GetMsg())
-		}
-		if err != nil {
-			logger.Log.Errorf("error while sending a notify to server: %s", err.Error())
-		}
+		//if err == nil && res.Error != nil {
+		//	err = errors.New(res.Error.GetMsg())
+		//}
+		//if err != nil {
+		//	logger.Log.Errorf("error while sending a notify to server: %s", err.Error())
+		//}
+	}
+	if err != nil {
+		logger.Log.Errorf("Failed to process remote server: %s", err.Error())
+		a.AnswerWithError(ctx, msg.ID, err)
+		return
+	}
+	err = a.GetSession().ResponseMID(ctx, msg.ID, res.Data)
+	if err != nil {
+		logger.Log.Errorf("Failed to respond to remote server: %s", err.Error())
+		a.AnswerWithError(ctx, msg.ID, err)
 	}
 }
 

@@ -29,11 +29,12 @@ import (
 
 // Server struct
 type Server struct {
-	ID       string            `json:"id"`
-	Type     string            `json:"type"`
-	Metadata map[string]string `json:"metadata"`
-	Frontend bool              `json:"frontend"`
-	Hostname string            `json:"hostname"`
+	ID                string            `json:"id"`
+	Type              string            `json:"type"`
+	Metadata          map[string]string `json:"metadata"`
+	Frontend          bool              `json:"frontend"`
+	Hostname          string            `json:"hostname"`
+	SessionStickiness bool              `json:"stickiness"` //是否可以绑定session，绑定后将保持session粘连
 }
 
 // NewServer ctor

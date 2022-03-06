@@ -38,6 +38,11 @@ const ErrBadRequestCode = "PIT-400"
 // ErrClientClosedRequest is a string code representing the client closed request error
 const ErrClientClosedRequest = "PIT-499"
 
+//扩展的错误码 从1000开始
+
+// ErrSessionNotFoundInServer 目标服务器上找不到该用户
+const ErrSessionNotFoundInServer = "PIT-1000"
+
 // Error is an error with a code, message and metadata
 type Error struct {
 	err      error

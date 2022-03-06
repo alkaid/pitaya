@@ -59,6 +59,9 @@ const (
 
 	// SessionKickedBackendRoute session与stateful backend解绑后的路由
 	SessionKickedBackendRoute = "sys.sessionkickedbackend"
+
+	// ServerInternalErrorToClientRoute 服务器内部错误时若不是request类型消息引起的,以该路由回应客户端
+	ServerInternalErrorToClientRoute = "internal.error"
 )
 
 // SessionCtxKey is the context key where the session will be set
