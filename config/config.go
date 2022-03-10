@@ -2,11 +2,59 @@ package config
 
 import (
 	"fmt"
-	"github.com/go-redis/redis/v8"
 	"time"
 
+	"github.com/go-redis/redis/v8"
 	"github.com/topfreegames/pitaya/v2/metrics/models"
 )
+
+// type ConfigAll struct {
+// 	Pitaya struct{
+// 		PitayaConfig
+// 		Cluster struct{
+// 			Info InfoRetrieverConfig
+// 			Rpc struct{
+// 				Client struct{
+// 					Grpc GRPCClientConfig
+// 					Nats NatsRPCClientConfig
+// 				}
+// 				Server struct{
+// 					Grpc GRPCServerConfig
+// 					Nats NatsRPCServerConfig
+// 				}
+// 			}
+// 			Sd struct{
+// 				Etcd EtcdServiceDiscoveryConfig
+// 			}
+// 		}
+// 		Groups struct{
+// 			Etcd EtcdGroupServiceConfig
+// 			Memory MemoryGroupConfig
+// 		}
+// 		Modules struct{
+// 			BindingStorage struct{
+// 				Etcd ETCDBindingConfig
+// 			}
+// 		}
+// 		Conn struct{
+// 			RateLimiting RateLimitingConfig
+// 		}
+//
+// 		Metrics struct {
+// 			Prometheus struct {
+// 				Enabled bool
+// 			}
+// 			Statsd struct {
+// 				Enabled bool
+// 			}
+// 		}
+// 		DefaultPipelines struct {
+// 			StructValidation struct {
+// 				Enabled bool
+// 			}
+// 		}
+// 	}
+// }
 
 // PitayaConfig provides configuration for a pitaya app
 type PitayaConfig struct {
@@ -365,16 +413,65 @@ type EtcdServiceDiscoveryConfig struct {
 }
 
 type RedisConfig struct {
-	redis.ClusterOptions
+	// A seed list of host:port addresses of cluster nodes.
+	Addrs        []string
+	Username     string
+	Password     string
+	PoolSize     int // 连接池最大socket连接数，默认为4倍CPU数， 4 * runtime.NumCPU
+	MinIdleConns int // 在启动阶段创建指定数量的Idle连接，并长期维持idle状态的连接数不少于指定数量；。
+
+	// 超时
+	DialTimeout  time.Duration // 连接建立超时时间，默认5秒。
+	ReadTimeout  time.Duration // 读超时，默认3秒， -1表示取消读超时
+	WriteTimeout time.Duration // 写超时，默认等于读超时
+	PoolTimeout  time.Duration // 当所有连接都处在繁忙状态时，客户端等待可用连接的最大等待时长，默认为读超时+1秒。
+
+	// 闲置连接检查包括IdleTimeout，MaxConnAge
+	IdleCheckFrequency time.Duration // 闲置连接检查的周期，默认为1分钟，-1表示不做周期性检查，只在客户端获取连接时对闲置连接进行处理。
+	IdleTimeout        time.Duration // 闲置超时，默认5分钟，-1表示取消闲置超时检查
+	MaxConnAge         time.Duration // 连接存活时长，从创建开始计时，超过指定时长则关闭连接，默认为0，即不关闭存活时长较长的连接
+
+	// 命令执行失败时的重试策略
+	MaxRetries      int           // 命令执行失败时，最多重试多少次，默认为0即不重试
+	MinRetryBackoff time.Duration // 每次计算重试间隔时间的下限，默认8毫秒，-1表示取消间隔
+	MaxRetryBackoff time.Duration // 每次计算重试间隔时间的上限，默认8毫秒，-1表示取消间隔
+
 }
 
 func NewDefaultRedisConfig() *RedisConfig {
 	return &RedisConfig{
-		redis.ClusterOptions{
-			Addrs:    []string{"localhost:6379"},
-			Password: "",
-		},
+		Addrs: []string{"localhost:6379"},
 	}
+}
+func ToRedisClusterOption(conf *RedisConfig) *redis.ClusterOptions {
+	opts := &redis.ClusterOptions{
+		Addrs:              conf.Addrs,
+		NewClient:          nil,
+		MaxRedirects:       0,
+		ReadOnly:           false,
+		RouteByLatency:     false,
+		RouteRandomly:      false,
+		ClusterSlots:       nil,
+		Dialer:             nil,
+		OnConnect:          nil,
+		Username:           conf.Username,
+		Password:           conf.Password,
+		MaxRetries:         conf.MaxRetries,
+		MinRetryBackoff:    conf.MinRetryBackoff,
+		MaxRetryBackoff:    conf.MaxRetryBackoff,
+		DialTimeout:        conf.DialTimeout,
+		ReadTimeout:        conf.ReadTimeout,
+		WriteTimeout:       conf.WriteTimeout,
+		PoolFIFO:           false,
+		PoolSize:           conf.PoolSize,
+		MinIdleConns:       conf.MinIdleConns,
+		MaxConnAge:         conf.MaxConnAge,
+		PoolTimeout:        conf.PoolTimeout,
+		IdleTimeout:        conf.IdleTimeout,
+		IdleCheckFrequency: conf.IdleCheckFrequency,
+		TLSConfig:          nil,
+	}
+	return opts
 }
 func NewRedisConfig(config *Config) *RedisConfig {
 	conf := NewDefaultRedisConfig()

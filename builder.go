@@ -7,6 +7,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/agent"
 	"github.com/topfreegames/pitaya/v2/cluster"
 	"github.com/topfreegames/pitaya/v2/config"
+	confPkg "github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/conn/codec"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/defaultpipelines"
@@ -164,8 +165,8 @@ func NewBuilder(isFrontend bool,
 		configureDefaultPipelines(handlerHooks)
 	}
 
-	//session 后端redis落地实例
-	redisClient := redis.NewClusterClient(&redisConfig.ClusterOptions)
+	// session 后端redis落地实例
+	redisClient := redis.NewClusterClient(confPkg.ToRedisClusterOption(&redisConfig))
 	sessPoolStorage := session.NewRedisStorage(redisClient, config.Pitaya.Session.CacheTTL)
 	sessionPool := session.NewSessionPool()
 	sessionPool.SetClusterStorage(sessPoolStorage)

@@ -25,7 +25,7 @@ package logger
 import (
 	"errors"
 	"fmt"
-	"github.com/topfreegames/pitaya/v2/config"
+
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -140,8 +140,8 @@ type LogConf struct {
 	Level       string
 }
 
-func (l *Logger) ReloadFactory(k string, onReloadeds ...func()) config.LoaderFactory {
-	return config.LoaderFactory{
+func (l *Logger) ReloadFactory(k string, onReloadeds ...func()) LoaderFactory {
+	return LoaderFactory{
 		ReloadApply: func(key string, confStruct interface{}) {
 			c := confStruct.(*LogConf)
 			l.SetDevelopment(c.Development)
@@ -157,4 +157,20 @@ func (l *Logger) ReloadFactory(k string, onReloadeds ...func()) config.LoaderFac
 			return k, &LogConf{}
 		},
 	}
+}
+
+// LoaderFactory ConfLoader 工厂,用于生成需要动态包装的 ConfLoader 实现
+//  @implement ConfLoader
+type LoaderFactory struct {
+	// ConfLoader.Reload 的包装函数
+	ReloadApply func(key string, confStruct interface{})
+	// ConfLoader.Provide 的包装函数
+	ProvideApply func() (key string, confStruct interface{})
+}
+
+func (l LoaderFactory) Reload(key string, confStruct interface{}) {
+	l.ReloadApply(key, confStruct)
+}
+func (l LoaderFactory) Provide() (key string, confStruct interface{}) {
+	return l.ProvideApply()
 }

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"github.com/topfreegames/pitaya/v2/logger"
 )
 
 //ConfLoader 重载监听
@@ -39,12 +40,12 @@ type ConfLoader interface {
 	Provide() (key string, confStruct interface{})
 }
 
-//LoaderFactory ConfLoader 工厂,用于生成需要动态包装的 ConfLoader 实现
+// LoaderFactory ConfLoader 工厂,用于生成需要动态包装的 ConfLoader 实现
 //  @implement ConfLoader
 type LoaderFactory struct {
-	//ConfLoader.Reload 的包装函数
+	// ConfLoader.Reload 的包装函数
 	ReloadApply func(key string, confStruct interface{})
-	//ConfLoader.Provide 的包装函数
+	// ConfLoader.Provide 的包装函数
 	ProvideApply func() (key string, confStruct interface{})
 }
 
@@ -200,8 +201,18 @@ func (c *Config) AddLoader(loader ConfLoader) {
 func (c *Config) reloadAll() {
 	for _, loader := range c.loaders {
 		key, confStruct := loader.Provide()
-		if confStruct != nil {
-			c.UnmarshalKey(key, confStruct)
+		if confStruct == nil {
+			continue
+		}
+		var err error
+		if key != "" {
+			err = c.UnmarshalKey(key, confStruct)
+		} else {
+			err = c.Unmarshal(confStruct)
+		}
+		if err != nil {
+			logger.Log.Errorf("pitaya:reload config unmarshal error:%v", err)
+			continue
 		}
 		loader.Reload(key, confStruct)
 	}

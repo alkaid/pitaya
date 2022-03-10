@@ -24,11 +24,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/nats-io/nuid"
 	"os"
 	"reflect"
 	"runtime/debug"
 	"strconv"
+
+	"github.com/nats-io/nuid"
 
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
@@ -136,6 +137,16 @@ func GetErrorFromPayload(serializer serialize.Serializer, payload []byte) error 
 	return err
 }
 
+var errWrapper ErrorWrapper
+
+type ErrorWrapper func(err *protos.Error) interface{}
+
+// SetInternalErrorWrapper 设置内部错误包装器,框架内部错误时会返回该包装过的错误给客户端
+//  @param wrapper
+func SetInternalErrorWrapper(wrapper ErrorWrapper) {
+	errWrapper = wrapper
+}
+
 // GetErrorPayload creates and serializes an error payload
 func GetErrorPayload(serializer serialize.Serializer, err error) ([]byte, error) {
 	code := e.ErrUnknownCode
@@ -151,6 +162,12 @@ func GetErrorPayload(serializer serialize.Serializer, err error) ([]byte, error)
 	}
 	if len(metadata) > 0 {
 		errPayload.Metadata = metadata
+	}
+	if errWrapper != nil {
+		p := errWrapper(errPayload)
+		if p != nil {
+			return SerializeOrRaw(serializer, p)
+		}
 	}
 	return SerializeOrRaw(serializer, errPayload)
 }

@@ -20,9 +20,9 @@ require (
 	github.com/stretchr/testify v1.7.0
 	github.com/topfreegames/go-workers v1.0.1
 	github.com/uber/jaeger-client-go v2.29.1+incompatible
-	go.etcd.io/etcd/api/v3 v3.5.1
-	go.etcd.io/etcd/client/v3 v3.5.1
-	go.etcd.io/etcd/tests/v3 v3.5.1
+	go.etcd.io/etcd/api/v3 v3.5.2
+	go.etcd.io/etcd/client/v3 v3.5.2
+	go.etcd.io/etcd/tests/v3 v3.5.2
 	go.uber.org/zap v1.20.0
 	google.golang.org/grpc v1.43.0
 	google.golang.org/protobuf v1.27.1
@@ -83,11 +83,11 @@ require (
 	github.com/uber/jaeger-lib v2.4.1+incompatible // indirect
 	github.com/xiang90/probing v0.0.0-20190116061207-43a291ad63a2 // indirect
 	go.etcd.io/bbolt v1.3.6 // indirect
-	go.etcd.io/etcd/client/pkg/v3 v3.5.1 // indirect
-	go.etcd.io/etcd/client/v2 v2.305.1 // indirect
-	go.etcd.io/etcd/pkg/v3 v3.5.1 // indirect
-	go.etcd.io/etcd/raft/v3 v3.5.1 // indirect
-	go.etcd.io/etcd/server/v3 v3.5.1 // indirect
+	go.etcd.io/etcd/client/pkg/v3 v3.5.2 // indirect
+	go.etcd.io/etcd/client/v2 v2.305.2 // indirect
+	go.etcd.io/etcd/pkg/v3 v3.5.2 // indirect
+	go.etcd.io/etcd/raft/v3 v3.5.2 // indirect
+	go.etcd.io/etcd/server/v3 v3.5.2 // indirect
 	go.opentelemetry.io/contrib v0.20.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.20.0 // indirect
 	go.opentelemetry.io/otel v0.20.0 // indirect
