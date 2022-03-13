@@ -22,8 +22,10 @@ package pitaya
 
 import (
 	"context"
-	"github.com/topfreegames/pitaya/v2/session"
 	"reflect"
+
+	agent2 "github.com/topfreegames/pitaya/v2/agent"
+	"github.com/topfreegames/pitaya/v2/session"
 
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/constants"
@@ -177,5 +179,9 @@ func (app *App) imperfectSessionForRPC(ctx context.Context, uid string) (session
 	if sess != nil && sess.UID() == uid {
 		return sess, nil
 	}
-	return app.sessionPool.ImperfectSessionFromCluster(uid)
+	agent, err := agent2.NewCluster(uid, app.sessionPool)
+	if err != nil {
+		return nil, err
+	}
+	return agent.Session, nil
 }

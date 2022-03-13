@@ -88,7 +88,9 @@ func (ns *NatsRPCClient) configure(config config.NatsRPCClientConfig) error {
 	return nil
 }
 
-// BroadcastSessionBind sends the binding information to other servers that may be interested in this info
+// Deprecated:Use Fork instead
+//
+// sends the binding information to other servers that may be interested in this info
 func (ns *NatsRPCClient) BroadcastSessionBind(uid string) error {
 	msg := &protos.BindMsg{
 		Uid: uid,

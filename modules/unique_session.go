@@ -45,49 +45,41 @@ func NewUniqueSession(server *cluster.Server, rpcServer cluster.RPCServer, rpcCl
 }
 
 // OnUserBind
-//@implement cluster.RemoteSessionListener
+// @implement cluster.RemoteBindingListener
 // 收到非自己服务器的session绑定通知时(远程)
 func (u *UniqueSession) OnUserBind(uid, fid string) {
-	if u.server.ID == fid {
+	if u.server.ID == fid || !u.server.Frontend {
 		return
 	}
 	oldSession := u.sessionPool.GetSessionByUID(uid)
-	if oldSession != nil && u.server.Frontend {
+	if oldSession != nil {
 		// TODO: it would be nice to set this correctly
-		oldSession.Kick(context.Background(), session.CloseReasonRebind)
+		oldSession.Kick(context.Background(), nil, session.CloseReasonRebind)
 	}
-	//TODO 如果是stateful backend,修改数据
 }
 
-//OnUserDisconnect 用户断线时
-//@implement cluster.RemoteSessionListener
-func (u *UniqueSession) OnUserDisconnect(uid string) {}
-
-//OnUserBindBackend 用户成功绑定backend服务器时
-//@implement cluster.RemoteSessionListener
+// OnUserBindBackend 用户成功绑定backend服务器时
+// @implement cluster.RemoteBindingListener
 func (u *UniqueSession) OnUserBindBackend(uid, serverType, serverId string) {
 	if serverType != u.server.Type || serverId == u.server.ID {
 		return
 	}
 	oldSession := u.sessionPool.GetSessionByUID(uid)
 	if oldSession != nil {
-		oldSession.KickBackend(context.Background(), serverType, session.CloseReasonRebind)
+		oldSession.KickBackend(context.Background(), serverType, nil, session.CloseReasonRebind)
 	}
 }
 
-//OnUserUnBindBackend 用户成功解绑backend服务器时
-//@implement cluster.RemoteSessionListener
-func (u *UniqueSession) OnUserUnBindBackend(uid, serverType, serverId string) {}
-
 // Init initializes the module
 func (u *UniqueSession) Init() error {
-	u.sessionPool.OnSessionBind(func(ctx context.Context, s session.Session) error {
-		oldSession := u.sessionPool.GetSessionByUID(s.UID())
-		if oldSession != nil {
-			oldSession.Kick(ctx, session.CloseReasonRebind)
-		}
-		err := u.rpcClient.BroadcastSessionBind(s.UID())
-		return err
-	})
+	// 同类frontend广播逻辑移动到 service.Sys处理
+	// u.sessionPool.OnSessionBind(func(ctx context.Context, s session.Session) error {
+	// 	oldSession := u.sessionPool.GetSessionByUID(s.UID())
+	// 	if oldSession != nil {
+	// 		oldSession.Kick(ctx, session.CloseReasonRebind)
+	// 	}
+	// 	err := u.rpcClient.BroadcastSessionBind(s.UID())
+	// 	return err
+	// })
 	return nil
 }

@@ -2,35 +2,36 @@ package session
 
 import (
 	"context"
-	"github.com/go-redis/redis/v8"
 	"time"
+
+	"github.com/go-redis/redis/v8"
 )
 
-//StorageInterface
+// CacheInterface
 //  @Description:
-type StorageInterface interface {
+type CacheInterface interface {
 	Set(key string, value string) error
 	Get(key string) (string, error)
 	Expire(key string) error
 }
-type RedisStorage struct {
+type RedisCache struct {
 	client redis.Cmdable
 	ttl    time.Duration
 }
 
-func NewRedisStorage(client redis.Cmdable, defaultTTL time.Duration) *RedisStorage {
-	return &RedisStorage{
+func NewRedisCache(client redis.Cmdable, defaultTTL time.Duration) *RedisCache {
+	return &RedisCache{
 		client: client,
 		ttl:    defaultTTL,
 	}
 }
 
-func (r RedisStorage) Set(key string, value string) error {
+func (r RedisCache) Set(key string, value string) error {
 	return r.client.Set(context.Background(), key, value, r.ttl).Err()
 }
-func (r RedisStorage) Get(key string) (string, error) {
+func (r RedisCache) Get(key string) (string, error) {
 	return r.client.Get(context.Background(), key).Result()
 }
-func (r RedisStorage) Expire(key string) error {
+func (r RedisCache) Expire(key string) error {
 	return r.client.Expire(context.Background(), key, r.ttl).Err()
 }

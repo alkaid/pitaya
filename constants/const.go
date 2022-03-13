@@ -39,7 +39,9 @@ const (
 	// SessionBindRoute is the route used for binding session
 	SessionBindRoute = "sys.bindsession"
 
-	// SessionBoundRoute session成功绑定的路由
+	// SessionBoundForkRoute session成功绑定的fork路由
+	SessionBoundForkRoute = "sys.sessionboundfork"
+	// SessionBoundRoute session成功绑定广播的路由
 	SessionBoundRoute = "sys.sessionbound"
 
 	// KickRoute is the route used for kicking an user
@@ -48,16 +50,18 @@ const (
 	// SessionClosedRoute session关闭后的路由
 	SessionClosedRoute = "sys.sessionclosed"
 
-	// SessionBindBackendRoute is the route used for binding session with stateful backend
+	// SessionBindBackendRoute session不在本服时转发请求绑定的路由
 	SessionBindBackendRoute = "sys.bindbackendsession"
 
-	//SessionBoundBackendRoute session成功绑定到stateful backend后的广播路由
+	// SessionBoundBackendForkRoute session成功绑定backend的fork路由
+	SessionBoundBackendForkRoute = "sys.sessionboundbackendfork"
+	// SessionBoundBackendRoute session成功绑定到 backend后的广播路由
 	SessionBoundBackendRoute = "sys.sessionboundbackend"
 
-	// KickBackendRoute is the route used for kicking an user from stateful backend
+	// KickBackendRoute session不在本服时的转发请求绑定sessionsticky backend的路由
 	KickBackendRoute = "sys.kickbackend"
 
-	// SessionKickedBackendRoute session与stateful backend解绑后的路由
+	// SessionKickedBackendRoute session与sessionsticky backend解绑后的路由
 	SessionKickedBackendRoute = "sys.sessionkickedbackend"
 
 	// ServerInternalErrorToClientRoute 服务器内部错误时若不是request类型消息引起的,以该路由回应客户端

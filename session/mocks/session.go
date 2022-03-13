@@ -929,15 +929,15 @@ func (mr *MockSessionPoolMockRecorder) RemoveSessionLocal(arg0 interface{}) *gom
 }
 
 // SetClusterStorage mocks base method.
-func (m *MockSessionPool) SetClusterStorage(arg0 session.StorageInterface) {
+func (m *MockSessionPool) SetClusterStorage(arg0 session.CacheInterface) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "SetClusterStorage", arg0)
+	m.ctrl.Call(m, "SetClusterCache", arg0)
 }
 
 // SetClusterStorage indicates an expected call of SetClusterStorage.
 func (mr *MockSessionPoolMockRecorder) SetClusterStorage(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetClusterStorage", reflect.TypeOf((*MockSessionPool)(nil).SetClusterStorage), arg0)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetClusterCache", reflect.TypeOf((*MockSessionPool)(nil).SetClusterStorage), arg0)
 }
 
 // StoreSessionLocal mocks base method.

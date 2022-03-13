@@ -45,6 +45,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/session"
 	"github.com/topfreegames/pitaya/v2/tracing"
 	"github.com/topfreegames/pitaya/v2/util"
+	"go.uber.org/zap"
 )
 
 // RemoteService struct
@@ -59,12 +60,12 @@ type RemoteService struct {
 	services               map[string]*component.Service // all registered service
 	router                 *router.Router
 	messageEncoder         message.Encoder
-	server                 *cluster.Server                 // server obj
-	remoteBindingListeners []cluster.RemoteSessionListener //绑定发生时的回调，内部使用，仅用于相同serverType间的广播
+	server                 *cluster.Server // server obj
 	sessionPool            session.SessionPool
 	handlerPool            *HandlerPool
 	remotes                map[string]*component.Remote    // all remote method
-	remoteSessionListeners []cluster.RemoteSessionListener //session生命周期监听,这里只是代持,实际调用在 remote.Sys
+	remoteBindingListeners []cluster.RemoteBindingListener // 绑定发生时的回调，内部使用，仅用于相同serverType间的广播
+	remoteSessionListeners []cluster.RemoteSessionListener // session生命周期监听
 }
 
 // NewRemoteService creates and return a new RemoteService
@@ -91,10 +92,10 @@ func NewRemoteService(
 		router:                 router,
 		messageEncoder:         messageEncoder,
 		server:                 server,
-		remoteBindingListeners: make([]cluster.RemoteSessionListener, 0),
 		sessionPool:            sessionPool,
 		handlerPool:            handlerPool,
 		remotes:                make(map[string]*component.Remote),
+		remoteBindingListeners: make([]cluster.RemoteBindingListener, 0),
 		remoteSessionListeners: make([]cluster.RemoteSessionListener, 0),
 	}
 
@@ -110,6 +111,7 @@ func (r *RemoteService) remoteProcess(
 	route *route.Route,
 	msg *message.Message,
 ) {
+	logW := logger.Zap.With(zap.String("route", route.String()), zap.Any("rpcdata", msg))
 	res, err := r.remoteCall(ctx, server, protos.RPCType_Sys, route, a.GetSession(), msg)
 	switch msg.Type {
 	case message.Request:
@@ -123,19 +125,19 @@ func (r *RemoteService) remoteProcess(
 		//}
 	}
 	if err != nil {
-		logger.Log.Errorf("Failed to process remote server: %s", err.Error())
+		logW.Error("Failed to process remote server", zap.Error(err))
 		a.AnswerWithError(ctx, msg.ID, err)
 		return
 	}
 	err = a.GetSession().ResponseMID(ctx, msg.ID, res.Data)
 	if err != nil {
-		logger.Log.Errorf("Failed to respond to remote server: %s", err.Error())
+		logW.Error("Failed to respond to remote server", zap.Error(err))
 		a.AnswerWithError(ctx, msg.ID, err)
 	}
 }
 
 // AddRemoteBindingListener 添加绑定发生时的回调，内部使用，仅用于相同serverType间的广播
-func (r *RemoteService) AddRemoteBindingListener(bindingListener cluster.RemoteSessionListener) {
+func (r *RemoteService) AddRemoteBindingListener(bindingListener cluster.RemoteBindingListener) {
 	r.remoteBindingListeners = append(r.remoteBindingListeners, bindingListener)
 }
 
@@ -147,11 +149,12 @@ func (r *RemoteService) AddRemoteSessionListener(sessionListener cluster.RemoteS
 func (r *RemoteService) GetRemoteSessionListener() []cluster.RemoteSessionListener {
 	return r.remoteSessionListeners
 }
-func (r *RemoteService) GetRemoteBindingListener() []cluster.RemoteSessionListener {
+func (r *RemoteService) GetRemoteBindingListener() []cluster.RemoteBindingListener {
 	return r.remoteBindingListeners
 }
 
 // Call processes a remote call
+//  @implement protos.PitayaServer
 func (r *RemoteService) Call(ctx context.Context, req *protos.Request) (*protos.Response, error) {
 	c, err := util.GetContextFromRequest(req, r.server.ID)
 	c = util.StartSpanFromRequest(c, r.server.ID, req.GetMsg().GetRoute())
@@ -175,7 +178,12 @@ func (r *RemoteService) Call(ctx context.Context, req *protos.Request) (*protos.
 	return res, nil
 }
 
-// SessionBindRemote is called when a remote server binds a user session and want us to acknowledge it
+// Deprecated:Use remote.Sys .SessionBoundFork() instead 由于上层frontend之间的广播方式改走Fork()实现,这里不会再收到响应
+//  @implement protos.PitayaServer
+//  is called when a remote server binds a user session and want us to acknowledge it
+//  frontend收到其他frontend实例已经成功绑定session的消息广播时(该广播仅发给所有frontend)
+//  具体来说是收到 modules.UniqueSession .Init() 中调用u.rpcClient.BroadcastSessionBind()发送的广播
+//  与 remote.Sys .BindSession()不同,具体参见其注释
 func (r *RemoteService) SessionBindRemote(ctx context.Context, msg *protos.BindMsg) (*protos.Response, error) {
 	for _, r := range r.remoteBindingListeners {
 		r.OnUserBind(msg.Uid, msg.Fid)
@@ -186,6 +194,7 @@ func (r *RemoteService) SessionBindRemote(ctx context.Context, msg *protos.BindM
 }
 
 // PushToUser sends a push to user
+//  @implement protos.PitayaServer
 func (r *RemoteService) PushToUser(ctx context.Context, push *protos.Push) (*protos.Response, error) {
 	logger.Log.Debugf("sending push to user %s: %v", push.GetUid(), string(push.Data))
 	s := r.sessionPool.GetSessionByUID(push.GetUid())
@@ -202,11 +211,14 @@ func (r *RemoteService) PushToUser(ctx context.Context, push *protos.Push) (*pro
 }
 
 // KickUser sends a kick to user
+//  @implement protos.PitayaServer
+//  收到其他服务调用 cluster.RPCClient .SendKick() 时,一般来说是在拿不到 session.Session 只有uid的情况下.
+//  与 remote.Sys .Kick()不同，后者用于session的调用
 func (r *RemoteService) KickUser(ctx context.Context, kick *protos.KickMsg) (*protos.KickAnswer, error) {
 	logger.Log.Debugf("sending kick to user %s", kick.GetUserId())
 	s := r.sessionPool.GetSessionByUID(kick.GetUserId())
 	if s != nil {
-		err := s.Kick(ctx)
+		err := s.Kick(ctx, kick.Metadata)
 		if err != nil {
 			return nil, err
 		}
@@ -316,7 +328,7 @@ func (r *RemoteService) Notify(ctx context.Context, serverID string, ro *route.R
 			return err
 		}
 	}
-	//服务器为空 全局广播(每种服务器只有一个实例消费)
+	// 服务器为空 全局广播(每种服务器只有一个实例消费)
 	if ro.SvType == "" && serverID == "" {
 		for _, server := range r.serviceDiscovery.GetServerTypes() {
 			newRoute, err := route.Decode(server.Type + "." + ro.Short())
@@ -390,8 +402,8 @@ func processRemoteMessage(ctx context.Context, req *protos.Request, r *RemoteSer
 	case req.Type == protos.RPCType_Sys:
 		return r.handleRPCSys(ctx, req, rt)
 	case req.Type == protos.RPCType_User:
-		//原逻辑是只调用handleRPCUser,这里为了使得rpcClient.Call(uid)这种形式的rpc可用(主要是stateful backend调用)，
-		//这里改成判断有session则按sys类型处理,这样业务层context里就可以拿到session了.handleHooks也会调用
+		// 原逻辑是只调用handleRPCUser,这里为了使得rpcClient.Call(uid)这种形式的rpc可用(主要是stateful backend调用)，
+		// 这里改成判断有session则按sys类型处理,这样业务层context里就可以拿到session了.handleHooks也会调用
 		if req.Session == nil {
 			return r.handleRPCUser(ctx, req, rt)
 		} else {

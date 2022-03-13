@@ -24,6 +24,7 @@ const _ = grpc.SupportPackageIsVersion7
 type PitayaClient interface {
 	Call(ctx context.Context, in *Request, opts ...grpc.CallOption) (*Response, error)
 	PushToUser(ctx context.Context, in *Push, opts ...grpc.CallOption) (*Response, error)
+	// Deprecated:上层的bind广播方法已弃用改为Fork实现,所以此处的响应也不再需要了
 	SessionBindRemote(ctx context.Context, in *BindMsg, opts ...grpc.CallOption) (*Response, error)
 	KickUser(ctx context.Context, in *KickMsg, opts ...grpc.CallOption) (*KickAnswer, error)
 }
@@ -78,6 +79,7 @@ func (c *pitayaClient) KickUser(ctx context.Context, in *KickMsg, opts ...grpc.C
 type PitayaServer interface {
 	Call(context.Context, *Request) (*Response, error)
 	PushToUser(context.Context, *Push) (*Response, error)
+	// Deprecated:上层的bind广播方法已弃用改为Fork实现,所以此处的响应也不再需要了
 	SessionBindRemote(context.Context, *BindMsg) (*Response, error)
 	KickUser(context.Context, *KickMsg) (*KickAnswer, error)
 	mustEmbedUnimplementedPitayaServer()

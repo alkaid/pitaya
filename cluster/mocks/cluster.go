@@ -393,39 +393,39 @@ func (mr *MockRemoteSessionListenerMockRecorder) OnUserBind(uid, fid interface{}
 }
 
 // OnUserBindBackend mocks base method.
-func (m *MockRemoteSessionListener) OnUserBindBackend(uid, serverType, serverId string) {
+func (m *MockRemoteSessionListener) OnUserBoundBackend(uid, serverType, serverId string) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "OnUserBindBackend", uid, serverType, serverId)
+	m.ctrl.Call(m, "OnUserBoundBackend", uid, serverType, serverId)
 }
 
 // OnUserBindBackend indicates an expected call of OnUserBindBackend.
 func (mr *MockRemoteSessionListenerMockRecorder) OnUserBindBackend(uid, serverType, serverId interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnUserBindBackend", reflect.TypeOf((*MockRemoteSessionListener)(nil).OnUserBindBackend), uid, serverType, serverId)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnUserBoundBackend", reflect.TypeOf((*MockRemoteSessionListener)(nil).OnUserBoundBackend), uid, serverType, serverId)
 }
 
 // OnUserDisconnect mocks base method.
-func (m *MockRemoteSessionListener) OnUserDisconnect(uid string) {
+func (m *MockRemoteSessionListener) OnUserDisconnected(uid string) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "OnUserDisconnect", uid)
+	m.ctrl.Call(m, "OnUserDisconnected", uid)
 }
 
 // OnUserDisconnect indicates an expected call of OnUserDisconnect.
 func (mr *MockRemoteSessionListenerMockRecorder) OnUserDisconnect(uid interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnUserDisconnect", reflect.TypeOf((*MockRemoteSessionListener)(nil).OnUserDisconnect), uid)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnUserDisconnected", reflect.TypeOf((*MockRemoteSessionListener)(nil).OnUserDisconnected), uid)
 }
 
 // OnUserUnBindBackend mocks base method.
-func (m *MockRemoteSessionListener) OnUserUnBindBackend(uid, serverType, serverId string) {
+func (m *MockRemoteSessionListener) OnUserUnboundBackend(uid, serverType, serverId string) {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "OnUserUnBindBackend", uid, serverType, serverId)
+	m.ctrl.Call(m, "OnUserUnboundBackend", uid, serverType, serverId)
 }
 
 // OnUserUnBindBackend indicates an expected call of OnUserUnBindBackend.
 func (mr *MockRemoteSessionListenerMockRecorder) OnUserUnBindBackend(uid, serverType, serverId interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnUserUnBindBackend", reflect.TypeOf((*MockRemoteSessionListener)(nil).OnUserUnBindBackend), uid, serverType, serverId)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnUserUnboundBackend", reflect.TypeOf((*MockRemoteSessionListener)(nil).OnUserUnboundBackend), uid, serverType, serverId)
 }
 
 // MockInfoRetriever is a mock of InfoRetriever interface.

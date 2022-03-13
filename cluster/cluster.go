@@ -45,9 +45,10 @@ type RPCClient interface {
 	Send(route string, data []byte) error
 	SendPush(userID string, frontendSv *Server, push *protos.Push) error
 	SendKick(userID string, serverType string, kick *protos.KickMsg) error
+	// Deprecated:Use Fork instead
 	BroadcastSessionBind(uid string) error
 	Call(ctx context.Context, rpcType protos.RPCType, route *route.Route, session session.Session, msg *message.Message, server *Server) (*protos.Response, error)
-	//Fork 发布广播,由订阅端决定同样类型服务实例是否重复消费,仅支持nats
+	// Fork 广播给同类型实例
 	//  @param ctx
 	//  @param route
 	//  @param session
@@ -61,35 +62,46 @@ type RPCClient interface {
 type SDListener interface {
 	AddServer(*Server)
 	RemoveServer(*Server)
-	//ModifyServer server数据改变时
+	// ModifyServer server数据改变时
 	//  @param sv 新server
 	//  @param old 旧server
 	ModifyServer(sv *Server, old *Server)
 }
 
 // RemoteBindingListener listens to session bindings in remote servers
+//
+// 框架内部使用
 type RemoteBindingListener interface {
-	//OnUserBind 用户成功绑定网关时
+	// OnUserBind frontend 收到 session所在frontend实例绑定后的广播通知
 	//  @param uid
 	//  @param fid 网关id
 	OnUserBind(uid, fid string)
-}
-
-type RemoteSessionListener interface {
-	RemoteBindingListener
-	//OnUserDisconnect 用户断线时
-	//  @param uid
-	OnUserDisconnect(uid string)
-	//OnUserBindBackend 用户成功绑定backend服务器时
+	// OnUserBindBackend sessionsticky backend 收到相同type的backend实例绑定后的广播通知
 	//  @param uid
 	//  @param serverType
 	//  @param serverId
 	OnUserBindBackend(uid, serverType, serverId string)
-	//OnUserUnBindBackend 用户成功解绑backend服务器时
+}
+
+// RemoteSessionListener session生命周期监听
+type RemoteSessionListener interface {
+	// OnUserBound 用户成功绑定网关时
+	//  @param uid
+	//  @param fid 网关id
+	OnUserBound(uid, fid string, callback map[string]string)
+	// OnUserDisconnected 用户断线时
+	//  @param uid
+	OnUserDisconnected(uid string, callback map[string]string)
+	// OnUserBoundBackend 用户成功绑定backend服务器时
 	//  @param uid
 	//  @param serverType
 	//  @param serverId
-	OnUserUnBindBackend(uid, serverType, serverId string)
+	OnUserBoundBackend(uid, serverType, serverId string, callback map[string]string)
+	// OnUserUnboundBackend 用户成功解绑backend服务器时
+	//  @param uid
+	//  @param serverType
+	//  @param serverId
+	OnUserUnboundBackend(uid, serverType, serverId string, callback map[string]string)
 }
 
 // InfoRetriever gets cluster info
@@ -136,8 +148,8 @@ func buildRequest(
 	}
 	if thisServer.Frontend {
 		req.FrontendID = thisServer.ID
-		//设置frontend信息到 session.data,以保证转发后decode的session.data中有frontend信息
-		//TODO 本来应该在 agentImpl 实例化时设置,实在没有可以传入frontendID的地方
+		// 设置frontend信息到 session.data,以保证转发后decode的session.data中有frontend信息
+		// TODO 本来应该在 agentImpl 实例化时设置,实在没有可以传入frontendID的地方
 		if session != nil {
 			session.SetFrontendData(thisServer.ID, session.ID())
 		}
@@ -158,7 +170,7 @@ func buildRequest(
 		req.Msg.Id = uint64(mid)
 	}
 
-	//无论是 RPCType_Sys 还是 RPCType_User 只要传入了session就带数据过去
+	// 无论是 RPCType_Sys 还是 RPCType_User 只要传入了session就带数据过去
 	if session != nil {
 		req.Session = &protos.Session{
 			Id:   session.ID(),

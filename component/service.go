@@ -25,7 +25,6 @@ import (
 	"reflect"
 
 	"github.com/topfreegames/pitaya/v2/conn/message"
-	"github.com/topfreegames/pitaya/v2/constants"
 )
 
 type (
@@ -155,19 +154,21 @@ func (s *Service) ExtractRemote() error {
 	return nil
 }
 
-// ValidateMessageType validates a given message type against the handler's one
+// Deprecated:Always return false,nil
+// validates a given message type against the handler's one
 // and returns an error if it is a mismatch and a boolean indicating if the caller should
 // exit in the presence of this error or not.
 func (h *Handler) ValidateMessageType(msgType message.Type) (exitOnError bool, err error) {
-	if h.MessageType != msgType {
-		switch msgType {
-		case message.Request:
-			err = constants.ErrRequestOnNotify
-			exitOnError = true
-
-		case message.Notify:
-			err = constants.ErrNotifyOnRequest
-		}
-	}
+	// Notify的逻辑已经修改为可以调用有返回参数的方法
+	// if h.MessageType != msgType {
+	// 	switch msgType {
+	// 	case message.Request:
+	// 		err = constants.ErrRequestOnNotify
+	// 		exitOnError = true
+	//
+	// 	case message.Notify:
+	// 		err = constants.ErrNotifyOnRequest
+	// 	}
+	// }
 	return
 }

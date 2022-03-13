@@ -115,10 +115,8 @@ func WithMessage(err error, msg string) *Error {
 	return Wrap(err, code, msg)
 }
 
-//NewError
-// 用err新建 Error. 和 Wrap 不同, NewError 不会包装原 err ,只会使用 err.Error()来作为自己的Error()输出
-//
 // Deprecated: use Wrap instead
+// 用err新建 Error. 和 Wrap 不同, NewError 不会包装原 err ,只会使用 err.Error()来作为自己的Error()输出
 func NewError(err error, code string, metadata ...map[string]string) *Error {
 	if pitayaErr, ok := err.(*Error); ok {
 		if len(metadata) > 0 {

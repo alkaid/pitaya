@@ -101,7 +101,7 @@ type (
 		GetSession() session.Session
 		Push(route string, v interface{}) error
 		ResponseMID(ctx context.Context, mid uint, v interface{}, isError ...bool) error
-		Close(reason ...session.CloseReason) error
+		Close(callback map[string]string, reason ...session.CloseReason) error
 		RemoteAddr() net.Addr
 		String() string
 		GetStatus() int32
@@ -345,7 +345,7 @@ func (a *agentImpl) ResponseMID(ctx context.Context, mid uint, v interface{}, is
 
 // Close closes the agent, cleans inner state and closes low-level connection.
 // Any blocked Read or Write operations will be unblocked and return errors.
-func (a *agentImpl) Close(reason ...session.CloseReason) error {
+func (a *agentImpl) Close(callback map[string]string, reason ...session.CloseReason) error {
 	a.closeMutex.Lock()
 	defer a.closeMutex.Unlock()
 	if a.GetStatus() == constants.StatusClosed {
@@ -364,7 +364,7 @@ func (a *agentImpl) Close(reason ...session.CloseReason) error {
 		close(a.chStopWrite)
 		close(a.chStopHeartbeat)
 		close(a.chDie)
-		a.onSessionClosed(a.Session, reason...)
+		a.onSessionClosed(a.Session, callback, reason...)
 	}
 
 	metrics.ReportNumberOfConnectedClients(a.metricsReporters, a.sessionPool.GetSessionCount())
@@ -412,7 +412,7 @@ func (a *agentImpl) SetStatus(state int32) {
 // Handle handles the messages from and to a client
 func (a *agentImpl) Handle() {
 	defer func() {
-		a.Close()
+		a.Close(nil)
 		logger.Log.Debugf("Session handle goroutine exit, SessionID=%d, UID=%s", a.Session.ID(), a.Session.UID())
 	}()
 
@@ -443,7 +443,7 @@ func (a *agentImpl) heartbeat() {
 
 	defer func() {
 		ticker.Stop()
-		a.Close()
+		a.Close(nil)
 	}()
 
 	for {
@@ -471,7 +471,7 @@ func (a *agentImpl) heartbeat() {
 	}
 }
 
-func (a *agentImpl) onSessionClosed(s session.Session, reason ...session.CloseReason) {
+func (a *agentImpl) onSessionClosed(s session.Session, callback map[string]string, reason ...session.CloseReason) {
 	defer func() {
 		if err := recover(); err != nil {
 			logger.Log.Errorf("pitaya/onSessionClosed: %v", err)
@@ -487,7 +487,7 @@ func (a *agentImpl) onSessionClosed(s session.Session, reason ...session.CloseRe
 		if len(reason) > 0 {
 			rea = reason[0]
 		}
-		fn2(s, rea)
+		fn2(s, callback, rea)
 	}
 }
 
@@ -497,14 +497,23 @@ func (a *agentImpl) SendHandshakeResponse() error {
 	return err
 }
 func (a *agentImpl) SendHeartbeatResponse() error {
-	_, err := a.conn.Write(hbAck)
-	return err
+	pWrite := pendingWrite{
+		ctx:  context.Background(),
+		data: hbAck,
+	}
+
+	// chSend is never closed so we need this to don't block if agent is already closed
+	select {
+	case a.chSend <- pWrite:
+	case <-a.chDie:
+	}
+	return nil
 }
 
 func (a *agentImpl) write() {
 	// clean func
 	defer func() {
-		a.Close()
+		a.Close(nil)
 	}()
 
 	for {

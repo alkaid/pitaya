@@ -29,7 +29,7 @@ import (
 )
 
 // SendKickToUsers sends kick to an user array
-func (app *App) SendKickToUsers(uids []string, frontendType string) ([]string, error) {
+func (app *App) SendKickToUsers(uids []string, frontendType string, callback map[string]string) ([]string, error) {
 	if !app.server.Frontend && frontendType == "" {
 		return uids, constants.ErrFrontendTypeNotSpecified
 	}
@@ -38,12 +38,12 @@ func (app *App) SendKickToUsers(uids []string, frontendType string) ([]string, e
 
 	for _, uid := range uids {
 		if s := app.sessionPool.GetSessionByUID(uid); s != nil {
-			if err := s.Kick(context.Background()); err != nil {
+			if err := s.Kick(context.Background(), callback); err != nil {
 				notKickedUids = append(notKickedUids, uid)
 				logger.Log.Errorf("Session kick error, ID=%d, UID=%s, ERROR=%s", s.ID(), s.UID(), err.Error())
 			}
 		} else if app.rpcClient != nil {
-			kick := &protos.KickMsg{UserId: uid}
+			kick := &protos.KickMsg{UserId: uid, Metadata: callback}
 			if err := app.rpcClient.SendKick(uid, frontendType, kick); err != nil {
 				notKickedUids = append(notKickedUids, uid)
 				logger.Log.Errorf("RPCClient send kick error, UID=%s, SvType=%s, Error=%s", uid, frontendType, err.Error())

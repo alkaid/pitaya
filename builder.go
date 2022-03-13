@@ -166,10 +166,15 @@ func NewBuilder(isFrontend bool,
 	}
 
 	// session 后端redis落地实例
-	redisClient := redis.NewClusterClient(confPkg.ToRedisClusterOption(&redisConfig))
-	sessPoolStorage := session.NewRedisStorage(redisClient, config.Pitaya.Session.CacheTTL)
+	var redisClient redis.Cmdable
+	if redisConfig.Type == "cluster" {
+		redisClient = redis.NewClusterClient(confPkg.ToRedisClusterOption(&redisConfig))
+	} else {
+		redisClient = redis.NewClient(confPkg.ToRedisNodeConfig(&redisConfig))
+	}
+	sessionCache := session.NewRedisCache(redisClient, config.Pitaya.Session.CacheTTL)
 	sessionPool := session.NewSessionPool()
-	sessionPool.SetClusterStorage(sessPoolStorage)
+	sessionPool.SetClusterCache(sessionCache)
 
 	var serviceDiscovery cluster.ServiceDiscovery
 	var rpcServer cluster.RPCServer
@@ -308,7 +313,6 @@ func (builder *Builder) Build() Pitaya {
 		builder.MetricsReporters,
 		builder.Config.Pitaya,
 	)
-	app.SetRedis(builder.Redis)
 	app.conf = builder.conf
 	return app
 }

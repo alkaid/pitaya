@@ -92,7 +92,7 @@ func (b *ETCDBindingStorage) GetUserFrontendID(uid, frontendType string) (string
 }
 
 func (b *ETCDBindingStorage) setupOnSessionCloseCB() {
-	b.sessionPool.OnSessionClose(func(s session.Session, reason session.CloseReason) {
+	b.sessionPool.OnSessionClose(func(s session.Session, callback map[string]string, reason session.CloseReason) {
 		if s.UID() != "" && reason != session.CloseReasonRebind {
 			err := b.removeBinding(s.UID())
 			if err != nil {
@@ -103,7 +103,7 @@ func (b *ETCDBindingStorage) setupOnSessionCloseCB() {
 }
 
 func (b *ETCDBindingStorage) setupOnAfterSessionBindCB() {
-	b.sessionPool.OnAfterSessionBind(func(ctx context.Context, s session.Session) error {
+	b.sessionPool.OnAfterSessionBind(func(ctx context.Context, s session.Session, callback map[string]string) error {
 		return b.PutBinding(s.UID())
 	})
 }

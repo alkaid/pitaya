@@ -160,7 +160,7 @@ func (a *Remote) ResponseMID(ctx context.Context, mid uint, v interface{}, isErr
 }
 
 // Close closes the remote
-func (a *Remote) Close(reason ...session.CloseReason) error { return nil }
+func (a *Remote) Close(callback map[string]string, reason ...session.CloseReason) error { return nil }
 
 // RemoteAddr returns the remote address of the user
 func (a *Remote) RemoteAddr() net.Addr { return nil }

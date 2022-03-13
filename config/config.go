@@ -435,13 +435,37 @@ type RedisConfig struct {
 	MaxRetries      int           // 命令执行失败时，最多重试多少次，默认为0即不重试
 	MinRetryBackoff time.Duration // 每次计算重试间隔时间的下限，默认8毫秒，-1表示取消间隔
 	MaxRetryBackoff time.Duration // 每次计算重试间隔时间的上限，默认8毫秒，-1表示取消间隔
-
+	Type            string        // redis模式: node/cluster
 }
 
 func NewDefaultRedisConfig() *RedisConfig {
 	return &RedisConfig{
 		Addrs: []string{"localhost:6379"},
 	}
+}
+func ToRedisNodeConfig(conf *RedisConfig) *redis.Options {
+	opts := &redis.Options{
+		Addr:               conf.Addrs[0],
+		Dialer:             nil,
+		OnConnect:          nil,
+		Username:           conf.Username,
+		Password:           conf.Password,
+		MaxRetries:         conf.MaxRetries,
+		MinRetryBackoff:    conf.MinRetryBackoff,
+		MaxRetryBackoff:    conf.MaxRetryBackoff,
+		DialTimeout:        conf.DialTimeout,
+		ReadTimeout:        conf.ReadTimeout,
+		WriteTimeout:       conf.WriteTimeout,
+		PoolFIFO:           false,
+		PoolSize:           conf.PoolSize,
+		MinIdleConns:       conf.MinIdleConns,
+		MaxConnAge:         conf.MaxConnAge,
+		PoolTimeout:        conf.PoolTimeout,
+		IdleTimeout:        conf.IdleTimeout,
+		IdleCheckFrequency: conf.IdleCheckFrequency,
+		TLSConfig:          nil,
+	}
+	return opts
 }
 func ToRedisClusterOption(conf *RedisConfig) *redis.ClusterOptions {
 	opts := &redis.ClusterOptions{

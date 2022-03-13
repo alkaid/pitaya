@@ -24,9 +24,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/nats-io/nuid"
 	"strings"
 	"time"
+
+	"github.com/nats-io/nuid"
 
 	"github.com/topfreegames/pitaya/v2/acceptor"
 	"github.com/topfreegames/pitaya/v2/pipeline"
@@ -172,7 +173,7 @@ func (h *HandlerService) Handle(conn acceptor.PlayerConn) {
 
 	// guarantee agent related resource is destroyed
 	defer func() {
-		a.GetSession().Close()
+		a.GetSession().Close(nil)
 		logger.Log.Debugf("Session read goroutine exit, SessionID=%d, UID=%s", a.GetSession().ID(), a.GetSession().UID())
 	}()
 

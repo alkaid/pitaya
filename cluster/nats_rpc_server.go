@@ -83,7 +83,7 @@ func NewNatsRPCServer(
 		appDieChan:        appDieChan,
 		connectionTimeout: nats.DefaultTimeout,
 		sessionPool:       sessionPool,
-		broadcastSubs:     make([]*nats.Subscription, 4),
+		broadcastSubs:     make([]*nats.Subscription, 0),
 	}
 	if err := ns.configure(config); err != nil {
 		return nil, err
@@ -144,7 +144,7 @@ func GetForkTopic(svrType string) string {
 }
 
 // onSessionBind should be called on each session bind
-func (ns *NatsRPCServer) onSessionBind(ctx context.Context, s session.Session) error {
+func (ns *NatsRPCServer) onSessionBind(ctx context.Context, s session.Session, callback map[string]string) error {
 	if ns.server.Frontend {
 		subu, err := ns.subscribeToUserMessages(s.UID(), ns.server.Type)
 		if err != nil {
@@ -289,9 +289,8 @@ func (ns *NatsRPCServer) processMessages(threadID int) {
 			ns.responses[threadID], _ = ns.pitayaServer.Call(ctx, ns.requests[threadID])
 		}
 
-		//notify server don't need to publish
+		// notify server don't need to publish
 		if ns.requests[threadID].GetMsg().Type == protos.MsgType_MsgNotify {
-			logger.Log.Debugf("message is notify,no publish")
 			continue
 		}
 
