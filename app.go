@@ -29,6 +29,7 @@ import (
 	"syscall"
 
 	"github.com/go-redis/redis/v8"
+	"github.com/topfreegames/pitaya/v2/pipeline"
 
 	"time"
 
@@ -95,6 +96,12 @@ type Pitaya interface {
 	// AddConfLoader 添加配置重载回调
 	//  @param loader
 	AddConfLoader(loader config.ConfLoader)
+	// PushBeforeHandleHook 添加handle和remote执行前的hook
+	//  @param beforeFunc
+	PushBeforeHandleHook(beforeFunc pipeline.HandlerTempl)
+	// PushAfterHandleHook 添加handle和remote执行后的hook
+	//  @param afterFunc
+	PushAfterHandleHook(afterFunc pipeline.AfterHandlerTempl)
 	GetSessionFromCtx(ctx context.Context) session.Session
 	Start()
 	SetDictionary(dict map[string]uint16) error
@@ -341,6 +348,15 @@ func (app *App) AddConfLoader(loader config.ConfLoader) {
 		return
 	}
 	app.conf.AddLoader(loader)
+}
+
+func (app *App) PushBeforeHandleHook(beforeFunc pipeline.HandlerTempl) {
+	app.handlerService.GetHandleHooks().BeforeHandler.PushBack(beforeFunc)
+	app.remoteService.GetHandleHooks().BeforeHandler.PushBack(beforeFunc)
+}
+func (app *App) PushAfterHandleHook(afterFunc pipeline.AfterHandlerTempl) {
+	app.handlerService.GetHandleHooks().AfterHandler.PushBack(afterFunc)
+	app.remoteService.GetHandleHooks().AfterHandler.PushBack(afterFunc)
 }
 
 // IsRunning indicates if the Pitaya app has been initialized. Note: This

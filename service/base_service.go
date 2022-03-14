@@ -9,3 +9,7 @@ type baseService struct {
 func (h *baseService) SetHandlerHooks(handlerHooks *pipeline.HandlerHooks) {
 	h.handlerHooks = handlerHooks
 }
+
+func (h *baseService) GetHandleHooks() *pipeline.HandlerHooks {
+	return h.handlerHooks
+}
