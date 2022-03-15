@@ -436,6 +436,7 @@ type RedisConfig struct {
 	MinRetryBackoff time.Duration // 每次计算重试间隔时间的下限，默认8毫秒，-1表示取消间隔
 	MaxRetryBackoff time.Duration // 每次计算重试间隔时间的上限，默认8毫秒，-1表示取消间隔
 	Type            string        // redis模式: node/cluster
+	CacheTTL        time.Duration // 过期时间
 }
 
 func NewDefaultRedisConfig() *RedisConfig {
@@ -476,6 +477,34 @@ func ToRedisClusterOption(conf *RedisConfig) *redis.ClusterOptions {
 		RouteByLatency:     false,
 		RouteRandomly:      false,
 		ClusterSlots:       nil,
+		Dialer:             nil,
+		OnConnect:          nil,
+		Username:           conf.Username,
+		Password:           conf.Password,
+		MaxRetries:         conf.MaxRetries,
+		MinRetryBackoff:    conf.MinRetryBackoff,
+		MaxRetryBackoff:    conf.MaxRetryBackoff,
+		DialTimeout:        conf.DialTimeout,
+		ReadTimeout:        conf.ReadTimeout,
+		WriteTimeout:       conf.WriteTimeout,
+		PoolFIFO:           false,
+		PoolSize:           conf.PoolSize,
+		MinIdleConns:       conf.MinIdleConns,
+		MaxConnAge:         conf.MaxConnAge,
+		PoolTimeout:        conf.PoolTimeout,
+		IdleTimeout:        conf.IdleTimeout,
+		IdleCheckFrequency: conf.IdleCheckFrequency,
+		TLSConfig:          nil,
+	}
+	return opts
+}
+func ToRedisUniversalOptions(conf *RedisConfig) *redis.UniversalOptions {
+	opts := &redis.UniversalOptions{
+		Addrs:              conf.Addrs,
+		MaxRedirects:       0,
+		ReadOnly:           false,
+		RouteByLatency:     false,
+		RouteRandomly:      false,
 		Dialer:             nil,
 		OnConnect:          nil,
 		Username:           conf.Username,

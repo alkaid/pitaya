@@ -28,13 +28,13 @@ import (
 	"github.com/topfreegames/pitaya/v2/logger"
 )
 
-//ConfLoader 重载监听
+// ConfLoader 重载监听
 type ConfLoader interface {
-	//Reload 重载
+	// Reload 重载
 	//  @return key Provide 提供的 key
 	//  @param confStruct 反序列化后的 Provide 提供的 confStruct
 	Reload(key string, confStruct interface{})
-	//Provide 提供给重载前反序列化用的key和struct
+	// Provide 提供给重载前反序列化用的key和struct
 	//  @return key
 	//  @return confStruct
 	Provide() (key string, confStruct interface{})
@@ -219,7 +219,7 @@ func (c *Config) reloadAll() {
 }
 
 func (c *Config) Reload(key string, confStruct interface{}) {
-	//cm:=confStruct.(*confMap)
+	// cm:=confStruct.(*confMap)
 }
 func (c *Config) Provide() (key string, confStruct interface{}) {
 	return "pitaya.config", c.confconf
@@ -233,7 +233,7 @@ type confMap struct {
 	Formatter string        //配置格式 必须为 viper.SupportedRemoteProviders
 }
 
-//InitLoad 初始化加载本地或远程配置.业务层创建App前调用,仅允许一次
+// InitLoad 初始化加载本地或远程配置.业务层创建App前调用,仅允许一次
 //  @receiver c
 func (c *Config) InitLoad() error {
 	cm := c.confconf
@@ -260,7 +260,7 @@ func (c *Config) InitLoad() error {
 	return nil
 }
 
-//Watch 开启监控
+// Watch 开启监控
 //  @receiver c
 //  @return error
 func (c *Config) watch() error {
