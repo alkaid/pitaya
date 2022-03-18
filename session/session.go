@@ -293,6 +293,7 @@ func (pool *sessionPoolImpl) NewSession(entity networkentity.NetworkEntity, fron
 		IsFrontend:       frontend,
 		pool:             pool,
 	}
+	// sessionstick 的 backend，在 BindBackend()时保存,这里只处理 frontend
 	if frontend {
 		pool.sessionsByID.Store(s.id, s)
 		atomic.AddInt64(&pool.SessionCount, 1)

@@ -402,13 +402,7 @@ func processRemoteMessage(ctx context.Context, req *protos.Request, r *RemoteSer
 	case req.Type == protos.RPCType_Sys:
 		return r.handleRPCSys(ctx, req, rt)
 	case req.Type == protos.RPCType_User:
-		// 原逻辑是只调用handleRPCUser,这里为了使得rpcClient.Call(uid)这种形式的rpc可用(主要是stateful backend调用)，
-		// 这里改成判断有session则按sys类型处理,这样业务层context里就可以拿到session了.handleHooks也会调用
-		if req.Session == nil {
-			return r.handleRPCUser(ctx, req, rt)
-		} else {
-			return r.handleRPCSys(ctx, req, rt)
-		}
+		return r.handleRPCUser(ctx, req, rt)
 	default:
 		return &protos.Response{
 			Error: &protos.Error{
@@ -439,9 +433,11 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 		}
 		return response
 	}
+	var arg interface{}
+	var err error
 	params := []reflect.Value{remote.Receiver, reflect.ValueOf(ctx)}
 	if remote.HasArgs {
-		arg, err := unmarshalRemoteArg(remote, req.GetMsg().GetData())
+		arg, err = unmarshalRemoteArg(remote, req.GetMsg().GetData())
 		if err != nil {
 			response := &protos.Response{
 				Error: &protos.Error{
@@ -453,8 +449,50 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 		}
 		params = append(params, reflect.ValueOf(arg))
 	}
+	var sess session.Session
+	if req.Session != nil {
+		a, err := agent.NewRemote(
+			req.GetSession(), // 内部会优先从sessionPool中取session
+			"",               // 服务器内部rpc 不需要 agent.Remote.ResponseMID()功能
+			r.rpcClient,
+			r.encoder,
+			r.serializer,
+			r.serviceDiscovery,
+			req.FrontendID,
+			r.messageEncoder,
+			r.sessionPool,
+		)
+		if err != nil {
+			logger.Log.Warn("pitaya/handler: cannot instantiate remote agent")
+			response := &protos.Response{
+				Error: &protos.Error{
+					Code: e.ErrInternalCode,
+					Msg:  err.Error(),
+				},
+			}
+			return response
+		}
+		sess = a.Session
+	}
+	// 和 handleRPCSys 调用的 handlerPool.ProcessHandlerMessage 一样处理，把session存入context
+	if sess != nil {
+		ctx = context.WithValue(ctx, constants.SessionCtxKey, sess)
+		ctx = util.CtxWithDefaultLogger(ctx, rt.String(), sess.UID())
+	}
+	// 和 handlerPool.ProcessHandlerMessage 一样加入hook处理
+	ctx, arg, err = r.handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, arg)
+	if err != nil {
+		response := &protos.Response{
+			Error: &protos.Error{
+				Code: e.ErrBadRequestCode,
+				Msg:  err.Error(),
+			},
+		}
+		return response
+	}
 
 	ret, err := util.Pcall(remote.Method, params)
+	ret, err = r.handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, ret, err)
 	if err != nil {
 		response := &protos.Response{
 			Error: &protos.Error{
