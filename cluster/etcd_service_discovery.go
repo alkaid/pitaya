@@ -24,15 +24,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/constants"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/util"
+	"github.com/zeromicro/go-zero/core/hash"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/namespace"
-	"strings"
-	"sync"
-	"time"
 )
 
 type etcdServiceDiscovery struct {
@@ -65,6 +67,7 @@ type etcdServiceDiscovery struct {
 	serverTypesBlacklist   []string
 	syncServersParallelism int
 	syncServersRunning     chan bool
+	consistentHash         map[string]*hash.ConsistentHash
 }
 
 // NewEtcdServiceDiscovery ctor
@@ -88,14 +91,14 @@ func NewEtcdServiceDiscovery(
 		appDieChan:         appDieChan,
 		cli:                client,
 		syncServersRunning: make(chan bool),
+		consistentHash:     make(map[string]*hash.ConsistentHash),
 	}
-
 	sd.configure(config)
 
 	return sd, nil
 }
 
-//GetSelfServer @implement ServiceDiscovery.GetSelfServer
+// GetSelfServer @implement ServiceDiscovery.GetSelfServer
 //  @receiver sd
 //  @return *Server
 func (sd etcdServiceDiscovery) GetSelfServer() *Server {
@@ -211,7 +214,7 @@ func (sd *etcdServiceDiscovery) grantLease() error {
 	return nil
 }
 
-//FlushServer2Cluster
+// FlushServer2Cluster
 //  @implement ServiceDiscovery.FlushServer2Cluster
 //  @receiver sd
 //  @param server
@@ -275,6 +278,9 @@ func (sd *etcdServiceDiscovery) deleteServer(serverID string) {
 				delete(svMap, sv.ID)
 			}
 		})
+		if sd.consistentHash[sv.Type] != nil {
+			sd.consistentHash[sv.Type].Remove(sv.ID)
+		}
 		sd.notifyListeners(DEL, sv)
 	}
 }
@@ -323,6 +329,18 @@ func (sd *etcdServiceDiscovery) GetServersByType(serverType string) (map[string]
 	return nil, constants.ErrNoServersAvailableOfType
 }
 
+func (sd *etcdServiceDiscovery) GetConsistentHashNode(serverType string, sessionID string) (string, error) {
+	ha := sd.consistentHash[serverType]
+	if ha == nil {
+		return "", constants.ErrServerNotFound
+	}
+	node, ok := sd.consistentHash[serverType].Get(sessionID)
+	if !ok {
+		return "", constants.ErrServerNotFound
+	}
+	return node.(string), nil
+}
+
 // GetServers returns a slice with all the servers
 func (sd *etcdServiceDiscovery) GetServers() []*Server {
 	ret := make([]*Server, 0)
@@ -333,7 +351,7 @@ func (sd *etcdServiceDiscovery) GetServers() []*Server {
 	return ret
 }
 
-//GetServerTypes
+// GetServerTypes
 //  @implement ServiceDiscovery.GetServerTypes
 func (sd *etcdServiceDiscovery) GetServerTypes() map[string]*Server {
 	ret := make(map[string]*Server, len(sd.serverMapByType))
@@ -665,6 +683,10 @@ func (sd *etcdServiceDiscovery) addServer(sv *Server) {
 	})
 	if sv.ID != sd.server.ID {
 		if !loaded {
+			if sd.consistentHash[sv.Type] == nil {
+				sd.consistentHash[sv.Type] = hash.NewConsistentHash()
+			}
+			sd.consistentHash[sv.Type].Add(sv.ID)
 			sd.notifyListeners(ADD, sv)
 		} else {
 			sd.notifyListeners(Modify, sv, old.(*Server))

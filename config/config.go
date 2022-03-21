@@ -27,7 +27,7 @@ import (
 // 				Etcd EtcdServiceDiscoveryConfig
 // 			}
 // 		}
-// 		Groups struct{
+// 		groups struct{
 // 			Etcd EtcdGroupServiceConfig
 // 			Memory MemoryGroupConfig
 // 		}
@@ -82,23 +82,29 @@ type PitayaConfig struct {
 	}
 	Session struct {
 		Unique bool
-		//CacheTTL 缓存过期时间
+		// CacheTTL 缓存过期时间
 		CacheTTL time.Duration
 	}
 	Metrics struct {
 		Period time.Duration
 	}
 	Conf struct {
-		FilePath  []string      //配置文件路径,不为空表明使用本地文件配置
-		EtcdAddr  string        //Etcd地址,不为空表明使用远程etcd配置
-		EtcdKeys  []string      //要读取监听的etcd key列表
-		Interval  time.Duration //重载间隔
-		Formatter string        //配置格式 必须为 viper.SupportedRemoteProviders
+		FilePath  []string      // 配置文件路径,不为空表明使用本地文件配置
+		EtcdAddr  string        // Etcd地址,不为空表明使用远程etcd配置
+		EtcdKeys  []string      // 要读取监听的etcd key列表
+		Interval  time.Duration // 重载间隔
+		Formatter string        // 配置格式 必须为 viper.SupportedRemoteProviders
 	}
 	Log struct {
-		Development bool   //是否开发模式
-		Level       string //日志等级
+		Development bool   // 是否开发模式
+		Level       string // 日志等级
 	}
+	Coroutine CoroutineConfig
+}
+
+type CoroutineConfig struct {
+	Nums    int
+	Buffers int
 }
 
 // NewDefaultPitayaConfig provides default configuration for Pitaya App

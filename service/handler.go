@@ -24,10 +24,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/nats-io/nuid"
+	"github.com/topfreegames/pitaya/v2/co"
+	"go.uber.org/zap"
 
 	"github.com/topfreegames/pitaya/v2/acceptor"
 	"github.com/topfreegames/pitaya/v2/pipeline"
@@ -317,23 +321,38 @@ func (h *HandlerService) localProcess(ctx context.Context, a agent.Agent, route 
 	case message.Notify:
 		mid = 0
 	}
-
-	ret, err := h.handlerPool.ProcessHandlerMessage(ctx, route, h.serializer, h.handlerHooks, a.GetSession(), msg.Data, msg.Type, false)
-	if msg.Type != message.Notify {
+	// 根据session数据决策派发线程id
+	sess := a.GetSession()
+	goID := 0
+	var err error
+	if sess.UID() != "" {
+		goID, err = strconv.Atoi(sess.UID())
 		if err != nil {
-			logger.Log.Errorf("Failed to process handler message: %s", err.Error())
-			a.AnswerWithError(ctx, mid, err)
-		} else {
-			err := a.GetSession().ResponseMID(ctx, mid, ret)
-			if err != nil {
-				tracing.FinishSpan(ctx, err)
-				metrics.ReportTimingFromCtx(ctx, h.metricsReporters, handlerType, err)
-			}
+			logger.Zap.Warn("can't atoi uid", zap.String("uid", sess.UID()), zap.Error(err))
+			goID = int(crc32.ChecksumIEEE([]byte(sess.UID())))
 		}
-	} else {
-		metrics.ReportTimingFromCtx(ctx, h.metricsReporters, handlerType, nil)
-		tracing.FinishSpan(ctx, err)
+	} else if sess.ID() > 0 {
+		goID = int(sess.ID())
 	}
+	// 派发给session绑定的线程
+	co.GoByID(goID, func() {
+		ret, err := h.handlerPool.ProcessHandlerMessage(ctx, route, h.serializer, h.handlerHooks, a.GetSession(), msg.Data, msg.Type, false)
+		if msg.Type != message.Notify {
+			if err != nil {
+				logger.Log.Errorf("Failed to process handler message: %s", err.Error())
+				a.AnswerWithError(ctx, mid, err)
+			} else {
+				err := a.GetSession().ResponseMID(ctx, mid, ret)
+				if err != nil {
+					tracing.FinishSpan(ctx, err)
+					metrics.ReportTimingFromCtx(ctx, h.metricsReporters, handlerType, err)
+				}
+			}
+		} else {
+			metrics.ReportTimingFromCtx(ctx, h.metricsReporters, handlerType, nil)
+			tracing.FinishSpan(ctx, err)
+		}
+	})
 }
 
 // DumpServices outputs all registered services

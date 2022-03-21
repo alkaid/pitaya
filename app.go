@@ -28,10 +28,11 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/go-redis/redis/v8"
-	"github.com/topfreegames/pitaya/v2/pipeline"
-
 	"time"
+
+	"github.com/go-redis/redis/v8"
+	"github.com/topfreegames/pitaya/v2/co"
+	"github.com/topfreegames/pitaya/v2/pipeline"
 
 	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/topfreegames/pitaya/v2/acceptor"
@@ -486,6 +487,9 @@ func (app *App) listen() {
 	}
 	// 注册配置重载回调
 	app.RegisterModule(config.NewConfigModule(app.conf), "configLoader")
+
+	coHolder := co.NewHolder(&app.config.Coroutine)
+	app.RegisterModule(coHolder, "CoroutineHolder")
 
 	app.startModules()
 

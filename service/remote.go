@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/topfreegames/pitaya/v2/co"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/topfreegames/pitaya/v2/agent"
@@ -251,38 +252,52 @@ func (r *RemoteService) DoRPC(ctx context.Context, serverID string, route *route
 
 // DoNotify only support nats,don't use grpc.(copy then modify from DoRPC)
 func (r *RemoteService) DoNotify(ctx context.Context, serverID string, route *route.Route, protoData []byte, session session.Session) error {
-	msg := &message.Message{
-		Type:  message.Notify,
-		Route: route.Short(),
-		Data:  protoData,
-	}
+	co.Go(func() {
+		msg := &message.Message{
+			Type:  message.Notify,
+			Route: route.Short(),
+			Data:  protoData,
+		}
 
-	if serverID == "" {
-		_, err := r.remoteCall(ctx, nil, protos.RPCType_User, route, session, msg)
-		return err
-	}
+		if serverID == "" {
+			_, err := r.remoteCall(ctx, nil, protos.RPCType_User, route, session, msg)
+			if err != nil {
+				logger.Zap.Error("notify error", zap.String("route", route.String()), zap.Error(err))
+			}
+			return
+		}
 
-	target, _ := r.serviceDiscovery.GetServer(serverID)
-	if target == nil {
-		return constants.ErrServerNotFound
-	}
+		target, _ := r.serviceDiscovery.GetServer(serverID)
+		if target == nil {
+			err := constants.ErrServerNotFound
+			logger.Zap.Error("notify error", zap.String("route", route.String()), zap.Error(err))
+			return
+		}
 
-	_, err := r.remoteCall(ctx, target, protos.RPCType_User, route, session, msg)
-	return err
+		_, err := r.remoteCall(ctx, target, protos.RPCType_User, route, session, msg)
+		if err != nil {
+			logger.Zap.Error("notify error", zap.String("route", route.String()), zap.Error(err))
+			return
+		}
+	})
+	return nil
 }
 
 // DoFork only support nats,don't use grpc.(copy then modify from DoRPC)
 func (r *RemoteService) DoFork(ctx context.Context, route *route.Route, protoData []byte, session session.Session) error {
-	msg := &message.Message{
-		Type:  message.Notify,
-		Route: route.Short(),
-		Data:  protoData,
-	}
-	err := r.rpcClient.Fork(ctx, route, session, msg)
-	if err != nil {
-		logger.Log.Errorf("error making broadcast to target with route %s: %w", route.String(), err)
-		return err
-	}
+	co.Go(func() {
+		msg := &message.Message{
+			Type:  message.Notify,
+			Route: route.Short(),
+			Data:  protoData,
+		}
+		err := r.rpcClient.Fork(ctx, route, session, msg)
+		if err != nil {
+			logger.Zap.Error("error making broadcast ", zap.String("route", route.String()), zap.Error(err))
+			return
+		}
+
+	})
 	return nil
 }
 

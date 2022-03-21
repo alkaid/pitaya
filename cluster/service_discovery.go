@@ -40,5 +40,11 @@ type ServiceDiscovery interface {
 	//  @param server
 	//  @return error
 	FlushServer2Cluster(server *Server) error
+	// GetConsistentHashNode 根据一致性哈希获取节点
+	//  @param serverType
+	//  @param sessionID
+	//  @return string
+	//  @return error
+	GetConsistentHashNode(serverType string, sessionID string) (string, error)
 	interfaces.Module
 }

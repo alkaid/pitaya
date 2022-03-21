@@ -22,10 +22,12 @@ package router
 
 import (
 	"context"
-	"github.com/topfreegames/pitaya/v2/errors"
-	"github.com/topfreegames/pitaya/v2/session"
+	"fmt"
 	"math/rand"
 	"time"
+
+	"github.com/topfreegames/pitaya/v2/errors"
+	"github.com/topfreegames/pitaya/v2/session"
 
 	"github.com/topfreegames/pitaya/v2/cluster"
 	"github.com/topfreegames/pitaya/v2/conn/message"
@@ -62,10 +64,10 @@ func (r *Router) SetServiceDiscovery(sd cluster.ServiceDiscovery) {
 	r.serviceDiscovery = sd
 }
 
-//defaultRoute
+// defaultRoute
 //
-//-目标服是stateless : 随机
-//-目标服是stateful:
+// -目标服是stateless : 随机
+// -目标服是stateful:
 //	-payload with session: 路由到session绑定的backend
 //	-payload without session: 随机
 func (r *Router) defaultRoute(
@@ -87,13 +89,22 @@ func (r *Router) defaultRoute(
 		} else if server.SessionStickiness {
 			svId = session.GetBackendID(server.Type)
 		} else {
-			return server, nil
+			// 尝试hash一致性路由
+			if session.UID() != "" {
+				svId, _ = r.serviceDiscovery.GetConsistentHashNode(svType, session.UID())
+			} else if session.GetFrontendID() != "" && session.GetFrontendSessionID() > 0 {
+				svId, _ = r.serviceDiscovery.GetConsistentHashNode(svType, fmt.Sprintf("%s-%d", session.GetFrontendID(), session.GetFrontendSessionID()))
+			}
+			// 获取不到hash node则随机路由
+			if svId == "" {
+				return server, nil
+			}
 		}
 		if svId != "" {
 			return servers[svId], nil
 		}
-		//return nil,constants.ErrNoServersAvailableOfType
-		//需要路由到绑定session的服务,但是找不到，报错
+		// return nil,constants.ErrNoServersAvailableOfType
+		// 需要路由到绑定session的服务,但是找不到，报错
 		return nil, errors.New(errors.ErrSessionNotFoundInServer, constants.ErrNoServersAvailableOfType.Error(), map[string]string{
 			"server": server.Type,
 		})
@@ -104,8 +115,8 @@ func (r *Router) defaultRoute(
 
 // Route gets the right server to use in the call
 //
-//-目标服是stateless : 随机
-//-目标服是stateful:
+// -目标服是stateless : 随机
+// -目标服是stateful:
 //	-payload with session: 路由到session绑定的backend
 //	-payload without session: 随机
 func (r *Router) Route(
@@ -123,11 +134,11 @@ func (r *Router) Route(
 	if err != nil {
 		return nil, err
 	}
-	//RPCType_Usser类型的route改成也允许使用自定义route
-	//if rpcType == protos.RPCType_User {
-	//	server := r.defaultRoute(serversOfType)
-	//	return server, nil
-	//}
+	// RPCType_Usser类型的route改成也允许使用自定义route
+	// if rpcType == protos.RPCType_User {
+	// 	server := r.defaultRoute(serversOfType)
+	// 	return server, nil
+	// }
 	routeFunc, ok := r.routesMap[svType]
 	if !ok {
 		logger.Log.Debugf("no specific route for svType: %s, using default route", svType)

@@ -24,10 +24,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/crc32"
 	"math"
+	"strconv"
 	"time"
 
 	nats "github.com/nats-io/nats.go"
+	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/constants"
 	e "github.com/topfreegames/pitaya/v2/errors"
@@ -36,6 +39,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/protos"
 	"github.com/topfreegames/pitaya/v2/session"
 	"github.com/topfreegames/pitaya/v2/util"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -285,19 +289,39 @@ func (ns *NatsRPCServer) processMessages(threadID int) {
 					Msg:  err.Error(),
 				},
 			}
+			if ns.requests[threadID].GetMsg().Type != protos.MsgType_MsgNotify {
+				p, err := ns.marshalResponse(ns.responses[threadID])
+				err = ns.conn.Publish(ns.requests[threadID].GetMsg().GetReply(), p)
+				if err != nil {
+					logger.Log.Error("error sending message response")
+				}
+			}
 		} else {
-			ns.responses[threadID], _ = ns.pitayaServer.Call(ctx, ns.requests[threadID])
-		}
-
-		// notify server don't need to publish
-		if ns.requests[threadID].GetMsg().Type == protos.MsgType_MsgNotify {
-			continue
-		}
-
-		p, err := ns.marshalResponse(ns.responses[threadID])
-		err = ns.conn.Publish(ns.requests[threadID].GetMsg().GetReply(), p)
-		if err != nil {
-			logger.Log.Error("error sending message response")
+			sess := ns.requests[threadID].Session
+			// 根据session数据决策派发线程id,有uid的用uid,没有的如果是frontend转发的用frontendid+session做线程id
+			goID := 0
+			if sess != nil {
+				if sess.Uid != "" {
+					goID, err = strconv.Atoi(sess.Uid)
+					if err != nil {
+						logger.Zap.Warn("can't atoi uid", zap.String("uid", sess.Uid), zap.Error(err))
+						goID = int(crc32.ChecksumIEEE([]byte(sess.Uid)))
+					}
+				} else if ns.requests[threadID].FrontendID != "" && sess.Id > 0 {
+					goID = int(crc32.ChecksumIEEE([]byte(fmt.Sprintf("%s%d", ns.requests[threadID].FrontendID, sess.Id))))
+				}
+			}
+			// 有session派发到session绑定线程,没有session 随机派发
+			co.GoByID(goID, func() {
+				ns.responses[threadID], _ = ns.pitayaServer.Call(ctx, ns.requests[threadID])
+				if ns.requests[threadID].GetMsg().Type != protos.MsgType_MsgNotify {
+					p, err := ns.marshalResponse(ns.responses[threadID])
+					err = ns.conn.Publish(ns.requests[threadID].GetMsg().GetReply(), p)
+					if err != nil {
+						logger.Log.Error("error sending message response")
+					}
+				}
+			})
 		}
 	}
 }
@@ -353,7 +377,7 @@ func (ns *NatsRPCServer) Init() error {
 	if ns.sub, err = ns.subscribe(getChannel(ns.server.Type, ns.server.ID), false); err != nil {
 		return err
 	}
-	//fork订阅
+	// fork订阅
 	var bcstSub *nats.Subscription
 	topic := GetForkTopic(ns.server.Type)
 	if bcstSub, err = ns.subscribe(topic, false); err != nil {

@@ -153,6 +153,7 @@ type Session interface {
 	GetOnCloseCallbacks() []func()
 	GetIsFrontend() bool
 	GetFrontendID() string
+	GetFrontendSessionID() int64
 	GetSubscriptions() []*nats.Subscription
 	// Deprecated: 用不到,除非定制frontend
 	//  只有在frontend调用才有用
@@ -508,6 +509,9 @@ func (s *sessionImpl) GetIsFrontend() bool {
 }
 func (s *sessionImpl) GetFrontendID() string {
 	return s.frontendID
+}
+func (s *sessionImpl) GetFrontendSessionID() int64 {
+	return s.frontendSessionID
 }
 
 // GetSubscriptions ...
