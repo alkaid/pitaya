@@ -171,7 +171,7 @@ func (h *HandlerService) Handle(conn acceptor.PlayerConn) {
 	a := h.agentFactory.CreateAgent(conn)
 
 	// startup agent goroutine
-	go a.Handle()
+	co.Go(func() { a.Handle() })
 
 	logger.Log.Debugf("New session established: %s", a.String())
 

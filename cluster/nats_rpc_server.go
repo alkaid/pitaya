@@ -361,7 +361,7 @@ func (ns *NatsRPCServer) processKick() {
 // Init inits nats rpc server
 func (ns *NatsRPCServer) Init() error {
 	// TODO should we have concurrency here? it feels like we should
-	go ns.handleMessages()
+	co.Go(func() { ns.handleMessages() })
 
 	logger.Log.Debugf("connecting to nats (server) with timeout of %s", ns.connectionTimeout)
 	conn, err := setupNatsConn(
@@ -408,15 +408,15 @@ func (ns *NatsRPCServer) Init() error {
 	}
 	// this handles remote messages
 	for i := 0; i < ns.service; i++ {
-		go ns.processMessages(i)
+		co.Go(func() { ns.processMessages(i) })
 	}
 
 	ns.sessionPool.OnSessionBind(ns.onSessionBind)
 
 	// this should be so fast that we shoudn't need concurrency
-	go ns.processPushes()
-	go ns.processSessionBindings()
-	go ns.processKick()
+	co.Go(func() { ns.processPushes() })
+	co.Go(func() { ns.processSessionBindings() })
+	co.Go(func() { ns.processKick() })
 
 	return nil
 }

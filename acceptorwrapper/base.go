@@ -22,6 +22,7 @@ package acceptorwrapper
 
 import (
 	"github.com/topfreegames/pitaya/v2/acceptor"
+	"github.com/topfreegames/pitaya/v2/co"
 )
 
 // BaseWrapper implements Wrapper by saving the acceptor as an attribute.
@@ -45,7 +46,7 @@ func NewBaseWrapper(wrapConn func(acceptor.PlayerConn) acceptor.PlayerConn) Base
 // ListenAndServe starts a goroutine that wraps acceptor's conn
 // and calls acceptor's listenAndServe
 func (b *BaseWrapper) ListenAndServe() {
-	go b.pipe()
+	co.Go(func() { b.pipe() })
 	b.Acceptor.ListenAndServe()
 }
 

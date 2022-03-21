@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/constants"
 )
@@ -30,7 +31,7 @@ type MemoryGroup struct {
 func NewMemoryGroupService(config config.MemoryGroupConfig) *MemoryGroupService {
 	memoryOnce.Do(func() {
 		memoryGroups = make(map[string]*MemoryGroup)
-		go groupTTLCleanup(config.TickDuration)
+		co.Go(func() { groupTTLCleanup(config.TickDuration) })
 	})
 	return &MemoryGroupService{}
 }

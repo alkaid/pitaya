@@ -5,11 +5,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/topfreegames/pitaya/v2/config"
 )
 
 func help() {
-	NewHolder(&config.CoroutineConfig{
+	NewHolder(CoroutineConfig{
 		Nums:    1000,
 		Buffers: 1000,
 	}).start()

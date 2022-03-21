@@ -26,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/constants"
 	"github.com/topfreegames/pitaya/v2/logger"
 )
@@ -67,21 +68,21 @@ func (b *Binary) Init() error {
 	stdOutScanner := bufio.NewScanner(stdout)
 	stderr, _ := b.cmd.StderrPipe()
 	stdErrScanner := bufio.NewScanner(stderr)
-	go func() {
+	co.Go(func() {
 		for stdOutScanner.Scan() {
 			logger.Log.Info(stdOutScanner.Text())
 		}
-	}()
-	go func() {
+	})
+	co.Go(func() {
 		for stdErrScanner.Scan() {
 			logger.Log.Error(stdErrScanner.Text())
 		}
-	}()
+	})
 	err := b.cmd.Start()
-	go func() {
+	co.Go(func() {
 		b.cmd.Wait()
 		close(b.exitCh)
-	}()
+	})
 	return err
 }
 

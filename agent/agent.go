@@ -30,6 +30,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/conn/codec"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/conn/packet"
@@ -416,8 +417,8 @@ func (a *agentImpl) Handle() {
 		logger.Log.Debugf("Session handle goroutine exit, SessionID=%d, UID=%s", a.Session.ID(), a.Session.UID())
 	}()
 
-	go a.write()
-	go a.heartbeat()
+	co.Go(func() { a.write() })
+	co.Go(func() { a.heartbeat() })
 	<-a.chDie // agent closed signal
 }
 

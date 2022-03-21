@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/panjf2000/ants/v2"
-	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/constants"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"go.uber.org/zap"
@@ -28,12 +27,12 @@ type HolderModule struct {
 	gopool             *ants.Pool // 线程池,主要用于分离session线程
 }
 
-func NewHolder(config *config.CoroutineConfig) *HolderModule {
+func NewHolder(config CoroutineConfig) *HolderModule {
 	if holder == nil {
 		holder = &HolderModule{
 			groups: make(map[string][]*Looper),
 		}
-		gs, err := RegNewGroupWithConfig(GroupIdPitaya, config)
+		gs, err := RegNewGroupWithConfig(GroupIdPitaya, &config)
 		if err != nil {
 			logger.Zap.Fatal("reg goroutine group failed", zap.String("gid", GroupIdPitaya))
 		}

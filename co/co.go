@@ -5,7 +5,6 @@ import (
 	"context"
 	"runtime"
 
-	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/constants"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"go.uber.org/zap"
@@ -13,11 +12,16 @@ import (
 
 const defaultCoBuffers = 100000
 
+type CoroutineConfig struct {
+	Nums    int
+	Buffers int
+}
+
 // RegNewGroupWithConfig 创建 cointf.Coroutine 所在线程的分组,并注册到系统
 //  @param id
 //  @param config
 //  @return error
-func RegNewGroupWithConfig(id string, config *config.CoroutineConfig) ([]*Looper, error) {
+func RegNewGroupWithConfig(id string, config *CoroutineConfig) ([]*Looper, error) {
 	if holder.Died {
 		return nil, constants.ErrClosedGroup
 	}
@@ -37,12 +41,12 @@ func RegNewGroupWithConfig(id string, config *config.CoroutineConfig) ([]*Looper
 //  @param id
 //  @return error
 func RegNewGroup(id string) ([]*Looper, error) {
-	return RegNewGroupWithConfig(id, &config.CoroutineConfig{})
+	return RegNewGroupWithConfig(id, &CoroutineConfig{})
 }
 
 // applyDefault 默认配置
 //  @param config
-func applyDefault(config *config.CoroutineConfig) {
+func applyDefault(config *CoroutineConfig) {
 	if config.Nums <= 0 {
 		config.Nums = runtime.GOMAXPROCS(0)
 	}

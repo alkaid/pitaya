@@ -26,6 +26,7 @@ import (
 	"os"
 
 	workers "github.com/topfreegames/go-workers"
+	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/constants"
 	"github.com/topfreegames/pitaya/v2/logger"
@@ -69,7 +70,7 @@ func (w *Worker) SetLogger(logger interfaces.Logger) {
 
 // Start starts worker in another gorotine
 func (w *Worker) Start() {
-	go workers.Start()
+	co.Go(func() { workers.Start() })
 	w.started = true
 }
 

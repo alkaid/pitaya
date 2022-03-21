@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/topfreegames/pitaya/v2/cluster"
+	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/constants"
 	"github.com/topfreegames/pitaya/v2/logger"
@@ -147,7 +148,7 @@ func (b *ETCDBindingStorage) bootstrapLease() error {
 	}
 	// need to receive here as per etcd docs
 	<-c
-	go b.watchLeaseChan(c)
+	co.Go(func() { b.watchLeaseChan(c) })
 	return nil
 }
 

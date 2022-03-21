@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/constants"
 	"github.com/topfreegames/pitaya/v2/logger"
@@ -175,7 +176,7 @@ func (sd *etcdServiceDiscovery) watchLeaseChan(c <-chan *clientv3.LeaseKeepAlive
 // renewLease reestablishes connection with etcd
 func (sd *etcdServiceDiscovery) renewLease() error {
 	c := make(chan error)
-	go func() {
+	co.Go(func() {
 		defer close(c)
 		logger.Log.Infof("waiting for etcd lease")
 		err := sd.grantLease()
@@ -185,7 +186,7 @@ func (sd *etcdServiceDiscovery) renewLease() error {
 		}
 		err = sd.bootstrapServer(sd.server)
 		c <- err
-	}()
+	})
 	select {
 	case err := <-c:
 		return err
@@ -210,7 +211,7 @@ func (sd *etcdServiceDiscovery) grantLease() error {
 	}
 	// need to receive here as per etcd docs
 	<-c
-	go sd.watchLeaseChan(c)
+	co.Go(func() { sd.watchLeaseChan(c) })
 	return nil
 }
 
@@ -425,7 +426,7 @@ func (sd *etcdServiceDiscovery) Init() error {
 		sd.cli.Watcher = namespace.NewWatcher(sd.cli.Watcher, sd.etcdPrefix)
 		sd.cli.Lease = namespace.NewLease(sd.cli.Lease, sd.etcdPrefix)
 	}
-	go sd.watchEtcdChanges()
+	co.Go(func() { sd.watchEtcdChanges() })
 
 	if err = sd.bootstrap(); err != nil {
 		return err
@@ -433,7 +434,7 @@ func (sd *etcdServiceDiscovery) Init() error {
 
 	// update servers
 	syncServersTicker := time.NewTicker(sd.syncServersInterval)
-	go func() {
+	co.Go(func() {
 		for sd.running {
 			select {
 			case <-syncServersTicker.C:
@@ -445,7 +446,7 @@ func (sd *etcdServiceDiscovery) Init() error {
 				return
 			}
 		}
-	}()
+	})
 
 	return nil
 }
@@ -512,7 +513,7 @@ func newParallelGetter(cli *clientv3.Client, numWorkers int) parallelGetter {
 
 func (p *parallelGetter) start() {
 	for i := 0; i < p.numWorkers; i++ {
-		go func() {
+		co.Go(func() {
 			for work := range p.workChan {
 				logger.Log.Debugf("loading info from missing server: %s/%s", work.serverType, work.serverID)
 				var sv *Server
@@ -534,7 +535,7 @@ func (p *parallelGetter) start() {
 
 				p.wg.Done()
 			}
-		}()
+		})
 	}
 }
 
@@ -655,12 +656,12 @@ func (sd *etcdServiceDiscovery) revoke() error {
 	close(sd.stopLeaseChan)
 	c := make(chan error)
 	defer close(c)
-	go func() {
+	co.Go(func() {
 		logger.Log.Debug("waiting for etcd revoke")
 		_, err := sd.cli.Revoke(context.TODO(), sd.leaseID)
 		c <- err
 		logger.Log.Debug("finished waiting for etcd revoke")
-	}()
+	})
 	select {
 	case err := <-c:
 		return err // completed normally

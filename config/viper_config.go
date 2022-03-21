@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/logger"
 )
 
@@ -60,7 +61,7 @@ func (l LoaderFactory) Provide() (key string, confStruct interface{}) {
 type Config struct {
 	config   *viper.Viper
 	loaders  []ConfLoader
-	confconf *confMap //配置的配置
+	confconf *confMap // 配置的配置
 }
 
 // NewConfig creates a new config with a given viper config if given
@@ -226,11 +227,11 @@ func (c *Config) Provide() (key string, confStruct interface{}) {
 }
 
 type confMap struct {
-	FilePath  []string      //配置文件路径,不为空表明使用本地文件配置
-	EtcdAddr  string        //Etcd地址,不为空表明使用远程etcd配置
-	EtcdKeys  []string      //要读取监听的etcd key列表
-	Interval  time.Duration //重载间隔
-	Formatter string        //配置格式 必须为 viper.SupportedRemoteProviders
+	FilePath  []string      // 配置文件路径,不为空表明使用本地文件配置
+	EtcdAddr  string        // Etcd地址,不为空表明使用远程etcd配置
+	EtcdKeys  []string      // 要读取监听的etcd key列表
+	Interval  time.Duration // 重载间隔
+	Formatter string        // 配置格式 必须为 viper.SupportedRemoteProviders
 }
 
 // InitLoad 初始化加载本地或远程配置.业务层创建App前调用,仅允许一次
@@ -278,13 +279,13 @@ func (c *Config) watch() error {
 			return err
 		}
 	}
-	//TODO 暂时用loop实现配置重载,后期fork viper修改watchKeyValueConfigOnChannel()添加回调来实现
-	go func() {
+	// TODO 暂时用loop实现配置重载,后期fork viper修改watchKeyValueConfigOnChannel()添加回调来实现
+	co.Go(func() {
 		for {
 			time.Sleep(c.confconf.Interval)
 			c.reloadAll()
 		}
-	}()
+	})
 	return nil
 }
 

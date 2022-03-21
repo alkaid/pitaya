@@ -389,10 +389,10 @@ func (app *App) initSysRemotes() {
 
 func (app *App) periodicMetrics() {
 	period := app.config.Metrics.Period
-	go metrics.ReportSysMetrics(app.metricsReporters, period)
+	co.Go(func() { metrics.ReportSysMetrics(app.metricsReporters, period) })
 
 	if app.worker.Started() {
-		go worker.Report(app.metricsReporters, period)
+		co.Go(func() { worker.Report(app.metricsReporters, period) })
 	}
 }
 
@@ -461,19 +461,20 @@ func (app *App) listen() {
 
 	logger.Log.Infof("starting server %s:%s", app.server.Type, app.server.ID)
 	for i := 0; i < app.config.Concurrency.Handler.Dispatch; i++ {
-		go app.handlerService.Dispatch(i)
+		co.Go(func() { app.handlerService.Dispatch(i) })
 	}
 	for _, acc := range app.acceptors {
 		a := acc
-		go func() {
+		// TODO 池化效果待验证
+		co.Go(func() {
 			for conn := range a.GetConnChan() {
-				go app.handlerService.Handle(conn)
+				co.Go(func() { app.handlerService.Handle(conn) })
 			}
-		}()
+		})
 
-		go func() {
+		co.Go(func() {
 			a.ListenAndServe()
-		}()
+		})
 
 		logger.Log.Infof("listening with acceptor %s on addr %s", reflect.TypeOf(a), a.GetAddr())
 	}
@@ -487,8 +488,11 @@ func (app *App) listen() {
 	}
 	// 注册配置重载回调
 	app.RegisterModule(config.NewConfigModule(app.conf), "configLoader")
-
-	coHolder := co.NewHolder(&app.config.Coroutine)
+	coConf := co.CoroutineConfig{
+		Nums:    app.config.Coroutine.Nums,
+		Buffers: app.config.Coroutine.Buffers,
+	}
+	coHolder := co.NewHolder(coConf)
 	app.RegisterModule(coHolder, "CoroutineHolder")
 
 	app.startModules()
