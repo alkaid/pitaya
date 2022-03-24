@@ -160,6 +160,7 @@ func (h *HandlerService) Register(comp component.Component, opts []component.Opt
 	// register all handlers
 	h.services[s.Name] = s
 	for name, handler := range s.Handlers {
+		handler.EnableReactor = s.Options.EnableReactor
 		h.handlerPool.Register(s.Name, name, handler)
 	}
 	return nil

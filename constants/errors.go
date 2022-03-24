@@ -20,8 +20,11 @@
 
 package constants
 
-import "errors"
-import e "github.com/topfreegames/pitaya/v2/errors"
+import (
+	"errors"
+
+	e "github.com/topfreegames/pitaya/v2/errors"
+)
 
 // Errors that can occur during message handling.
 var (
@@ -93,4 +96,6 @@ var (
 	ErrSessionCantKickBackend  = errors.New("can't kick backend")
 	ErrSessionNotBoundBackend  = errors.New("session have not bound to backend")
 	ErrNotifyAllSvTypeNotEmpty = errors.New("NotifyAll must be to an empty server type")
+	ErrLooperAsyncInCoroutine  = errors.New("don't call Async() inside coroutine")
+	ErrConvertGenericType      = errors.New("convert generic type error")
 )

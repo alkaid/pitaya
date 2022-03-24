@@ -30,19 +30,21 @@ import (
 type (
 	//Handler represents a message.Message's handler's meta information.
 	Handler struct {
-		Receiver    reflect.Value  // receiver of method
-		Method      reflect.Method // method stub
-		Type        reflect.Type   // low-level type of method
-		IsRawArg    bool           // whether the data need to serialize
-		MessageType message.Type   // handler allowed message type (either request or notify)
+		Receiver      reflect.Value  // receiver of method
+		Method        reflect.Method // method stub
+		Type          reflect.Type   // low-level type of method
+		IsRawArg      bool           // whether the data need to serialize
+		MessageType   message.Type   // handler allowed message type (either request or notify)
+		EnableReactor bool           // 启用单线程reactor模型
 	}
 
 	//Remote represents remote's meta information.
 	Remote struct {
-		Receiver reflect.Value  // receiver of method
-		Method   reflect.Method // method stub
-		HasArgs  bool           // if remote has no args we won't try to serialize received data into arguments
-		Type     reflect.Type   // low-level type of method
+		Receiver      reflect.Value  // receiver of method
+		Method        reflect.Method // method stub
+		HasArgs       bool           // if remote has no args we won't try to serialize received data into arguments
+		Type          reflect.Type   // low-level type of method
+		EnableReactor bool           // 启用单线程reactor模型
 	}
 
 	// Service implements a specific service, some of it's methods will be

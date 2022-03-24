@@ -16,6 +16,9 @@ const (
 	GroupIdPitaya = "_pitaya"
 )
 
+// LooperInstance 全局默认 Looper. 框架内部私有,若非特殊需求请勿直接调用
+var LooperInstance Asyncio
+
 var holder *HolderModule
 
 type HolderModule struct {
@@ -23,7 +26,7 @@ type HolderModule struct {
 	pitayaGroup []*Looper
 	Died        bool
 	// 默认全局 Looper Group
-	pitayaSingleLooper *Looper    // 默认全局单个 Looper
+	pitayaSingleLooper *Looper    // 默认全局单个 Looper,同 LooperInstance
 	gopool             *ants.Pool // 线程池,主要用于分离session线程
 }
 
@@ -38,6 +41,7 @@ func NewHolder(config CoroutineConfig) *HolderModule {
 		}
 		holder.pitayaGroup = gs
 		holder.pitayaSingleLooper = NewLooper(0, config.Buffers)
+		LooperInstance = holder.pitayaSingleLooper
 		p, err := ants.NewPool(ants.DefaultAntsPoolSize, ants.WithTaskBuffer(ants.DefaultStatefulTaskBuffer), ants.WithExpiryDuration(time.Hour))
 		if err != nil {
 			logger.Zap.Fatal("create ants pool error", zap.Error(err))

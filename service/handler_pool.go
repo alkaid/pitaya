@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/component"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
@@ -91,8 +92,15 @@ func (h *HandlerPool) ProcessHandlerMessage(
 	if arg != nil {
 		args = append(args, reflect.ValueOf(arg))
 	}
-
-	resp, err := util.Pcall(handler.Method, args)
+	var resp any
+	// 若启用了单线程反应堆模型,则派发到全局Looper单例
+	if handler.EnableReactor {
+		resp, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
+			return util.Pcall(handler.Method, args)
+		}).Wait(ctx)
+	} else {
+		resp, err = util.Pcall(handler.Method, args)
+	}
 	if remote && msgType == message.Notify {
 		// This is a special case and should only happen with nats rpc client
 		// because we used nats request we have to answer to it or else a timeout

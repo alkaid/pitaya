@@ -22,8 +22,9 @@ package component
 
 type (
 	options struct {
-		name     string              // component name
-		nameFunc func(string) string // rename handler name
+		name          string              // component name
+		nameFunc      func(string) string // rename handler name
+		EnableReactor bool                // 启用单线程reactor模型
 	}
 
 	// Option used to customize handler
@@ -43,4 +44,11 @@ func WithNameFunc(fn func(string) string) Option {
 	return func(opt *options) {
 		opt.nameFunc = fn
 	}
+}
+
+func WithEnableReactor(enableReactor bool) Option {
+	return func(opt *options) {
+		opt.EnableReactor = enableReactor
+	}
+
 }

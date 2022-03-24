@@ -71,6 +71,9 @@ const (
 // SessionCtxKey is the context key where the session will be set
 var SessionCtxKey = "session"
 
+// CoroutineCtxKey is the context key where the session will be set
+var CoroutineCtxKey = "alkaid-coroutine"
+
 // LoggerCtxKey is the context key where the default logger will be set
 var LoggerCtxKey = "default-logger"
 

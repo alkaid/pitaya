@@ -392,6 +392,7 @@ func (r *RemoteService) Register(comp component.Component, opts []component.Opti
 	r.services[s.Name] = s
 	// register all remotes
 	for name, remote := range s.Remotes {
+		remote.EnableReactor = s.Options.EnableReactor
 		r.remotes[fmt.Sprintf("%s.%s", s.Name, name)] = remote
 	}
 
@@ -505,8 +506,15 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 		}
 		return response
 	}
-
-	ret, err := util.Pcall(remote.Method, params)
+	var ret any
+	// 若启用了单线程反应堆模型,则派发到全局Looper单例
+	if remote.EnableReactor {
+		ret, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
+			return util.Pcall(remote.Method, params)
+		}).Wait(ctx)
+	} else {
+		ret, err = util.Pcall(remote.Method, params)
+	}
 	ret, err = r.handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, ret, err)
 	if err != nil {
 		response := &protos.Response{
