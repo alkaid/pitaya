@@ -461,14 +461,16 @@ func (app *App) listen() {
 
 	logger.Log.Infof("starting server %s:%s", app.server.Type, app.server.ID)
 	for i := 0; i < app.config.Concurrency.Handler.Dispatch; i++ {
-		co.Go(func() { app.handlerService.Dispatch(i) })
+		threadID := i // 避免闭包值拷贝问题
+		co.Go(func() { app.handlerService.Dispatch(threadID) })
 	}
 	for _, acc := range app.acceptors {
 		a := acc
 		// TODO 池化效果待验证
 		co.Go(func() {
 			for conn := range a.GetConnChan() {
-				co.Go(func() { app.handlerService.Handle(conn) })
+				connV := conn // 避免闭包值拷贝问题
+				co.Go(func() { app.handlerService.Handle(connV) })
 			}
 		})
 

@@ -408,7 +408,8 @@ func (ns *NatsRPCServer) Init() error {
 	}
 	// this handles remote messages
 	for i := 0; i < ns.service; i++ {
-		co.Go(func() { ns.processMessages(i) })
+		threadID := i // 避免闭包值拷贝问题
+		co.Go(func() { ns.processMessages(threadID) })
 	}
 
 	ns.sessionPool.OnSessionBind(ns.onSessionBind)
