@@ -346,11 +346,11 @@ func NewConfigModule(core *Config) *_ConfigModule {
 }
 
 func (c *_ConfigModule) Init() error {
+	c.core.reloadAll()
+	c.core.watch()
 	return nil
 }
 func (c *_ConfigModule) AfterInit() {
-	c.core.reloadAll()
-	c.core.watch()
 }
 func (c *_ConfigModule) BeforeShutdown() {
 

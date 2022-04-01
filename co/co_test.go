@@ -21,4 +21,8 @@ func TestAwait(t *testing.T) {
 		return "test", nil
 	}).Wait(ctx)
 	assert.Equal(t, "test", d)
+	// a, _ := Await(ctx, func(ctx context.Context) (string, error) {
+	// 	return "ttt", nil
+	// })
+	// t.Log("a=", a)
 }

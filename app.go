@@ -489,13 +489,13 @@ func (app *App) listen() {
 		app.RegisterModule(unique, "uniqueSession")
 	}
 	// 注册配置重载回调
-	app.RegisterModule(config.NewConfigModule(app.conf), "configLoader")
+	app.RegisterModuleBefore(config.NewConfigModule(app.conf), "configLoader")
 	coConf := co.CoroutineConfig{
 		Nums:    app.config.Coroutine.Nums,
 		Buffers: app.config.Coroutine.Buffers,
 	}
 	coHolder := co.NewHolder(coConf)
-	app.RegisterModule(coHolder, "CoroutineHolder")
+	app.RegisterModuleBefore(coHolder, "CoroutineHolder")
 
 	app.startModules()
 

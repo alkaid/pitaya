@@ -40,10 +40,10 @@ import (
 )
 
 const (
-	storageKeyPrefix   = "sess:"
-	fieldKeyFrontendID = "_fid"
-	fieldKeyBackends   = "_backends"
-	fieldKeyUID        = "_uid"
+	cacheKeyPitayaSession = "pitaya:sess:%s:"
+	fieldKeyFrontendID    = "_fid"
+	fieldKeyBackends      = "_backends"
+	fieldKeyUID           = "_uid"
 )
 
 type CloseReason = int
@@ -485,7 +485,7 @@ func (pool *sessionPoolImpl) ImperfectSessionFromCluster(uid string) (Session, e
 }
 
 func (pool *sessionPoolImpl) getSessionStorageKey(uid string) string {
-	return fmt.Sprintf(storageKeyPrefix+"%v"+":", uid)
+	return fmt.Sprintf(cacheKeyPitayaSession, uid)
 }
 
 func (s *sessionImpl) updateEncodedData() error {
