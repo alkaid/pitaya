@@ -21,10 +21,13 @@
 package component
 
 import (
+	"context"
 	"errors"
 	"reflect"
 
 	"github.com/topfreegames/pitaya/v2/conn/message"
+	"github.com/topfreegames/pitaya/v2/route"
+	"google.golang.org/protobuf/proto"
 )
 
 type (
@@ -56,6 +59,17 @@ type (
 		Handlers map[string]*Handler // registered methods
 		Remotes  map[string]*Remote  // registered remote methods
 		Options  options             // options
+	}
+
+	// InterceptorFun 拦截分发器,优先级别高于 Handler 或 Remote
+	//  @param ctx
+	//  @param route
+	//  @param req
+	InterceptorFun func(ctx context.Context, route route.Route, req proto.Message) (proto.Message, error)
+	// Interceptor 拦截分发器,优先级别高于 Handler 或 Remote
+	Interceptor struct {
+		InterceptorFun
+		EnableReactor bool // 启用单线程reactor模型
 	}
 )
 

@@ -2,6 +2,8 @@ package defaultpipelines
 
 import (
 	"context"
+
+	"github.com/topfreegames/pitaya/v2/route"
 )
 
 // StructValidator is the interface that must be implemented
@@ -9,7 +11,7 @@ import (
 //
 // The default struct validator used by pitaya is https://github.com/go-playground/validator.
 type StructValidator interface {
-	Validate(context.Context, interface{}) (context.Context, interface{}, error)
+	Validate(context.Context, route.Route, interface{}) (context.Context, interface{}, error)
 }
 
 // StructValidatorInstance holds the default validator

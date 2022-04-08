@@ -166,6 +166,14 @@ func (h *HandlerService) Register(comp component.Component, opts []component.Opt
 	return nil
 }
 
+// RegisterInterceptor 注册拦截分发器,优先级别高于 component.Remote
+//  @receiver h
+//  @param serviceName
+//  @param interceptor
+func (h *HandlerService) RegisterInterceptor(serviceName string, interceptor *component.Interceptor) {
+	h.handlerPool.RegisterInterceptor(serviceName, interceptor)
+}
+
 // Handle handles messages from a conn
 func (h *HandlerService) Handle(conn acceptor.PlayerConn) {
 	// create a client agent and startup write goroutine

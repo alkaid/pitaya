@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	validator "github.com/go-playground/validator/v10"
+	"github.com/topfreegames/pitaya/v2/route"
 )
 
 // DefaultValidator is the default arguments validator for handlers
@@ -18,7 +19,7 @@ type DefaultValidator struct {
 // based on the struct tags the parameter has.
 // This function has the pipeline.Handler signature so
 // it is possible to use it as a pipeline function
-func (v *DefaultValidator) Validate(ctx context.Context, in interface{}) (context.Context, interface{}, error) {
+func (v *DefaultValidator) Validate(ctx context.Context, route route.Route, in interface{}) (context.Context, interface{}, error) {
 	if in == nil {
 		return ctx, in, nil
 	}

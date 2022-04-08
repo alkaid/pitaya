@@ -64,9 +64,10 @@ type RemoteService struct {
 	server                 *cluster.Server // server obj
 	sessionPool            session.SessionPool
 	handlerPool            *HandlerPool
-	remotes                map[string]*component.Remote    // all remote method
-	remoteBindingListeners []cluster.RemoteBindingListener // 绑定发生时的回调，内部使用，仅用于相同serverType间的广播
-	remoteSessionListeners []cluster.RemoteSessionListener // session生命周期监听
+	remotes                map[string]*component.Remote      // all remote method
+	remoteBindingListeners []cluster.RemoteBindingListener   // 绑定发生时的回调，内部使用，仅用于相同serverType间的广播
+	remoteSessionListeners []cluster.RemoteSessionListener   // session生命周期监听
+	interceptors           map[string]*component.Interceptor // 所有拦截分发器,优先级别高于 remotes
 }
 
 // NewRemoteService creates and return a new RemoteService
@@ -98,6 +99,7 @@ func NewRemoteService(
 		remotes:                make(map[string]*component.Remote),
 		remoteBindingListeners: make([]cluster.RemoteBindingListener, 0),
 		remoteSessionListeners: make([]cluster.RemoteSessionListener, 0),
+		interceptors:           make(map[string]*component.Interceptor),
 	}
 
 	remote.handlerHooks = handlerHooks
@@ -118,12 +120,12 @@ func (r *RemoteService) remoteProcess(
 	case message.Request:
 	case message.Notify:
 		defer tracing.FinishSpan(ctx, err)
-		//if err == nil && res.Error != nil {
+		// if err == nil && res.Error != nil {
 		//	err = errors.New(res.Error.GetMsg())
-		//}
-		//if err != nil {
+		// }
+		// if err != nil {
 		//	logger.Log.Errorf("error while sending a notify to server: %s", err.Error())
-		//}
+		// }
 	}
 	if err != nil {
 		logW.Error("Failed to process remote server", zap.Error(err))
@@ -399,6 +401,14 @@ func (r *RemoteService) Register(comp component.Component, opts []component.Opti
 	return nil
 }
 
+// RegisterInterceptor 注册拦截分发器,优先级别高于 component.Remote
+//  @receiver r
+//  @param serviceName
+//  @param interceptor
+func (r *RemoteService) RegisterInterceptor(serviceName string, interceptor *component.Interceptor) {
+	r.interceptors[serviceName] = interceptor
+}
+
 func processRemoteMessage(ctx context.Context, req *protos.Request, r *RemoteService) *protos.Response {
 	rt, err := route.Decode(req.GetMsg().GetRoute())
 	if err != nil {
@@ -435,6 +445,142 @@ func processRemoteMessage(ctx context.Context, req *protos.Request, r *RemoteSer
 func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, rt *route.Route) *protos.Response {
 	response := &protos.Response{}
 
+	// 拦截器优先工作
+	interceptor, ok := r.interceptors[rt.Service]
+	if ok {
+		var err error
+		arg := reflect.New(reflect.TypeOf(interceptor.InterceptorFun).In(1).Elem()).Interface().(proto.Message)
+		var sess session.Session
+		if req.Session != nil {
+			a, err := agent.NewRemote(
+				req.GetSession(), // 内部会优先从sessionPool中取session
+				"",               // 服务器内部rpc 不需要 agent.Remote.ResponseMID()功能
+				r.rpcClient,
+				r.encoder,
+				r.serializer,
+				r.serviceDiscovery,
+				req.FrontendID,
+				r.messageEncoder,
+				r.sessionPool,
+			)
+			if err != nil {
+				logger.Log.Warn("pitaya/handler: cannot instantiate remote agent")
+				response := &protos.Response{
+					Error: &protos.Error{
+						Code: e.ErrInternalCode,
+						Msg:  err.Error(),
+					},
+				}
+				return response
+			}
+			sess = a.Session
+		}
+		// 和 handleRPCSys 调用的 handlerPool.ProcessHandlerMessage 一样处理，把session存入context
+		if sess != nil {
+			ctx = context.WithValue(ctx, constants.SessionCtxKey, sess)
+			ctx = util.CtxWithDefaultLogger(ctx, rt.String(), sess.UID())
+		}
+		// 和 handlerPool.ProcessHandlerMessage 一样加入hook处理
+		var arg2 any
+		if interceptor.EnableReactor {
+			arg2, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
+				ctx, arg2, err = r.handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)
+				return arg2, err
+			}).Wait(ctx)
+		} else {
+			ctx, arg2, err = r.handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)
+		}
+		if err != nil {
+			response := &protos.Response{
+				Error: &protos.Error{
+					Code: e.ErrUnknownCode,
+					Msg:  err.Error(),
+				},
+			}
+			if val, ok := err.(*e.Error); ok {
+				response.Error.Code = val.Code
+				if val.Metadata != nil {
+					response.Error.Metadata = val.Metadata
+				}
+			}
+			return response
+		}
+		arg = arg2.(proto.Message)
+		var ret any
+		// 若启用了单线程反应堆模型,则派发到全局Looper单例
+		if interceptor.EnableReactor {
+			ret, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
+				return interceptor.InterceptorFun(ctx, *rt, arg)
+			}).Wait(ctx)
+		} else {
+			ret, err = interceptor.InterceptorFun(ctx, *rt, arg)
+		}
+		if err != nil {
+			response := &protos.Response{
+				Error: &protos.Error{
+					Code: e.ErrUnknownCode,
+					Msg:  err.Error(),
+				},
+			}
+			if val, ok := err.(*e.Error); ok {
+				response.Error.Code = val.Code
+				if val.Metadata != nil {
+					response.Error.Metadata = val.Metadata
+				}
+			}
+			return response
+		}
+		if interceptor.EnableReactor {
+			ret, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
+				return r.handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, rt, arg, ret, err)
+			}).Wait(ctx)
+		} else {
+			ret, err = r.handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, rt, arg, ret, err)
+		}
+		if err != nil {
+			response := &protos.Response{
+				Error: &protos.Error{
+					Code: e.ErrUnknownCode,
+					Msg:  err.Error(),
+				},
+			}
+			if val, ok := err.(*e.Error); ok {
+				response.Error.Code = val.Code
+				if val.Metadata != nil {
+					response.Error.Metadata = val.Metadata
+				}
+			}
+			return response
+		}
+
+		var b []byte
+		if ret != nil {
+			pb, ok := ret.(proto.Message)
+			if !ok {
+				response := &protos.Response{
+					Error: &protos.Error{
+						Code: e.ErrUnknownCode,
+						Msg:  constants.ErrWrongValueType.Error(),
+					},
+				}
+				return response
+			}
+			if b, err = proto.Marshal(pb); err != nil {
+				response := &protos.Response{
+					Error: &protos.Error{
+						Code: e.ErrUnknownCode,
+						Msg:  err.Error(),
+					},
+				}
+				return response
+			}
+		}
+
+		response.Data = b
+		return response
+	}
+
+	// 无拦截器情况下走常规remote
 	remote, ok := r.remotes[rt.Short()]
 	if !ok {
 		logger.Log.Warnf("pitaya/remote: %s not found", rt.Short())
@@ -496,16 +642,31 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 		ctx = util.CtxWithDefaultLogger(ctx, rt.String(), sess.UID())
 	}
 	// 和 handlerPool.ProcessHandlerMessage 一样加入hook处理
-	ctx, arg, err = r.handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, arg)
+	var arg2 any
+	if remote.EnableReactor {
+		arg2, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
+			ctx, arg2, err = r.handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)
+			return arg2, err
+		}).Wait(ctx)
+	} else {
+		ctx, arg2, err = r.handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)
+	}
 	if err != nil {
 		response := &protos.Response{
 			Error: &protos.Error{
-				Code: e.ErrBadRequestCode,
+				Code: e.ErrUnknownCode,
 				Msg:  err.Error(),
 			},
 		}
+		if val, ok := err.(*e.Error); ok {
+			response.Error.Code = val.Code
+			if val.Metadata != nil {
+				response.Error.Metadata = val.Metadata
+			}
+		}
 		return response
 	}
+	arg = arg2.(proto.Message)
 	var ret any
 	// 若启用了单线程反应堆模型,则派发到全局Looper单例
 	if remote.EnableReactor {
@@ -515,7 +676,28 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 	} else {
 		ret, err = util.Pcall(remote.Method, params)
 	}
-	ret, err = r.handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, ret, err)
+	if err != nil {
+		response := &protos.Response{
+			Error: &protos.Error{
+				Code: e.ErrUnknownCode,
+				Msg:  err.Error(),
+			},
+		}
+		if val, ok := err.(*e.Error); ok {
+			response.Error.Code = val.Code
+			if val.Metadata != nil {
+				response.Error.Metadata = val.Metadata
+			}
+		}
+		return response
+	}
+	if remote.EnableReactor {
+		ret, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
+			return r.handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, rt, arg, ret, err)
+		}).Wait(ctx)
+	} else {
+		ret, err = r.handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, rt, arg, ret, err)
+	}
 	if err != nil {
 		response := &protos.Response{
 			Error: &protos.Error{

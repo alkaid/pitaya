@@ -97,12 +97,18 @@ type Pitaya interface {
 	// AddConfLoader 添加配置重载回调
 	//  @param loader
 	AddConfLoader(loader config.ConfLoader)
-	// PushBeforeHandleHook 添加handle和remote执行前的hook
+	// PushBeforeHandleHook 添加handle执行前的hook
 	//  @param beforeFunc
 	PushBeforeHandleHook(beforeFunc pipeline.HandlerTempl)
-	// PushAfterHandleHook 添加handle和remote执行后的hook
+	// PushAfterHandleHook 添加handle执行后的hook
 	//  @param afterFunc
 	PushAfterHandleHook(afterFunc pipeline.AfterHandlerTempl)
+	// PushBeforeRemoteHook 添加remote执行前的hook
+	//  @param beforeFunc
+	PushBeforeRemoteHook(beforeFunc pipeline.HandlerTempl)
+	// PushAfterRemoteHook 添加remote执行后的hook
+	//  @param afterFunc
+	PushAfterRemoteHook(afterFunc pipeline.AfterHandlerTempl)
 	GetSessionFromCtx(ctx context.Context) session.Session
 	Start()
 	SetDictionary(dict map[string]uint16) error
@@ -187,13 +193,54 @@ type Pitaya interface {
 	GroupRenewTTL(ctx context.Context, groupName string) error
 	GroupDelete(ctx context.Context, groupName string) error
 
+	// Register 注册handle(终端api响应)
+	//  @param c
+	//  @param options
 	Register(c component.Component, options ...component.Option)
+	// RegisterRemote 注册remote(远端rpc响应)
+	//  @param c
+	//  @param options
 	RegisterRemote(c component.Component, options ...component.Option)
 
+	// // LazyRegister 延迟注册handle(终端api响应)
+	// //  @param c 注意系统不会回调该component的生命周期函数
+	// //  @param options
+	// LazyRegister(c component.Component, options ...component.Option)
+	// // LazyRegisterRemote  延迟注册remote(远端rpc响应)
+	// //  @param c 注意系统不会回调该component的生命周期函数
+	// //  @param options
+	// LazyRegisterRemote(c component.Component, options ...component.Option)
+
+	// RegisterInterceptor 注册handle的拦截器,注册后原hande的消息响应将不再分发给handle
+	//  @param serviceName
+	//  @param interceptor
+	RegisterInterceptor(serviceName string, interceptor *component.Interceptor)
+	// RegisterRemoteInterceptor 注册remote的拦截器,注册后原remote的消息响应将不再分发给remote
+	//  @param serviceName
+	//  @param interceptor
+	RegisterRemoteInterceptor(serviceName string, interceptor *component.Interceptor)
 	RegisterModule(module interfaces.Module, name string) error
 	RegisterModuleAfter(module interfaces.Module, name string) error
 	RegisterModuleBefore(module interfaces.Module, name string) error
 	GetModule(name string) (interfaces.Module, error)
+
+	// BindBackend bind session in stateful backend 注意业务层若当前服务是frontend时请勿调用。frontend时仅框架内自己调用
+	//  @param ctx
+	//  @param uid
+	//  @param targetServerType 要绑定的stateful backend服务
+	//  @param targetServerID 要绑定的stateful backend id
+	//  @param callback 回调数据,通知其他服务时透传
+	//  @return error
+	BindBackend(ctx context.Context, uid string, targetServerType string, targetServerID string, callback map[string]string) error
+
+	// KickBackend 解绑backend
+	//  @param ctx
+	//  @param uid
+	//  @param targetServerType 目标服
+	//  @param callback 回调数据,通知其他服务时透传
+	//  @param reason
+	//  @return error
+	KickBackend(ctx context.Context, uid string, targetServerType string, callback map[string]string) error
 }
 
 // App is the base app struct
@@ -353,10 +400,14 @@ func (app *App) AddConfLoader(loader config.ConfLoader) {
 
 func (app *App) PushBeforeHandleHook(beforeFunc pipeline.HandlerTempl) {
 	app.handlerService.GetHandleHooks().BeforeHandler.PushBack(beforeFunc)
-	app.remoteService.GetHandleHooks().BeforeHandler.PushBack(beforeFunc)
 }
 func (app *App) PushAfterHandleHook(afterFunc pipeline.AfterHandlerTempl) {
 	app.handlerService.GetHandleHooks().AfterHandler.PushBack(afterFunc)
+}
+func (app *App) PushBeforeRemoteHook(beforeFunc pipeline.HandlerTempl) {
+	app.remoteService.GetHandleHooks().BeforeHandler.PushBack(beforeFunc)
+}
+func (app *App) PushAfterRemoteHook(afterFunc pipeline.AfterHandlerTempl) {
 	app.remoteService.GetHandleHooks().AfterHandler.PushBack(afterFunc)
 }
 
@@ -373,6 +424,36 @@ func (app *App) SetSessionCache(cache session.CacheInterface) {
 
 func (app *App) AddSessionListener(listener cluster.RemoteSessionListener) {
 	app.remoteService.AddRemoteSessionListener(listener)
+}
+
+// BindBackend bind session in stateful backend 注意业务层若当前服务是frontend时请勿调用。frontend时仅框架内自己调用
+//  @param ctx
+//  @param uid
+//  @param targetServerType 要绑定的stateful backend服务
+//  @param targetServerID 要绑定的stateful backend id
+//  @param callback 回调数据,通知其他服务时透传
+//  @return error
+func (app *App) BindBackend(ctx context.Context, uid string, targetServerType string, targetServerID string, callback map[string]string) error {
+	sess, err := app.imperfectSessionForRPC(ctx, uid)
+	if err != nil {
+		return err
+	}
+	return sess.BindBackend(ctx, targetServerType, targetServerID, callback)
+}
+
+// KickBackend 解绑backend
+//  @param ctx
+//  @param uid
+//  @param targetServerType 目标服
+//  @param callback 回调数据,通知其他服务时透传
+//  @param reason
+//  @return error
+func (app *App) KickBackend(ctx context.Context, uid string, targetServerType string, callback map[string]string) error {
+	sess, err := app.imperfectSessionForRPC(ctx, uid)
+	if err != nil {
+		return err
+	}
+	return sess.KickBackend(ctx, targetServerType, callback)
 }
 
 func (app *App) initSysRemotes() {

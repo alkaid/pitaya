@@ -24,16 +24,17 @@ import (
 	"context"
 
 	"github.com/topfreegames/pitaya/v2/logger"
+	"github.com/topfreegames/pitaya/v2/route"
 )
 
 type (
 	// HandlerTempl is a function that has the same signature as a handler and will
 	// be called before or after handler methods
-	HandlerTempl func(ctx context.Context, in interface{}) (c context.Context, out interface{}, err error)
+	HandlerTempl func(ctx context.Context, route route.Route, in interface{}) (c context.Context, out interface{}, err error)
 
 	// AfterHandlerTempl is a function for the after handler, receives both the handler response
 	// and the error returned
-	AfterHandlerTempl func(ctx context.Context, out interface{}, err error) (interface{}, error)
+	AfterHandlerTempl func(ctx context.Context, route route.Route, in interface{}, out interface{}, err error) (interface{}, error)
 
 	// Channel contains the functions to be called before the handler method is executed
 	Channel struct {
@@ -71,12 +72,12 @@ func NewAfterChannel() *AfterChannel {
 }
 
 // ExecuteBeforePipeline calls registered handlers
-func (p *Channel) ExecuteBeforePipeline(ctx context.Context, data interface{}) (context.Context, interface{}, error) {
+func (p *Channel) ExecuteBeforePipeline(ctx context.Context, rt *route.Route, data interface{}) (context.Context, interface{}, error) {
 	var err error
 	res := data
 	if len(p.Handlers) > 0 {
 		for _, h := range p.Handlers {
-			ctx, res, err = h(ctx, res)
+			ctx, res, err = h(ctx, *rt, res)
 			if err != nil {
 				logger.Log.Debugf("pitaya/handler: broken pipeline: %s", err.Error())
 				return ctx, res, err
@@ -87,11 +88,11 @@ func (p *Channel) ExecuteBeforePipeline(ctx context.Context, data interface{}) (
 }
 
 // ExecuteAfterPipeline calls registered handlers
-func (p *AfterChannel) ExecuteAfterPipeline(ctx context.Context, res interface{}, err error) (interface{}, error) {
+func (p *AfterChannel) ExecuteAfterPipeline(ctx context.Context, rt *route.Route, in interface{}, res interface{}, err error) (interface{}, error) {
 	ret := res
 	if len(p.Handlers) > 0 {
 		for _, h := range p.Handlers {
-			ret, err = h(ctx, ret, err)
+			ret, err = h(ctx, *rt, in, ret, err)
 		}
 	}
 	return ret, err

@@ -40,6 +40,23 @@ func (app *App) RegisterRemote(c component.Component, options ...component.Optio
 	app.remoteComp = append(app.remoteComp, regComp{c, options})
 }
 
+func (app *App) LazyRegister(c component.Component, options ...component.Option) {
+	if err := app.handlerService.Register(c, options); err != nil {
+		logger.Log.Errorf("Failed to lazy register handler: %s", err.Error())
+	}
+}
+func (app *App) LazyRegisterRemote(c component.Component, options ...component.Option) {
+	if err := app.remoteService.Register(c, options); err != nil {
+		logger.Log.Errorf("Failed to lazy register remote: %s", err.Error())
+	}
+}
+func (app *App) RegisterInterceptor(serviceName string, interceptor *component.Interceptor) {
+	app.handlerService.RegisterInterceptor(serviceName, interceptor)
+}
+func (app *App) RegisterRemoteInterceptor(serviceName string, interceptor *component.Interceptor) {
+	app.remoteService.RegisterInterceptor(serviceName, interceptor)
+}
+
 func (app *App) startupComponents() {
 	// handler component initialize hooks
 	for _, c := range app.handlerComp {

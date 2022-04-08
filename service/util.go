@@ -136,7 +136,7 @@ func processHandlerMessage(
 		return nil, e.NewError(err, e.ErrBadRequestCode)
 	}
 
-	ctx, arg, err = handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, arg)
+	ctx, arg, err = handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +157,7 @@ func processHandlerMessage(
 		resp = []byte("ack")
 	}
 
-	resp, err = handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, resp, err)
+	resp, err = handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, rt, arg, resp, err)
 	if err != nil {
 		return nil, err
 	}
