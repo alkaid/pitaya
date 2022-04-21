@@ -48,7 +48,7 @@ func applyDefault(config *CoroutineConfig) {
 		config.Nums = runtime.GOMAXPROCS(0)
 	}
 	if config.Buffers <= 0 {
-		config.Nums = defaultCoBuffers
+		config.Buffers = defaultCoBuffers
 	}
 }
 

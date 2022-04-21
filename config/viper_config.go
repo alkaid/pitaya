@@ -24,6 +24,8 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/spf13/viper"
 	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/logger"
@@ -62,6 +64,7 @@ type Config struct {
 	config   *viper.Viper
 	loaders  []ConfLoader
 	confconf *confMap // 配置的配置
+	onWatch  chan struct{}
 }
 
 // NewConfig creates a new config with a given viper config if given
@@ -75,7 +78,11 @@ func NewConfig(cfgs ...*viper.Viper) *Config {
 
 	cfg.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	cfg.AutomaticEnv()
-	c := &Config{config: cfg, confconf: &confMap{}}
+	c := &Config{
+		config:   cfg,
+		confconf: &confMap{},
+		onWatch:  make(chan struct{}, 20),
+	}
 	c.fillDefaultValues()
 	c.AddLoader(c)
 	return c
@@ -255,7 +262,10 @@ func (c *Config) InitLoad() error {
 		for _, key := range cm.EtcdKeys {
 			c.config.AddRemoteProvider("etcd", cm.EtcdAddr, key)
 		}
-		c.config.ReadRemoteConfig()
+		err = c.config.ReadRemoteConfig()
+		if err != nil {
+			logger.Zap.Fatal("read config from etcd error", zap.Error(err))
+		}
 	}
 	c.reloadAll()
 	return nil
@@ -274,7 +284,7 @@ func (c *Config) watch() error {
 		c.config.WatchConfig()
 	}
 	if len(cm.EtcdKeys) > 0 && cm.EtcdAddr != "" {
-		err = c.config.WatchRemoteConfigOnChannel()
+		err = c.config.WatchRemoteConfigWithChannel(c.onWatch)
 		if err != nil {
 			return err
 		}
@@ -282,7 +292,8 @@ func (c *Config) watch() error {
 	// TODO 暂时用loop实现配置重载,后期fork viper修改watchKeyValueConfigOnChannel()添加回调来实现
 	co.Go(func() {
 		for {
-			time.Sleep(c.confconf.Interval)
+			// time.Sleep(c.confconf.Interval)
+			<-c.onWatch
 			c.reloadAll()
 		}
 	})
