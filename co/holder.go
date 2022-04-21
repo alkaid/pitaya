@@ -70,15 +70,15 @@ func (h *HolderModule) stop() {
 	}
 	holder.Died = true
 	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
-		wg.Add(1)
 		h.pitayaSingleLooper.Exit()
 		wg.Done()
 	}()
 	for _, schs := range h.groups {
 		for _, sch := range schs {
+			wg.Add(1)
 			go func() {
-				wg.Add(1)
 				sch.Exit()
 				wg.Done()
 			}()
@@ -95,7 +95,11 @@ func (h *HolderModule) stop() {
 //  @param task
 func GoByID(goID int, task func()) {
 	if goID > 0 {
-		holder.gopool.SubmitWithID(goID, task)
+		err := holder.gopool.SubmitWithID(goID, task)
+		if err != nil {
+			logger.Zap.Error("submit task with id error", zap.Error(err), zap.Int("goID", goID))
+			return
+		}
 	} else {
 		Go(task)
 	}
@@ -104,7 +108,11 @@ func GoByID(goID int, task func()) {
 // Go 从默认线程池获取一个goroutine并派发任务
 //  @param task
 func Go(task func()) {
-	ants.Submit(task)
+	err := ants.Submit(task)
+	if err != nil {
+		logger.Zap.Error("submit task error", zap.Error(err))
+		return
+	}
 }
 
 // Init was called to initialize the component.

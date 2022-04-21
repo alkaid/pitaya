@@ -12,7 +12,8 @@ import (
 type schedulerSignal int
 
 const (
-	scheduler_None schedulerSignal = iota
+	DefaultCoroutineBuffer                 = 1000
+	scheduler_None         schedulerSignal = iota
 	scheduler_Yield
 	scheduler_Finished
 )
@@ -131,6 +132,9 @@ func (l *Looper) Exit() {
 }
 
 func NewLooper(id int, coBuffer int) *Looper {
+	if coBuffer <= 0 {
+		coBuffer = DefaultCoroutineBuffer
+	}
 	return &Looper{
 		id:                id,
 		unhandleCoroutine: make(chan *CoroutineImpl, coBuffer),

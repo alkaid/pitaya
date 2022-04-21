@@ -110,6 +110,9 @@ type Pitaya interface {
 	//  @param afterFunc
 	PushAfterRemoteHook(afterFunc pipeline.AfterHandlerTempl)
 	GetSessionFromCtx(ctx context.Context) session.Session
+	// OnStarted 设置 Start 后的回调,内部会启一个goroutine执行
+	//  @param fun
+	OnStarted(fun func())
 	Start()
 	SetDictionary(dict map[string]uint16) error
 	AddRoute(serverType string, routingFunction router.RoutingFunc) error
@@ -241,6 +244,13 @@ type Pitaya interface {
 	//  @param reason
 	//  @return error
 	KickBackend(ctx context.Context, uid string, targetServerType string, callback map[string]string) error
+
+	// GetBoundData 获取绑定数据
+	//  @param ctx
+	//  @param uid
+	//  @return *session.BoundData
+	//  @return error
+	GetBoundData(ctx context.Context, uid string) (*session.BoundData, error)
 }
 
 // App is the base app struct
@@ -270,6 +280,7 @@ type App struct {
 	sessionPool      session.SessionPool
 	redis            redis.Cmdable
 	conf             *config.Config
+	onStarted        func()
 }
 
 // NewApp is the base constructor for a pitaya app instance
@@ -456,6 +467,14 @@ func (app *App) KickBackend(ctx context.Context, uid string, targetServerType st
 	return sess.KickBackend(ctx, targetServerType, callback)
 }
 
+func (app *App) GetBoundData(ctx context.Context, uid string) (*session.BoundData, error) {
+	sess, err := app.imperfectSessionForRPC(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	return sess.GetBoundData(), nil
+}
+
 func (app *App) initSysRemotes() {
 	sys := remote.NewSys(app.sessionPool, app.server, app.serviceDiscovery, app.rpcClient, app.remoteService)
 	app.RegisterRemote(sys,
@@ -475,6 +494,10 @@ func (app *App) periodicMetrics() {
 	if app.worker.Started() {
 		co.Go(func() { worker.Report(app.metricsReporters, period) })
 	}
+}
+
+func (app *App) OnStarted(fun func()) {
+	app.onStarted = fun
 }
 
 // Start starts the app
@@ -514,6 +537,13 @@ func (app *App) Start() {
 		timer.GlobalTicker.Stop()
 		app.running = false
 	}()
+
+	// 用户回调
+	if app.onStarted != nil {
+		co.Go(func() {
+			app.onStarted()
+		})
+	}
 
 	sg := make(chan os.Signal)
 	signal.Notify(sg, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGKILL, syscall.SIGTERM)

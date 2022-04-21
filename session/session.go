@@ -30,6 +30,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/topfreegames/pitaya/v2/util"
+
 	nats "github.com/nats-io/nats.go"
 	"github.com/topfreegames/pitaya/v2/constants"
 	"github.com/topfreegames/pitaya/v2/logger"
@@ -57,6 +59,12 @@ type OnSessionBindFunc func(ctx context.Context, s Session, callback map[string]
 type OnSessionCloseFunc func(s Session, callback map[string]string, reason CloseReason)
 type OnSessionBindBackendFunc func(ctx context.Context, s Session, serverType, serverId string, callback map[string]string) error
 type OnSessionKickBackendFunc func(ctx context.Context, s Session, serverType, serverId string, callback map[string]string, reason CloseReason) error
+
+type BoundData struct {
+	FrontendID string            `json:"_fid"` // 绑定的网关ID
+	UID        string            `json:"_uid"`
+	Backends   map[string]string `json:"_backends"` // 绑定的后端ID表 key:serverType value:serverID
+}
 
 type sessionPoolImpl struct {
 	sessionBindCallbacks []OnSessionBindFunc
@@ -97,7 +105,7 @@ type SessionPool interface {
 	// RemoveSessionLocal 将session从本地缓存删除
 	//  @param session
 	RemoveSessionLocal(session Session)
-	// SetClusterStorage 设置后端缓存存储服务
+	// SetClusterCache 设置后端缓存存储服务
 	//  @param storage
 	SetClusterCache(storage CacheInterface)
 	// ImperfectSessionFromCluster  框架内部使用,请勿调用
@@ -133,9 +141,10 @@ type sessionImpl struct {
 	lastTime          int64                       // last heartbeat time
 	entity            networkentity.NetworkEntity // low-level network entity
 	data              map[string]interface{}      // session data store
+	boundData         *BoundData                  // session的绑定数据
 	handshakeData     *HandshakeData              // handshake data received by the client
 	encodedData       []byte                      // session data encoded as a byte array
-	OnCloseCallbacks  []func()                    //onClose callbacks
+	OnCloseCallbacks  []func()                    // onClose callbacks
 	IsFrontend        bool                        // if session is a frontend session
 	frontendID        string                      // the id of the frontend that owns the session
 	frontendSessionID int64                       // the id of the session on the frontend server
@@ -242,6 +251,9 @@ type Session interface {
 	Clear()
 	SetHandshakeData(data *HandshakeData)
 	GetHandshakeData() *HandshakeData
+	// GetBoundData 获取绑定数据
+	//  @return BoundData
+	GetBoundData() *BoundData
 	// GetBackendID
 	//  @Description:获取绑定的后端服务id
 	//  @param svrType
@@ -293,6 +305,9 @@ func (pool *sessionPoolImpl) NewSession(entity networkentity.NetworkEntity, fron
 		OnCloseCallbacks: []func(){},
 		IsFrontend:       frontend,
 		pool:             pool,
+		boundData: &BoundData{
+			Backends: make(map[string]string),
+		},
 	}
 	// sessionstick 的 backend，在 BindBackend()时保存,这里只处理 frontend
 	if frontend {
@@ -489,6 +504,15 @@ func (pool *sessionPoolImpl) getSessionStorageKey(uid string) string {
 }
 
 func (s *sessionImpl) updateEncodedData() error {
+	s.boundData.UID = s.uid
+	s.boundData.FrontendID = s.frontendID
+	v, ok := s.data[fieldKeyBackends]
+	if !ok {
+		s.boundData.Backends = make(map[string]string)
+	} else {
+		tmp := v.(map[string]interface{})
+		s.boundData.Backends = util.MapStrInter2MapStrStr(tmp)
+	}
 	var b []byte
 	b, err := s.pool.EncodeSessionData(s.data)
 	if err != nil {
@@ -1146,6 +1170,10 @@ func (s *sessionImpl) sendRequestToBackend(ctx context.Context, route string, in
 	return nil
 }
 
+func (s *sessionImpl) GetBoundData() *BoundData {
+	return s.boundData
+}
+
 // GetBackendID
 //  @implement Session.GetBackendID
 func (s *sessionImpl) GetBackendID(svrType string) string {
@@ -1155,34 +1183,35 @@ func (s *sessionImpl) GetBackendID(svrType string) string {
 	if !ok {
 		return ""
 	}
-	bid, ok := backends.(map[string]string)[svrType]
+	bid, ok := backends.(map[string]interface{})[svrType]
 	if !ok {
 		return ""
 	}
-	return bid
+	return bid.(string)
 }
 func (s *sessionImpl) SetBackendID(svrType string, id string) error {
 	s.RLock()
 	defer s.RUnlock()
-	var backends map[string]string
+	var backends map[string]interface{}
 	v, ok := s.data[fieldKeyBackends]
 	if !ok {
-		backends = make(map[string]string)
+		backends = make(map[string]interface{})
 	} else {
-		backends = v.(map[string]string)
+		backends = v.(map[string]interface{})
 	}
 	backends[svrType] = id
+	s.data[fieldKeyBackends] = backends
 	return s.updateEncodedData()
 }
 func (s *sessionImpl) RemoveBackendID(svrType string) error {
 	s.Lock()
 	defer s.Unlock()
 	v, ok := s.data[fieldKeyBackends]
-	var backends map[string]string
+	var backends map[string]interface{}
 	if !ok {
 		return nil
 	}
-	backends = v.(map[string]string)
+	backends = v.(map[string]interface{})
 	delete(backends, svrType)
 	return s.updateEncodedData()
 }
