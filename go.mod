@@ -117,6 +117,8 @@ require (
 	sigs.k8s.io/yaml v1.2.0 // indirect
 )
 
-replace github.com/panjf2000/ants/v2 v2.4.8 => github.com/alkaid/ants/v2 v2.4.801
+replace github.com/panjf2000/ants/v2 v2.4.8 => github.com/alkaid/ants/v2 v2.4.802
+
+//replace github.com/panjf2000/ants/v2 v2.4.8 => ../ants
 
 replace github.com/spf13/viper v1.10.1 => github.com/alkaid/viper v1.11.101

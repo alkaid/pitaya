@@ -20,11 +20,14 @@
 
 package component
 
+import "context"
+
 type (
 	options struct {
-		name          string              // component name
-		nameFunc      func(string) string // rename handler name
-		EnableReactor bool                // 启用单线程reactor模型
+		name             string                              // component name
+		nameFunc         func(string) string                 // rename handler name
+		EnableReactor    bool                                // 启用单线程reactor模型
+		ReceiverProvider func(ctx context.Context) Component // 延迟绑定的receiver实例
 	}
 
 	// Option used to customize handler
@@ -50,5 +53,13 @@ func WithEnableReactor(enableReactor bool) Option {
 	return func(opt *options) {
 		opt.EnableReactor = enableReactor
 	}
+}
 
+// WithReceiverProvider 注册延迟动态绑定 receiver 的函数
+//  @param ReceiverProvider
+//  @return Option
+func WithReceiverProvider(receiverProvider func(ctx context.Context) Component) Option {
+	return func(opt *options) {
+		opt.ReceiverProvider = receiverProvider
+	}
 }

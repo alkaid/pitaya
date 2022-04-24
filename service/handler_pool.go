@@ -16,7 +16,6 @@ import (
 	"github.com/topfreegames/pitaya/v2/serialize"
 	"github.com/topfreegames/pitaya/v2/session"
 	"github.com/topfreegames/pitaya/v2/util"
-	"google.golang.org/protobuf/proto"
 )
 
 // HandlerPool ...
@@ -76,38 +75,18 @@ func (h *HandlerPool) ProcessHandlerMessage(
 			return nil, e.NewError(err, e.ErrInternalCode)
 		}
 		logger := ctx.Value(constants.LoggerCtxKey).(interfaces.Logger)
-		arg := reflect.New(reflect.TypeOf(interceptor.InterceptorFun).In(1).Elem()).Interface().(proto.Message)
-		err = proto.Unmarshal(data, arg)
-		if err != nil {
-			return nil, err
-		}
-		var arg2 any
-
-		if interceptor.EnableReactor {
-			arg2, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
-				ctx, arg2, err = handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)
-				return arg2, err
-			}).Wait(ctx)
-		} else {
-			ctx, arg2, err = handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)
-		}
-		if err != nil {
-			return nil, err
-		}
-		arg = arg2.(proto.Message)
 		logger.Debugf("SID=%d, Data=%s", session.ID(), data)
-		args := []reflect.Value{reflect.ValueOf(ctx)}
-		if arg != nil {
-			args = append(args, reflect.ValueOf(arg))
-		}
 		var resp any
 		// 若启用了单线程反应堆模型,则派发到全局Looper单例
 		if interceptor.EnableReactor {
 			resp, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
-				return interceptor.InterceptorFun(ctx, *rt, arg)
+				return interceptor.InterceptorFun(ctx, *rt, data)
 			}).Wait(ctx)
 		} else {
-			resp, err = interceptor.InterceptorFun(ctx, *rt, arg)
+			resp, err = interceptor.InterceptorFun(ctx, *rt, data)
+		}
+		if err != nil {
+			return nil, err
 		}
 		if remote && msgType == message.Notify {
 			// This is a special case and should only happen with nats rpc client
@@ -116,16 +95,6 @@ func (h *HandlerPool) ProcessHandlerMessage(
 			// the reason why we don't just Publish is to keep track of failed rpc requests
 			// with timeouts, maybe we can improve this flow
 			resp = []byte("ack")
-		}
-		if interceptor.EnableReactor {
-			resp, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
-				return handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, rt, arg, resp, err)
-			}).Wait(ctx)
-		} else {
-			resp, err = handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, rt, arg, resp, err)
-		}
-		if err != nil {
-			return nil, err
 		}
 		ret, err := serializeReturn(serializer, resp)
 		if err != nil {
@@ -159,7 +128,7 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		return nil, e.NewError(err, e.ErrBadRequestCode)
 	}
 
-	if handler.EnableReactor {
+	if handler.Options.EnableReactor {
 		arg, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
 			ctx, arg, err = handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)
 			return arg, err
@@ -172,13 +141,22 @@ func (h *HandlerPool) ProcessHandlerMessage(
 	}
 
 	logger.Debugf("SID=%d, Data=%s", session.ID(), data)
-	args := []reflect.Value{handler.Receiver, reflect.ValueOf(ctx)}
+	receiver := handler.Receiver
+	if handler.Options.ReceiverProvider != nil {
+		rec := handler.Options.ReceiverProvider(ctx)
+		if rec == nil {
+			logger.Warnf("pitaya/handle: %s not found,the ReceiverProvider return nil", rt.Short())
+			return nil, e.NewError(err, e.ErrNotFoundCode)
+		}
+		receiver = reflect.ValueOf(rec)
+	}
+	args := []reflect.Value{receiver, reflect.ValueOf(ctx)}
 	if arg != nil {
 		args = append(args, reflect.ValueOf(arg))
 	}
 	var resp any
 	// 若启用了单线程反应堆模型,则派发到全局Looper单例
-	if handler.EnableReactor {
+	if handler.Options.EnableReactor {
 		resp, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
 			return util.Pcall(handler.Method, args)
 		}).Wait(ctx)
@@ -194,7 +172,7 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		resp = []byte("ack")
 	}
 
-	if handler.EnableReactor {
+	if handler.Options.EnableReactor {
 		resp, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
 			return handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, rt, arg, resp, err)
 		}).Wait(ctx)

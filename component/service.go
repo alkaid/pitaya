@@ -31,23 +31,23 @@ import (
 )
 
 type (
-	//Handler represents a message.Message's handler's meta information.
+	// Handler represents a message.Message's handler's meta information.
 	Handler struct {
-		Receiver      reflect.Value  // receiver of method
-		Method        reflect.Method // method stub
-		Type          reflect.Type   // low-level type of method
-		IsRawArg      bool           // whether the data need to serialize
-		MessageType   message.Type   // handler allowed message type (either request or notify)
-		EnableReactor bool           // 启用单线程reactor模型
+		Receiver    reflect.Value  // receiver of method
+		Method      reflect.Method // method stub
+		Type        reflect.Type   // low-level type of method
+		IsRawArg    bool           // whether the data need to serialize
+		MessageType message.Type   // handler allowed message type (either request or notify)
+		Options     options        // options
 	}
 
-	//Remote represents remote's meta information.
+	// Remote represents remote's meta information.
 	Remote struct {
-		Receiver      reflect.Value  // receiver of method
-		Method        reflect.Method // method stub
-		HasArgs       bool           // if remote has no args we won't try to serialize received data into arguments
-		Type          reflect.Type   // low-level type of method
-		EnableReactor bool           // 启用单线程reactor模型
+		Receiver reflect.Value  // receiver of method
+		Method   reflect.Method // method stub
+		HasArgs  bool           // if remote has no args we won't try to serialize received data into arguments
+		Type     reflect.Type   // low-level type of method
+		Options  options        // options
 	}
 
 	// Service implements a specific service, some of it's methods will be
@@ -65,7 +65,7 @@ type (
 	//  @param ctx
 	//  @param route
 	//  @param req
-	InterceptorFun func(ctx context.Context, route route.Route, req proto.Message) (proto.Message, error)
+	InterceptorFun func(ctx context.Context, route route.Route, req []byte) (proto.Message, error)
 	// Interceptor 拦截分发器,优先级别高于 Handler 或 Remote
 	Interceptor struct {
 		InterceptorFun
@@ -129,6 +129,7 @@ func (s *Service) ExtractHandler() error {
 
 	for i := range s.Handlers {
 		s.Handlers[i].Receiver = s.Receiver
+		s.Handlers[i].Options = s.Options
 	}
 
 	return nil
@@ -166,6 +167,7 @@ func (s *Service) ExtractRemote() error {
 
 	for i := range s.Remotes {
 		s.Remotes[i].Receiver = s.Receiver
+		s.Remotes[i].Options = s.Options
 	}
 	return nil
 }

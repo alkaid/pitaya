@@ -394,7 +394,6 @@ func (r *RemoteService) Register(comp component.Component, opts []component.Opti
 	r.services[s.Name] = s
 	// register all remotes
 	for name, remote := range s.Remotes {
-		remote.EnableReactor = s.Options.EnableReactor
 		r.remotes[fmt.Sprintf("%s.%s", s.Name, name)] = remote
 	}
 
@@ -449,7 +448,6 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 	interceptor, ok := r.interceptors[rt.Service]
 	if ok {
 		var err error
-		arg := reflect.New(reflect.TypeOf(interceptor.InterceptorFun).In(1).Elem()).Interface().(proto.Message)
 		var sess session.Session
 		if req.Session != nil {
 			a, err := agent.NewRemote(
@@ -480,62 +478,14 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 			ctx = context.WithValue(ctx, constants.SessionCtxKey, sess)
 			ctx = util.CtxWithDefaultLogger(ctx, rt.String(), sess.UID())
 		}
-		// 和 handlerPool.ProcessHandlerMessage 一样加入hook处理
-		var arg2 any
-		if interceptor.EnableReactor {
-			arg2, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
-				ctx, arg2, err = r.handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)
-				return arg2, err
-			}).Wait(ctx)
-		} else {
-			ctx, arg2, err = r.handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)
-		}
-		if err != nil {
-			response := &protos.Response{
-				Error: &protos.Error{
-					Code: e.ErrUnknownCode,
-					Msg:  err.Error(),
-				},
-			}
-			if val, ok := err.(*e.Error); ok {
-				response.Error.Code = val.Code
-				if val.Metadata != nil {
-					response.Error.Metadata = val.Metadata
-				}
-			}
-			return response
-		}
-		arg = arg2.(proto.Message)
 		var ret any
 		// 若启用了单线程反应堆模型,则派发到全局Looper单例
 		if interceptor.EnableReactor {
 			ret, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
-				return interceptor.InterceptorFun(ctx, *rt, arg)
+				return interceptor.InterceptorFun(ctx, *rt, req.GetMsg().GetData())
 			}).Wait(ctx)
 		} else {
-			ret, err = interceptor.InterceptorFun(ctx, *rt, arg)
-		}
-		if err != nil {
-			response := &protos.Response{
-				Error: &protos.Error{
-					Code: e.ErrUnknownCode,
-					Msg:  err.Error(),
-				},
-			}
-			if val, ok := err.(*e.Error); ok {
-				response.Error.Code = val.Code
-				if val.Metadata != nil {
-					response.Error.Metadata = val.Metadata
-				}
-			}
-			return response
-		}
-		if interceptor.EnableReactor {
-			ret, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
-				return r.handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, rt, arg, ret, err)
-			}).Wait(ctx)
-		} else {
-			ret, err = r.handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, rt, arg, ret, err)
+			ret, err = interceptor.InterceptorFun(ctx, *rt, req.GetMsg().GetData())
 		}
 		if err != nil {
 			response := &protos.Response{
@@ -597,7 +547,25 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 	}
 	var arg interface{}
 	var err error
-	params := []reflect.Value{remote.Receiver, reflect.ValueOf(ctx)}
+	receiver := remote.Receiver
+	if remote.Options.ReceiverProvider != nil {
+		rec := remote.Options.ReceiverProvider(ctx)
+		if rec == nil {
+			logger.Log.Warnf("pitaya/remote: %s not found,the ReceiverProvider return nil", rt.Short())
+			response := &protos.Response{
+				Error: &protos.Error{
+					Code: e.ErrNotFoundCode,
+					Msg:  "route not found,ReceiverProvider return nil",
+					Metadata: map[string]string{
+						"route": rt.Short(),
+					},
+				},
+			}
+			return response
+		}
+		receiver = reflect.ValueOf(rec)
+	}
+	params := []reflect.Value{receiver, reflect.ValueOf(ctx)}
 	if remote.HasArgs {
 		arg, err = unmarshalRemoteArg(remote, req.GetMsg().GetData())
 		if err != nil {
@@ -643,7 +611,7 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 	}
 	// 和 handlerPool.ProcessHandlerMessage 一样加入hook处理
 	var arg2 any
-	if remote.EnableReactor {
+	if remote.Options.EnableReactor {
 		arg2, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
 			ctx, arg2, err = r.handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)
 			return arg2, err
@@ -669,7 +637,7 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 	arg = arg2.(proto.Message)
 	var ret any
 	// 若启用了单线程反应堆模型,则派发到全局Looper单例
-	if remote.EnableReactor {
+	if remote.Options.EnableReactor {
 		ret, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
 			return util.Pcall(remote.Method, params)
 		}).Wait(ctx)
@@ -691,7 +659,7 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 		}
 		return response
 	}
-	if remote.EnableReactor {
+	if remote.Options.EnableReactor {
 		ret, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
 			return r.handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, rt, arg, ret, err)
 		}).Wait(ctx)
