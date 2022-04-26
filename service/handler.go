@@ -24,16 +24,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"hash/crc32"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/nats-io/nuid"
-	"github.com/topfreegames/pitaya/v2/co"
-	"go.uber.org/zap"
-
 	"github.com/topfreegames/pitaya/v2/acceptor"
+	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/pipeline"
 
 	opentracing "github.com/opentracing/opentracing-go"
@@ -331,19 +327,8 @@ func (h *HandlerService) localProcess(ctx context.Context, a agent.Agent, route 
 	}
 	// 根据session数据决策派发线程id
 	sess := a.GetSession()
-	goID := 0
-	var err error
-	if sess.UID() != "" {
-		goID, err = strconv.Atoi(sess.UID())
-		if err != nil {
-			logger.Zap.Warn("can't atoi uid", zap.String("uid", sess.UID()), zap.Error(err))
-			goID = int(crc32.ChecksumIEEE([]byte(sess.UID())))
-		}
-	} else if sess.ID() > 0 {
-		goID = int(sess.ID())
-	}
 	// 派发给session绑定的线程
-	co.GoByID(goID, func() {
+	co.GoBySession(sess, func() {
 		ret, err := h.handlerPool.ProcessHandlerMessage(ctx, route, h.serializer, h.handlerHooks, a.GetSession(), msg.Data, msg.Type, false)
 		if msg.Type != message.Notify {
 			if err != nil {

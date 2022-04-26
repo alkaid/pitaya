@@ -23,6 +23,8 @@ package remote
 import (
 	"context"
 
+	"github.com/topfreegames/pitaya/v2/co"
+
 	"github.com/topfreegames/pitaya/v2/cluster"
 	"github.com/topfreegames/pitaya/v2/component"
 	"github.com/topfreegames/pitaya/v2/constants"
@@ -391,13 +393,17 @@ func (s *Sys) SessionBound(ctx context.Context, msg *protos.BindMsg) (*protos.Re
 		sess.SetFrontendData(msg.Fid, msg.Sid)
 	}
 	for _, r := range s.remote.GetRemoteSessionListener() {
-		r.OnUserBound(msg.Uid, msg.Fid, msg.Metadata)
+		co.GoBySession(sess, func() {
+			r.OnUserBound(msg.Uid, msg.Fid, msg.Metadata)
+		})
 	}
 	return &protos.Response{Data: []byte("ack")}, nil
 }
 func (s *Sys) SessionClosed(ctx context.Context, msg *protos.KickMsg) (*protos.Response, error) {
 	for _, r := range s.remote.GetRemoteSessionListener() {
-		r.OnUserDisconnected(msg.UserId, msg.Metadata)
+		co.GoByUID(msg.UserId, func() {
+			r.OnUserDisconnected(msg.UserId, msg.Metadata)
+		})
 	}
 	return &protos.Response{Data: []byte("ack")}, nil
 }
@@ -409,14 +415,18 @@ func (s *Sys) SessionBoundBackendFork(ctx context.Context, msg *protos.BindBacke
 }
 func (s *Sys) SessionBoundBackend(ctx context.Context, msg *protos.BindBackendMsg) (*protos.Response, error) {
 	for _, r := range s.remote.GetRemoteSessionListener() {
-		r.OnUserBoundBackend(msg.Uid, msg.Btype, msg.Bid, msg.Metadata)
+		co.GoByUID(msg.Uid, func() {
+			r.OnUserBoundBackend(msg.Uid, msg.Btype, msg.Bid, msg.Metadata)
+		})
 	}
 	return &protos.Response{Data: []byte("ack")}, nil
 
 }
 func (s *Sys) SessionKickedBackend(ctx context.Context, msg *protos.BindBackendMsg) (*protos.Response, error) {
 	for _, r := range s.remote.GetRemoteSessionListener() {
-		r.OnUserUnboundBackend(msg.Uid, msg.Btype, msg.Bid, msg.Metadata)
+		co.GoByUID(msg.Uid, func() {
+			r.OnUserUnboundBackend(msg.Uid, msg.Btype, msg.Bid, msg.Metadata)
+		})
 	}
 	return &protos.Response{Data: []byte("ack")}, nil
 }

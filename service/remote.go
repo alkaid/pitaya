@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
 
 	"github.com/topfreegames/pitaya/v2/co"
 	"google.golang.org/protobuf/proto"
@@ -641,6 +642,15 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 		ret, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
 			return util.Pcall(remote.Method, params)
 		}).Wait(ctx)
+	} else if remote.Options.TaskGoProvider != nil {
+		// 若提供了自定义派发线程
+		var wg sync.WaitGroup
+		wg.Add(1)
+		remote.Options.TaskGoProvider(ctx, func() {
+			ret, err = util.Pcall(remote.Method, params)
+			wg.Done()
+		})
+		wg.Wait()
 	} else {
 		ret, err = util.Pcall(remote.Method, params)
 	}

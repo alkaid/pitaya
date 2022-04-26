@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sync"
 
 	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/component"
@@ -160,7 +161,17 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		resp, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
 			return util.Pcall(handler.Method, args)
 		}).Wait(ctx)
+	} else if handler.Options.TaskGoProvider != nil {
+		// 若提供了自定义派发线程
+		var wg sync.WaitGroup
+		wg.Add(1)
+		handler.Options.TaskGoProvider(ctx, func() {
+			resp, err = util.Pcall(handler.Method, args)
+			wg.Done()
+		})
+		wg.Wait()
 	} else {
+		// 默认在rpc server提供的线程里
 		resp, err = util.Pcall(handler.Method, args)
 	}
 	if remote && msgType == message.Notify {
