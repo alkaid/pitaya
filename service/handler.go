@@ -342,6 +342,10 @@ func (h *HandlerService) localProcess(ctx context.Context, a agent.Agent, route 
 				}
 			}
 		} else {
+			if err != nil {
+				logger.Log.Errorf("Failed to process handler message: %s", err.Error())
+				a.AnswerWithError(ctx, mid, err)
+			}
 			metrics.ReportTimingFromCtx(ctx, h.metricsReporters, handlerType, nil)
 			tracing.FinishSpan(ctx, err)
 		}
