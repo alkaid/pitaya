@@ -29,11 +29,12 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/alkaid/goerrors/apierrors"
+
 	nats "github.com/nats-io/nats.go"
 	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/constants"
-	e "github.com/topfreegames/pitaya/v2/errors"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/metrics"
 	"github.com/topfreegames/pitaya/v2/protos"
@@ -263,17 +264,15 @@ func (ns *NatsRPCServer) getUserKickChannel() chan *protos.KickMsg {
 func (ns *NatsRPCServer) marshalResponse(res *protos.Response) ([]byte, error) {
 	p, err := proto.Marshal(res)
 	if err != nil {
+
 		res := &protos.Response{
-			Error: &protos.Error{
-				Code: e.ErrUnknownCode,
-				Msg:  err.Error(),
-			},
+			Status: &apierrors.FromError(err).Status,
 		}
 		p, _ = proto.Marshal(res)
 	}
 
-	if err == nil && res.Error != nil {
-		err = errors.New(res.Error.Msg)
+	if err == nil && res.Status != nil {
+		err = errors.New(res.Status.Message)
 	}
 	return p, err
 }
@@ -284,10 +283,7 @@ func (ns *NatsRPCServer) processMessages(threadID int) {
 		ctx, err := util.GetContextFromRequest(ns.requests[threadID], ns.server.ID)
 		if err != nil {
 			ns.responses[threadID] = &protos.Response{
-				Error: &protos.Error{
-					Code: e.ErrInternalCode,
-					Msg:  err.Error(),
-				},
+				Status: &apierrors.FromError(err).Status,
 			}
 			if ns.requests[threadID].GetMsg().Type != protos.MsgType_MsgNotify {
 				p, err := ns.marshalResponse(ns.responses[threadID])

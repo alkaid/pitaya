@@ -24,12 +24,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/topfreegames/pitaya/v2/session"
 	"net"
 	"os"
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/topfreegames/pitaya/v2/session"
 
 	"github.com/golang/mock/gomock"
 	"github.com/google/uuid"
@@ -41,7 +42,6 @@ import (
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
-	e "github.com/topfreegames/pitaya/v2/errors"
 	"github.com/topfreegames/pitaya/v2/helpers"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/logger/logrus"

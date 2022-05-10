@@ -3,6 +3,7 @@ TESTABLE_PACKAGES = `go list ./... | grep -v examples | grep -v constants | grep
 init-toolchain:
 	#download protoc  url=https://github.com/protocolbuffers/protobuf/releases  then add bin to PATH
 	@go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+	@go install github.com/alkaid/goerrors/cmd/protoc-gen-go-errors@latest
 
 setup: init-submodules
 	@go mod tidy
@@ -64,7 +65,7 @@ protos-compile-demo:
 #https://developers.google.com/protocol-buffers/docs/reference/go-generated
 protos-compile:
 	@cd benchmark/testdata && ./gen_proto.sh
-	@protoc --proto_path=. pitaya-protos/*.proto --go_out=. --go_opt=paths=import
+	@protoc --proto_path=. pitaya-protos/*.proto --go_out=. --go_opt=paths=import --go-errors_out=.
 	@protoc --proto_path=. pitaya-protos/*.proto --go-grpc_out=.
 	@protoc -I pitaya-protos/test pitaya-protos/test/*.proto --go_out=protos/test --go_opt=paths=import
 

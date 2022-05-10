@@ -23,10 +23,12 @@ package metrics
 import (
 	"context"
 	"runtime"
+	"strconv"
 	"time"
 
+	"github.com/alkaid/goerrors/apierrors"
+
 	"github.com/topfreegames/pitaya/v2/constants"
-	"github.com/topfreegames/pitaya/v2/errors"
 
 	pcontext "github.com/topfreegames/pitaya/v2/context"
 )
@@ -36,7 +38,7 @@ func ReportTimingFromCtx(ctx context.Context, reporters []Reporter, typ string, 
 	if ctx == nil {
 		return
 	}
-	code := errors.CodeFromError(err)
+	code := apierrors.Code(err)
 	status := "ok"
 	if err != nil {
 		status = "failed"
@@ -49,7 +51,7 @@ func ReportTimingFromCtx(ctx context.Context, reporters []Reporter, typ string, 
 			"route":  route.(string),
 			"status": status,
 			"type":   typ,
-			"code":   code,
+			"code":   strconv.Itoa(code),
 		})
 		for _, r := range reporters {
 			r.ReportSummary(ResponseTime, tags, float64(elapsed.Nanoseconds()))

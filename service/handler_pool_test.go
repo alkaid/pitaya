@@ -33,7 +33,6 @@ import (
 	"github.com/topfreegames/pitaya/v2/component"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
-	e "github.com/topfreegames/pitaya/v2/errors"
 	"github.com/topfreegames/pitaya/v2/pipeline"
 	"github.com/topfreegames/pitaya/v2/protos/test"
 	"github.com/topfreegames/pitaya/v2/route"

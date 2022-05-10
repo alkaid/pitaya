@@ -22,14 +22,15 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"sync"
 
 	"github.com/topfreegames/pitaya/v2/co"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/alkaid/goerrors/apierrors"
 	"github.com/topfreegames/pitaya/v2/agent"
 	"github.com/topfreegames/pitaya/v2/cluster"
 	"github.com/topfreegames/pitaya/v2/component"
@@ -37,7 +38,6 @@ import (
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
 	"github.com/topfreegames/pitaya/v2/docgenerator"
-	e "github.com/topfreegames/pitaya/v2/errors"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/pipeline"
 	"github.com/topfreegames/pitaya/v2/protos"
@@ -166,17 +166,14 @@ func (r *RemoteService) Call(ctx context.Context, req *protos.Request) (*protos.
 	var res *protos.Response
 	if err != nil {
 		res = &protos.Response{
-			Error: &protos.Error{
-				Code: e.ErrInternalCode,
-				Msg:  err.Error(),
-			},
+			Status: &apierrors.FromError(err).Status,
 		}
 	} else {
 		res = processRemoteMessage(c, req, r)
 	}
 
-	if res.Error != nil {
-		err = errors.New(res.Error.Msg)
+	if res.Status != nil {
+		err = apierrors.FromStatus(res.Status)
 	}
 
 	defer tracing.FinishSpan(c, err)
@@ -320,12 +317,8 @@ func (r *RemoteService) RPC(ctx context.Context, serverID string, route *route.R
 		return err
 	}
 
-	if res.Error != nil {
-		return &e.Error{
-			Code:     res.Error.Code,
-			Message:  res.Error.Msg,
-			Metadata: res.Error.Metadata,
-		}
+	if res.Status != nil {
+		return apierrors.FromStatus(res.Status)
 	}
 
 	if reply != nil {
@@ -414,9 +407,9 @@ func processRemoteMessage(ctx context.Context, req *protos.Request, r *RemoteSer
 	rt, err := route.Decode(req.GetMsg().GetRoute())
 	if err != nil {
 		response := &protos.Response{
-			Error: &protos.Error{
-				Code: e.ErrBadRequestCode,
-				Msg:  "cannot decode route",
+			Status: &apierrors.Status{
+				Code:    http.StatusBadRequest,
+				Message: "cannot decode route",
 				Metadata: map[string]string{
 					"route": req.GetMsg().GetRoute(),
 				},
@@ -432,9 +425,9 @@ func processRemoteMessage(ctx context.Context, req *protos.Request, r *RemoteSer
 		return r.handleRPCUser(ctx, req, rt)
 	default:
 		return &protos.Response{
-			Error: &protos.Error{
-				Code: e.ErrBadRequestCode,
-				Msg:  "invalid rpc type",
+			Status: &apierrors.Status{
+				Code:    http.StatusBadRequest,
+				Message: "invalid rpc type",
 				Metadata: map[string]string{
 					"route": req.GetMsg().GetRoute(),
 				},
@@ -466,10 +459,7 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 			if err != nil {
 				logger.Log.Warn("pitaya/handler: cannot instantiate remote agent")
 				response := &protos.Response{
-					Error: &protos.Error{
-						Code: e.ErrInternalCode,
-						Msg:  err.Error(),
-					},
+					Status: &apierrors.FromError(err).Status,
 				}
 				return response
 			}
@@ -491,16 +481,7 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 		}
 		if err != nil {
 			response := &protos.Response{
-				Error: &protos.Error{
-					Code: e.ErrUnknownCode,
-					Msg:  err.Error(),
-				},
-			}
-			if val, ok := err.(*e.Error); ok {
-				response.Error.Code = val.Code
-				if val.Metadata != nil {
-					response.Error.Metadata = val.Metadata
-				}
+				Status: &apierrors.FromError(err).Status,
 			}
 			return response
 		}
@@ -510,19 +491,13 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 			pb, ok := ret.(proto.Message)
 			if !ok {
 				response := &protos.Response{
-					Error: &protos.Error{
-						Code: e.ErrUnknownCode,
-						Msg:  constants.ErrWrongValueType.Error(),
-					},
+					Status: &apierrors.FromError(constants.ErrWrongValueType).Status,
 				}
 				return response
 			}
 			if b, err = proto.Marshal(pb); err != nil {
 				response := &protos.Response{
-					Error: &protos.Error{
-						Code: e.ErrUnknownCode,
-						Msg:  err.Error(),
-					},
+					Status: &apierrors.FromError(err).Status,
 				}
 				return response
 			}
@@ -537,9 +512,9 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 	if !ok {
 		logger.Log.Warnf("pitaya/remote: %s not found", rt.Short())
 		response := &protos.Response{
-			Error: &protos.Error{
-				Code: e.ErrNotFoundCode,
-				Msg:  "route not found",
+			Status: &apierrors.Status{
+				Code:    http.StatusNotFound,
+				Message: "route not found",
 				Metadata: map[string]string{
 					"route": rt.Short(),
 				},
@@ -555,9 +530,9 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 		if rec == nil {
 			logger.Log.Warnf("pitaya/remote: %s not found,the ReceiverProvider return nil", rt.Short())
 			response := &protos.Response{
-				Error: &protos.Error{
-					Code: e.ErrNotFoundCode,
-					Msg:  "route not found,ReceiverProvider return nil",
+				Status: &apierrors.Status{
+					Code:    http.StatusNotFound,
+					Message: "route not found,ReceiverProvider return nil",
 					Metadata: map[string]string{
 						"route": rt.Short(),
 					},
@@ -572,9 +547,12 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 		arg, err = unmarshalRemoteArg(remote, req.GetMsg().GetData())
 		if err != nil {
 			response := &protos.Response{
-				Error: &protos.Error{
-					Code: e.ErrBadRequestCode,
-					Msg:  err.Error(),
+				Status: &apierrors.Status{
+					Code:    http.StatusNotFound,
+					Message: err.Error(),
+					Metadata: map[string]string{
+						"route": rt.Short(),
+					},
 				},
 			}
 			return response
@@ -597,10 +575,7 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 		if err != nil {
 			logger.Log.Warn("pitaya/handler: cannot instantiate remote agent")
 			response := &protos.Response{
-				Error: &protos.Error{
-					Code: e.ErrInternalCode,
-					Msg:  err.Error(),
-				},
+				Status: &apierrors.FromError(err).Status,
 			}
 			return response
 		}
@@ -623,16 +598,7 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 	}
 	if err != nil {
 		response := &protos.Response{
-			Error: &protos.Error{
-				Code: e.ErrUnknownCode,
-				Msg:  err.Error(),
-			},
-		}
-		if val, ok := err.(*e.Error); ok {
-			response.Error.Code = val.Code
-			if val.Metadata != nil {
-				response.Error.Metadata = val.Metadata
-			}
+			Status: &apierrors.FromError(err).Status,
 		}
 		return response
 	}
@@ -657,16 +623,7 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 	}
 	if err != nil {
 		response := &protos.Response{
-			Error: &protos.Error{
-				Code: e.ErrUnknownCode,
-				Msg:  err.Error(),
-			},
-		}
-		if val, ok := err.(*e.Error); ok {
-			response.Error.Code = val.Code
-			if val.Metadata != nil {
-				response.Error.Metadata = val.Metadata
-			}
+			Status: &apierrors.FromError(err).Status,
 		}
 		return response
 	}
@@ -679,16 +636,7 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 	}
 	if err != nil {
 		response := &protos.Response{
-			Error: &protos.Error{
-				Code: e.ErrUnknownCode,
-				Msg:  err.Error(),
-			},
-		}
-		if val, ok := err.(*e.Error); ok {
-			response.Error.Code = val.Code
-			if val.Metadata != nil {
-				response.Error.Metadata = val.Metadata
-			}
+			Status: &apierrors.FromError(err).Status,
 		}
 		return response
 	}
@@ -698,19 +646,13 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 		pb, ok := ret.(proto.Message)
 		if !ok {
 			response := &protos.Response{
-				Error: &protos.Error{
-					Code: e.ErrUnknownCode,
-					Msg:  constants.ErrWrongValueType.Error(),
-				},
+				Status: &apierrors.FromError(constants.ErrWrongValueType).Status,
 			}
 			return response
 		}
 		if b, err = proto.Marshal(pb); err != nil {
 			response := &protos.Response{
-				Error: &protos.Error{
-					Code: e.ErrUnknownCode,
-					Msg:  err.Error(),
-				},
+				Status: &apierrors.FromError(err).Status,
 			}
 			return response
 		}
@@ -738,10 +680,7 @@ func (r *RemoteService) handleRPCSys(ctx context.Context, req *protos.Request, r
 	if err != nil {
 		logger.Log.Warn("pitaya/handler: cannot instantiate remote agent")
 		response := &protos.Response{
-			Error: &protos.Error{
-				Code: e.ErrInternalCode,
-				Msg:  err.Error(),
-			},
+			Status: &apierrors.FromError(err).Status,
 		}
 		return response
 	}
@@ -750,16 +689,7 @@ func (r *RemoteService) handleRPCSys(ctx context.Context, req *protos.Request, r
 	if err != nil {
 		logger.Log.Warnf(err.Error())
 		response = &protos.Response{
-			Error: &protos.Error{
-				Code: e.ErrUnknownCode,
-				Msg:  err.Error(),
-			},
-		}
-		if val, ok := err.(*e.Error); ok {
-			response.Error.Code = val.Code
-			if val.Metadata != nil {
-				response.Error.Metadata = val.Metadata
-			}
+			Status: &apierrors.FromError(err).Status,
 		}
 	} else {
 		response = &protos.Response{Data: ret}
@@ -783,7 +713,7 @@ func (r *RemoteService) remoteCall(
 	if target == nil {
 		target, err = r.router.Route(ctx, rpcType, svType, route, msg, session)
 		if err != nil {
-			return nil, e.NewError(err, e.ErrInternalCode)
+			return nil, apierrors.FromError(err)
 		}
 	}
 

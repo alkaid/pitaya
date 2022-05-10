@@ -18,8 +18,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-//logger
-//Deprecated: user package log instead
 package logger
 
 import (
@@ -30,7 +28,7 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-var Manager = NewLogger(zap.NewProductionConfig())
+var Manager = NewLogger(zap.NewProductionConfig(), WithStackWithFmtFormatter(true))
 var Zap = Manager.Log
 var Sugar = Manager.Sugar
 
@@ -38,22 +36,34 @@ var Sugar = Manager.Sugar
 //  @Deprecated use Zap instead
 var Log = newAdapter(Manager)
 
+// Logger 具体Log的持有类
 type Logger struct {
-	Log   *zap.Logger
-	Sugar *zap.SugaredLogger
-	Level zap.AtomicLevel
+	Log     *zap.Logger
+	Sugar   *zap.SugaredLogger
+	Level   zap.AtomicLevel
+	options *Options
 }
 
-func NewLogger(cfg zap.Config) *Logger {
+func NewLogger(cfg zap.Config, opts ...Option) *Logger {
 	log, err := cfg.Build()
 	if err != nil {
 		fmt.Errorf("uber/zap build error: %w", err)
 		return nil
 	}
+	options := &Options{}
+	for _, opt := range opts {
+		opt(options)
+	}
+	if options.StackWithFmtFormatter {
+		log = log.WithOptions(zap.WrapCore(func(core zapcore.Core) zapcore.Core {
+			return WrapCore(core)
+		}))
+	}
 	return &Logger{
-		Log:   log,
-		Sugar: log.Sugar(),
-		Level: cfg.Level,
+		Log:     log,
+		Sugar:   log.Sugar(),
+		Level:   cfg.Level,
+		options: options,
 	}
 }
 
@@ -130,6 +140,11 @@ func (l *Logger) SetDevelopment(enable bool) {
 	if err != nil {
 		l.Sugar.Errorf("uber/zap build error: %w", err)
 		return
+	}
+	if l.options.StackWithFmtFormatter {
+		log = log.WithOptions(zap.WrapCore(func(core zapcore.Core) zapcore.Core {
+			return WrapCore(core)
+		}))
 	}
 	l.Log = log
 	l.Sugar = log.Sugar()

@@ -38,7 +38,6 @@ import (
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	messagemocks "github.com/topfreegames/pitaya/v2/conn/message/mocks"
 	"github.com/topfreegames/pitaya/v2/constants"
-	e "github.com/topfreegames/pitaya/v2/errors"
 	"github.com/topfreegames/pitaya/v2/pipeline"
 	"github.com/topfreegames/pitaya/v2/protos"
 	"github.com/topfreegames/pitaya/v2/protos/test"

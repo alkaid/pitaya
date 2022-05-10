@@ -6,11 +6,12 @@ import (
 	"reflect"
 	"sync"
 
+	"github.com/alkaid/goerrors/apierrors"
+
 	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/component"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
-	e "github.com/topfreegames/pitaya/v2/errors"
 	"github.com/topfreegames/pitaya/v2/logger/interfaces"
 	"github.com/topfreegames/pitaya/v2/pipeline"
 	"github.com/topfreegames/pitaya/v2/route"
@@ -73,7 +74,7 @@ func (h *HandlerPool) ProcessHandlerMessage(
 	if err1 == nil {
 		msgType, err := getMsgType(msgTypeIface)
 		if err != nil {
-			return nil, e.NewError(err, e.ErrInternalCode)
+			return nil, apierrors.FromError(err)
 		}
 		logger := ctx.Value(constants.LoggerCtxKey).(interfaces.Logger)
 		logger.Debugf("SID=%d, Data=%s", session.ID(), data)
@@ -106,18 +107,18 @@ func (h *HandlerPool) ProcessHandlerMessage(
 	// 无拦截器情况下走常规handle
 	handler, err := h.getHandler(rt)
 	if err1 != nil && err != nil {
-		return nil, e.NewError(err, e.ErrNotFoundCode)
+		return nil, apierrors.NotFound("", "process handle message error", "").WithCause(err)
 	}
 
 	msgType, err := getMsgType(msgTypeIface)
 	if err != nil {
-		return nil, e.NewError(err, e.ErrInternalCode)
+		return nil, apierrors.FromError(err)
 	}
 
 	logger := ctx.Value(constants.LoggerCtxKey).(interfaces.Logger)
 	exit, err := handler.ValidateMessageType(msgType)
 	if err != nil && exit {
-		return nil, e.NewError(err, e.ErrBadRequestCode)
+		return nil, apierrors.BadRequest("", "process handle message error", "").WithCause(err)
 	} else if err != nil {
 		logger.Warnf("invalid message type, error: %s", err.Error())
 	}
@@ -126,7 +127,7 @@ func (h *HandlerPool) ProcessHandlerMessage(
 	// both handler and pipeline functions
 	arg, err := unmarshalHandlerArg(handler, serializer, data)
 	if err != nil {
-		return nil, e.NewError(err, e.ErrBadRequestCode)
+		return nil, apierrors.BadRequest("", "process handle message error", "").WithCause(err)
 	}
 
 	if handler.Options.EnableReactor {
@@ -147,7 +148,7 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		rec := handler.Options.ReceiverProvider(ctx)
 		if rec == nil {
 			logger.Warnf("pitaya/handle: %s not found,the ReceiverProvider return nil", rt.Short())
-			return nil, e.NewError(err, e.ErrNotFoundCode)
+			return nil, apierrors.NotFound("", "process handle message error", "").WithCause(err)
 		}
 		receiver = reflect.ValueOf(rec)
 	}

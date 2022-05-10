@@ -31,6 +31,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alkaid/goerrors/apierrors"
+
 	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/dynamic"
 	"github.com/sirupsen/logrus"
@@ -385,7 +387,7 @@ func (pc *ProtoClient) waitForData() {
 			}
 
 			if response.Err {
-				errMsg := &protos.Error{}
+				errMsg := &apierrors.Status{}
 				err := proto.Unmarshal(response.Data, errMsg)
 				if err != nil {
 					logger.Log.Errorf("Erro decode error data: %s", string(response.Data))

@@ -3,8 +3,6 @@ package config
 import (
 	"bytes"
 	"context"
-	"errors"
-	"fmt"
 	"io"
 	"time"
 
@@ -37,7 +35,6 @@ func (rc remoteConfigProvider) WatchChannel(rp viper.RemoteProvider) (<-chan *vi
 	quitwc := make(chan bool)
 	viperResponsCh := make(chan *viper.RemoteResponse)
 	cryptoResponseCh := cm.Watch(context.Background(), rp.Path())
-	failedWatchAttempts := 0
 	// need this function to convert the Channel response form crypt.Response to viper.Response
 	go func(cr clientv3.WatchChan, vr chan<- *viper.RemoteResponse, quitwc <-chan bool, quit chan<- bool) {
 		for {
@@ -46,23 +43,18 @@ func (rc remoteConfigProvider) WatchChannel(rp viper.RemoteProvider) (<-chan *vi
 				cm.Close()
 				quit <- true
 				return
-			case resp, ok := <-cr:
+			case resp := <-cr:
 				if resp.Err() != nil {
 					viperResponsCh <- &viper.RemoteResponse{
 						Error: resp.Err(),
 					}
-					logger.Zap.Warn(fmt.Sprintf("viper etcd watcher response error", zap.Error(resp.Err())))
-					time.Sleep(100 * time.Millisecond)
+					logger.Zap.Warn("viper etcd watcher response error", zap.Error(resp.Err()))
+					// time.Sleep(100 * time.Millisecond)
 				}
-				if !ok {
-					failedWatchAttempts++
-					viperResponsCh <- &viper.RemoteResponse{
-						Error: errors.New("etcd watcher failed"),
-					}
-					logger.Zap.Warn("viper etcd watcher died, retrying to watch in 10 second", zap.Int("count", failedWatchAttempts))
-					time.Sleep(10 * time.Second)
-					// TODO 这里要考虑重试出错多少次后断开重新watch
-					continue
+				if resp.Canceled {
+					logger.Zap.Info("viper etcd watcher canceled")
+					quit <- true
+					return
 				}
 				for _, ev := range resp.Events {
 					viperResponsCh <- &viper.RemoteResponse{

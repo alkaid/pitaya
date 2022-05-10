@@ -22,8 +22,6 @@ package constants
 
 import (
 	"errors"
-
-	e "github.com/topfreegames/pitaya/v2/errors"
 )
 
 // Errors that can occur during message handling.
@@ -90,7 +88,7 @@ var (
 	ErrReceivedMsgBiggerThanExpected  = errors.New("received more data than expected")
 	ErrConnectionClosed               = errors.New("client connection closed")
 
-	ErrRPCTimeout              = e.New(e.ErrInternalCode, "RPC timeout")
+	ErrRPCTimeout              = errors.New("RPC timeout")
 	ErrSessionCantBindBackend  = errors.New("can't bind backend")
 	ErrIllegalBindBackendID    = errors.New("illegal backend id when bind in remote")
 	ErrSessionCantKickBackend  = errors.New("can't kick backend")

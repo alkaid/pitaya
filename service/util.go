@@ -25,10 +25,11 @@ import (
 	"errors"
 	"reflect"
 
+	"github.com/alkaid/goerrors/apierrors"
+
 	"github.com/topfreegames/pitaya/v2/component"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
-	e "github.com/topfreegames/pitaya/v2/errors"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/logger/interfaces"
 	"github.com/topfreegames/pitaya/v2/pipeline"
@@ -118,13 +119,13 @@ func processHandlerMessage(
 
 	msgType, err := getMsgType(msgTypeIface)
 	if err != nil {
-		return nil, e.NewError(err, e.ErrInternalCode)
+		return nil, apierrors.FromError(err)
 	}
 
 	logger := ctx.Value(constants.LoggerCtxKey).(interfaces.Logger)
 	exit, err := handler.ValidateMessageType(msgType)
 	if err != nil && exit {
-		return nil, e.NewError(err, e.ErrBadRequestCode)
+		return nil, apierrors.BadRequest("", err.Error(), "").WithCause(err)
 	} else if err != nil {
 		logger.Warnf("invalid message type, error: %s", err.Error())
 	}
@@ -133,7 +134,7 @@ func processHandlerMessage(
 	// both handler and pipeline functions
 	arg, err := unmarshalHandlerArg(handler, serializer, data)
 	if err != nil {
-		return nil, e.NewError(err, e.ErrBadRequestCode)
+		return nil, apierrors.BadRequest("", err.Error(), "").WithCause(err)
 	}
 
 	ctx, arg, err = handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)

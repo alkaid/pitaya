@@ -26,12 +26,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alkaid/goerrors/apierrors"
+
 	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
 	pcontext "github.com/topfreegames/pitaya/v2/context"
-	pitErrors "github.com/topfreegames/pitaya/v2/errors"
 	"github.com/topfreegames/pitaya/v2/interfaces"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/metrics"
@@ -135,16 +136,8 @@ func (gs *GRPCClient) Call(
 	if err != nil {
 		return nil, err
 	}
-	if res.Error != nil {
-		if res.Error.Code == "" {
-			res.Error.Code = pitErrors.ErrUnknownCode
-		}
-		err = &pitErrors.Error{
-			Code:     res.Error.Code,
-			Message:  res.Error.Msg,
-			Metadata: res.Error.Metadata,
-		}
-		return nil, err
+	if res.Status != nil {
+		return nil, apierrors.FromStatus(res.Status)
 	}
 	return res, nil
 }

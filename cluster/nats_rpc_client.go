@@ -25,13 +25,16 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/alkaid/goerrors/apierrors"
+
+	"go.uber.org/zap"
+
 	nats "github.com/nats-io/nats.go"
 	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
 	pcontext "github.com/topfreegames/pitaya/v2/context"
-	"github.com/topfreegames/pitaya/v2/errors"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/metrics"
 	"github.com/topfreegames/pitaya/v2/protos"
@@ -178,7 +181,7 @@ func (ns *NatsRPCClient) Call(
 		}()
 	}
 
-	//support notify type.  notify msg don't need wait response
+	// support notify type.  notify msg don't need wait response
 	if msg.Type == message.Notify {
 		err = ns.Send(getChannel(server.Type, server.ID), marshalledData)
 		if err != nil {
@@ -189,9 +192,9 @@ func (ns *NatsRPCClient) Call(
 
 	m, err = ns.conn.Request(getChannel(server.Type, server.ID), marshalledData, ns.reqTimeout)
 	if err != nil {
-		//针对超时封装一层error便于上层判断
+		// 针对超时封装一层error便于上层判断
 		if err == nats.ErrTimeout {
-			constants.ErrRPCTimeout.Wrap(err)
+			logger.Zap.Error("rpc timeout", zap.Error(err))
 			err = constants.ErrRPCTimeout
 		}
 		return nil, err
@@ -203,16 +206,8 @@ func (ns *NatsRPCClient) Call(
 		return nil, err
 	}
 
-	if res.Error != nil {
-		if res.Error.Code == "" {
-			res.Error.Code = errors.ErrUnknownCode
-		}
-		err = &errors.Error{
-			Code:     res.Error.Code,
-			Message:  res.Error.Msg,
-			Metadata: res.Error.Metadata,
-		}
-		return nil, err
+	if res.Status != nil {
+		return nil, apierrors.FromStatus(res.Status)
 	}
 	return res, nil
 }

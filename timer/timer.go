@@ -76,6 +76,13 @@ type (
 	}
 )
 
+// CreateAt 创建时间 纳秒
+//  @receiver t
+//  @return int64
+func (t *Timer) CreateAt() int64 {
+	return t.createAt
+}
+
 func init() {
 	// since this runs on init it is better to leave the value hardcoded here
 	timerBacklog = 1 << 8

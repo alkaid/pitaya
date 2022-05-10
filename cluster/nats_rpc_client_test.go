@@ -34,7 +34,6 @@ import (
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
-	e "github.com/topfreegames/pitaya/v2/errors"
 	"github.com/topfreegames/pitaya/v2/helpers"
 	"github.com/topfreegames/pitaya/v2/metrics"
 	metricsmocks "github.com/topfreegames/pitaya/v2/metrics/mocks"

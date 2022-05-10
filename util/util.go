@@ -29,12 +29,17 @@ import (
 	"runtime/debug"
 	"strconv"
 
+	"github.com/alkaid/goerrors/apierrors"
+
+	"go.uber.org/zap"
+
+	"google.golang.org/protobuf/proto"
+
 	"github.com/nats-io/nuid"
 
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
 	pcontext "github.com/topfreegames/pitaya/v2/context"
-	e "github.com/topfreegames/pitaya/v2/errors"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/logger/interfaces"
 	"github.com/topfreegames/pitaya/v2/protos"
@@ -125,50 +130,37 @@ func FileExists(filename string) bool {
 
 // GetErrorFromPayload gets the error from payload
 func GetErrorFromPayload(serializer serialize.Serializer, payload []byte) error {
-	err := &e.Error{Code: e.ErrUnknownCode}
+	err := apierrors.InternalServer("unknown", "unknown", "")
 	switch serializer.(type) {
 	case *json.Serializer:
 		_ = serializer.Unmarshal(payload, err)
 	case *protobuf.Serializer:
-		pErr := &protos.Error{Code: e.ErrUnknownCode}
+		pErr := &apierrors.Status{}
 		_ = serializer.Unmarshal(payload, pErr)
-		err = &e.Error{Code: pErr.Code, Message: pErr.Msg, Metadata: pErr.Metadata}
+		err = apierrors.FromStatus(pErr)
 	}
 	return err
 }
 
-var errWrapper ErrorWrapper
+var customErrorToProto ErrorToProto                      // 自定义error转proto
+type ErrorToProto func(err error) (proto.Message, error) // 自定义error转proto
 
-type ErrorWrapper func(err *protos.Error) interface{}
-
-// SetInternalErrorWrapper 设置内部错误包装器,框架内部错误时会返回该包装过的错误给客户端
-//  @param wrapper
-func SetInternalErrorWrapper(wrapper ErrorWrapper) {
-	errWrapper = wrapper
+// SetErrorToProtoConvertor 设置自定义error转byte函数
+//  @param errorToProto
+func SetErrorToProtoConvertor(errorToProto ErrorToProto) {
+	customErrorToProto = errorToProto
 }
 
 // GetErrorPayload creates and serializes an error payload
 func GetErrorPayload(serializer serialize.Serializer, err error) ([]byte, error) {
-	code := e.ErrUnknownCode
-	msg := err.Error()
-	metadata := map[string]string{}
-	if val, ok := err.(*e.Error); ok {
-		code = val.Code
-		metadata = val.Metadata
-	}
-	errPayload := &protos.Error{
-		Code: code,
-		Msg:  msg,
-	}
-	if len(metadata) > 0 {
-		errPayload.Metadata = metadata
-	}
-	if errWrapper != nil {
-		p := errWrapper(errPayload)
-		if p != nil {
-			return SerializeOrRaw(serializer, p)
+	if customErrorToProto != nil {
+		msg, err2 := customErrorToProto(err)
+		if err2 == nil {
+			return SerializeOrRaw(serializer, msg)
 		}
+		logger.Zap.Error("convert api error to proto exception", zap.Error(err))
 	}
+	errPayload := &apierrors.FromError(err).Status
 	return SerializeOrRaw(serializer, errPayload)
 }
 

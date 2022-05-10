@@ -43,7 +43,6 @@ import (
 	"github.com/topfreegames/pitaya/v2/constants"
 	pcontext "github.com/topfreegames/pitaya/v2/context"
 	"github.com/topfreegames/pitaya/v2/docgenerator"
-	"github.com/topfreegames/pitaya/v2/errors"
 	"github.com/topfreegames/pitaya/v2/groups"
 	"github.com/topfreegames/pitaya/v2/interfaces"
 	"github.com/topfreegames/pitaya/v2/logger"
@@ -648,10 +647,11 @@ func (app *App) Shutdown() {
 	}
 }
 
-// Error creates a new error with a code, message and metadata
-func Error(err error, code string, metadata ...map[string]string) *errors.Error {
-	return errors.NewError(err, code, metadata...)
-}
+//
+// // Error creates a new error with a code, message and metadata
+// func Error(err error, code string, metadata ...map[string]string) *errors.Error {
+// 	return errors.NewError(err, code, metadata...)
+// }
 
 // GetSessionFromCtx retrieves a session from a given context
 func (app *App) GetSessionFromCtx(ctx context.Context) session.Session {

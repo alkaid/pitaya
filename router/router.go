@@ -26,7 +26,6 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/topfreegames/pitaya/v2/errors"
 	"github.com/topfreegames/pitaya/v2/session"
 
 	"github.com/topfreegames/pitaya/v2/cluster"
@@ -105,7 +104,7 @@ func (r *Router) defaultRoute(
 		}
 		// return nil,constants.ErrNoServersAvailableOfType
 		// 需要路由到绑定session的服务,但是找不到，报错
-		return nil, errors.New(errors.ErrSessionNotFoundInServer, constants.ErrNoServersAvailableOfType.Error(), map[string]string{
+		return nil, protos.ErrForbiddenServerOfSession().WithMetadata(map[string]string{
 			"server": server.Type,
 		})
 

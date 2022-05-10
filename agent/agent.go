@@ -30,12 +30,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/alkaid/goerrors/apierrors"
+
 	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/conn/codec"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/conn/packet"
 	"github.com/topfreegames/pitaya/v2/constants"
-	"github.com/topfreegames/pitaya/v2/errors"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/metrics"
 	"github.com/topfreegames/pitaya/v2/protos"
@@ -249,7 +250,7 @@ func (a *agentImpl) packetEncodeMessage(m *message.Message) ([]byte, error) {
 func (a *agentImpl) send(pendingMsg pendingMessage) (err error) {
 	defer func() {
 		if e := recover(); e != nil {
-			err = errors.NewError(constants.ErrBrokenPipe, errors.ErrClientClosedRequest)
+			err = apierrors.ClientClosed("pitaya.BrokenPipe", constants.ErrBrokenPipe.Error(), "")
 		}
 	}()
 	a.reportChannelSize()
@@ -290,7 +291,7 @@ func (a *agentImpl) GetSession() session.Session {
 // Push implementation for NetworkEntity interface
 func (a *agentImpl) Push(route string, v interface{}) error {
 	if a.GetStatus() == constants.StatusClosed {
-		return errors.NewError(constants.ErrBrokenPipe, errors.ErrClientClosedRequest)
+		return apierrors.ClientClosed("ErrBrokenPipe", "agent push error", "").WithCause(constants.ErrBrokenPipe)
 	}
 
 	switch d := v.(type) {
@@ -312,7 +313,7 @@ func (a *agentImpl) ResponseMID(ctx context.Context, mid uint, v interface{}, is
 		err = isError[0]
 	}
 	if a.GetStatus() == constants.StatusClosed {
-		return errors.NewError(constants.ErrBrokenPipe, errors.ErrClientClosedRequest)
+		return apierrors.ClientClosed("ErrBrokenPipe", constants.ErrBrokenPipe.Error(), "").WithCause(constants.ErrBrokenPipe)
 	}
 
 	if mid <= 0 {

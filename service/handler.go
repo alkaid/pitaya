@@ -27,6 +27,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alkaid/goerrors/apierrors"
+
 	"github.com/nats-io/nuid"
 	"github.com/topfreegames/pitaya/v2/acceptor"
 	"github.com/topfreegames/pitaya/v2/co"
@@ -42,7 +44,6 @@ import (
 	"github.com/topfreegames/pitaya/v2/constants"
 	pcontext "github.com/topfreegames/pitaya/v2/context"
 	"github.com/topfreegames/pitaya/v2/docgenerator"
-	e "github.com/topfreegames/pitaya/v2/errors"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/metrics"
 	"github.com/topfreegames/pitaya/v2/route"
@@ -292,7 +293,7 @@ func (h *HandlerService) processMessage(a agent.Agent, msg *message.Message) {
 	r, err := route.Decode(msg.Route)
 	if err != nil {
 		logger.Log.Errorf("Failed to decode route: %s", err.Error())
-		a.AnswerWithError(ctx, msg.ID, e.NewError(err, e.ErrBadRequestCode))
+		a.AnswerWithError(ctx, msg.ID, apierrors.BadRequest("", "Failed to decode route", "").WithCause(err))
 		return
 	}
 
