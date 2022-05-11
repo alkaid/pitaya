@@ -44,6 +44,7 @@ type Builder struct {
 	SessionPool      session.SessionPool
 	Worker           *worker.Worker
 	HandlerHooks     *pipeline.HandlerHooks
+	RemoteHooks      *pipeline.HandlerHooks
 	Redis            redis.Cmdable
 	conf             *config.Config
 }
@@ -164,6 +165,10 @@ func NewBuilder(isFrontend bool,
 	if config.DefaultPipelines.StructValidation.Enabled {
 		configureDefaultPipelines(handlerHooks)
 	}
+	remoteHooks := pipeline.NewHandlerHooks()
+	if config.DefaultPipelines.StructValidation.Enabled {
+		configureDefaultPipelines(remoteHooks)
+	}
 
 	// session 后端redis落地实例
 	var redisClient redis.Cmdable
@@ -223,6 +228,7 @@ func NewBuilder(isFrontend bool,
 		ServerMode:       serverMode,
 		Groups:           gsi,
 		HandlerHooks:     handlerHooks,
+		RemoteHooks:      remoteHooks,
 		ServiceDiscovery: serviceDiscovery,
 		SessionPool:      sessionPool,
 		Worker:           worker,
@@ -264,7 +270,7 @@ func (builder *Builder) Build() Pitaya {
 			builder.MessageEncoder,
 			builder.Server,
 			builder.SessionPool,
-			builder.HandlerHooks,
+			builder.RemoteHooks,
 			handlerPool,
 		)
 
