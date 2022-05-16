@@ -26,6 +26,8 @@ import (
 	"strings"
 	"unicode"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/topfreegames/pitaya/v2/component"
 	"github.com/topfreegames/pitaya/v2/route"
 )
@@ -88,21 +90,21 @@ func (d docMap) toMap() (map[string]interface{}, error) {
 }
 
 func docForMethod(method reflect.Method, getPtrNames bool) *doc {
-	doc := &doc{
+	d := &doc{
 		Output: []interface{}{},
 	}
 
 	if method.Type.NumIn() > 2 {
 		isOutput := false
-		doc.Input = docForType(method.Type.In(2), isOutput, getPtrNames)
+		d.Input = docForType(method.Type.In(2), isOutput, getPtrNames)
 	}
-
-	for i := 0; i < method.Type.NumOut(); i++ {
+	if method.Type.NumOut() > 0 {
 		isOutput := true
-		doc.Output = append(doc.Output, docForType(method.Type.Out(i), isOutput, getPtrNames))
+		// 只取response不取error
+		d.Output = append(d.Output, docForType(method.Type.Out(0), isOutput, getPtrNames))
 	}
 
-	return doc
+	return d
 }
 
 func parseStruct(typ reflect.Type) reflect.Type {
@@ -118,14 +120,24 @@ func docForType(typ reflect.Type, isOutput bool, getPtrNames bool) interface{} {
 	if typ.Kind() == reflect.Ptr {
 		fields := map[string]interface{}{}
 		elm := typ.Elem()
-		for i := 0; i < elm.NumField(); i++ {
-			if name, valid := getName(elm.Field(i), isOutput); valid {
-				fields[name] = parseType(elm.Field(i).Type, isOutput, getPtrNames)
-			}
-		}
+		// 没必要递归取字段,客户端只需要top type
+		// if elm.String() != "protos.ProtoDescriptors" { // 过滤descriptor类型,因为客户端仅需要route且该类型会无限递归
+		// 	for i := 0; i < elm.NumField(); i++ {
+		// 		if name, valid := getName(elm.Field(i), isOutput); valid {
+		// 			fields[name] = parseType(elm.Field(i).Type, isOutput, getPtrNames)
+		// 		}
+		// 	}
+		// }
 		if getPtrNames {
 			composite := map[string]interface{}{}
-			composite[typ.String()] = fields
+			// 若是protobuf 取protobuf的消息名,否则取golang类名
+			val := reflect.New(elm)
+			if msg, ok := val.Interface().(proto.Message); ok {
+				name := msg.ProtoReflect().Descriptor().FullName()
+				composite["*"+string(name)] = fields
+			} else {
+				composite[typ.String()] = fields
+			}
 			return composite
 		}
 		return fields
@@ -181,6 +193,9 @@ func parseType(typ reflect.Type, isOutput bool, getPtrNames bool) interface{} {
 	switch typ.Kind() {
 	case reflect.Ptr:
 		elm = typ.Elem()
+		if elm.Kind() != reflect.Struct {
+			return typ.String()
+		}
 	case reflect.Struct:
 		elm = parseStruct(typ)
 		if elm == nil {
@@ -204,7 +219,14 @@ func parseType(typ reflect.Type, isOutput bool, getPtrNames bool) interface{} {
 	}
 	if getPtrNames {
 		composite := map[string]interface{}{}
-		composite[typ.String()] = fields
+		// 若是protobuf 取protobuf的消息名,否则取golang类名
+		val := reflect.New(elm)
+		if msg, ok := val.Interface().(proto.Message); ok {
+			name := msg.ProtoReflect().Descriptor().FullName()
+			composite[string(name)] = fields
+		} else {
+			composite[typ.String()] = fields
+		}
 		return composite
 	}
 	return fields

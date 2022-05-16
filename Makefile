@@ -65,8 +65,8 @@ protos-compile-demo:
 #https://developers.google.com/protocol-buffers/docs/reference/go-generated
 protos-compile:
 	@cd benchmark/testdata && ./gen_proto.sh
-	@protoc --proto_path=. pitaya-protos/*.proto --go_out=. --go_opt=paths=import --go-errors_out=.
-	@protoc --proto_path=. pitaya-protos/*.proto --go-grpc_out=.
+	@protoc --proto_path=. --proto_path=./pitaya-protos/lib/alkaid/goerrors pitaya-protos/*.proto --go_out=. --go_opt=paths=import --go-errors_out=.
+	@protoc --proto_path=. --proto_path=./pitaya-protos/lib/alkaid/goerrors pitaya-protos/*.proto --go-grpc_out=.
 	@protoc -I pitaya-protos/test pitaya-protos/test/*.proto --go_out=protos/test --go_opt=paths=import
 
 rm-test-temp-files:

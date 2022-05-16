@@ -24,7 +24,6 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -32,16 +31,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/alkaid/goerrors/apierrors"
+	"go.uber.org/zap"
+
 	"github.com/topfreegames/pitaya/v2/acceptor"
 
 	"github.com/gorilla/websocket"
-	"github.com/sirupsen/logrus"
-	"github.com/topfreegames/pitaya/v2"
 	"github.com/topfreegames/pitaya/v2/conn/codec"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/conn/packet"
-	"github.com/topfreegames/pitaya/v2/logger"
-	logruswrapper "github.com/topfreegames/pitaya/v2/logger/logrus"
 	"github.com/topfreegames/pitaya/v2/session"
 	"github.com/topfreegames/pitaya/v2/util/compression"
 )
@@ -80,6 +78,7 @@ type Client struct {
 	nextID              uint32
 	messageEncoder      message.Encoder
 	clientHandshakeData *session.HandshakeData
+	log                 *zap.Logger
 }
 
 // MsgChannel return the incoming message channel
@@ -93,13 +92,7 @@ func (c *Client) ConnectedStatus() bool {
 }
 
 // New returns a new client
-func New(logLevel logrus.Level, requestTimeout ...time.Duration) *Client {
-	l := logrus.New()
-	l.Formatter = &logrus.TextFormatter{}
-	l.SetLevel(logLevel)
-
-	logger.Log = logruswrapper.NewWithFieldLogger(l)
-
+func New(log *zap.Logger, requestTimeout ...time.Duration) *Client {
 	reqTimeout := 5 * time.Second
 	if len(requestTimeout) > 0 {
 		reqTimeout = requestTimeout[0]
@@ -127,6 +120,7 @@ func New(logLevel logrus.Level, requestTimeout ...time.Duration) *Client {
 				"age": 30,
 			},
 		},
+		log: log,
 	}
 }
 
@@ -175,7 +169,7 @@ func (c *Client) handleHandshakeResponse() error {
 		return err
 	}
 
-	logger.Log.Debug("got handshake from sv, data: %v", handshake)
+	c.log.Debug("got handshake from sv", zap.Any("data", handshake))
 
 	if handshake.Sys.Dict != nil {
 		message.SetDictionary(handshake.Sys.Dict)
@@ -214,7 +208,7 @@ func (c *Client) pendingRequestsReaper() {
 				}
 			}
 			for _, pendingReq := range toDelete {
-				err := pitaya.Error(errors.New("request timeout"), "PIT-504")
+				err := apierrors.GatewayTimeout("", "request timeout", "")
 				errMarshalled, _ := json.Marshal(err)
 				// send a timeout to incoming msg chan
 				m := &message.Message{
@@ -242,10 +236,10 @@ func (c *Client) handlePackets() {
 			switch p.Type {
 			case packet.Data:
 				//handle data
-				logger.Log.Debug("got data: %s", string(p.Data))
+				c.log.Debug("client handle packets got", zap.String("data", string(p.Data)))
 				m, err := message.Decode(p.Data)
 				if err != nil {
-					logger.Log.Errorf("error decoding msg from sv: %s", string(m.Data))
+					c.log.Error("error decoding msg from sv", zap.String("data", string(m.Data)))
 				}
 				if m.Type == message.Response {
 					c.pendingReqMutex.Lock()
@@ -260,7 +254,7 @@ func (c *Client) handlePackets() {
 				}
 				c.IncomingMsgChan <- m
 			case packet.Kick:
-				logger.Log.Warn("got kick packet from the server! disconnecting...")
+				c.log.Warn("got kick packet from the server! disconnecting...")
 				c.Disconnect()
 			}
 		case <-c.closeChan:
@@ -284,7 +278,7 @@ func (c *Client) readPackets(buf *bytes.Buffer) ([]*packet.Packet, error) {
 	}
 	packets, err := c.packetDecoder.Decode(buf.Bytes())
 	if err != nil {
-		logger.Log.Errorf("error decoding packet from server: %s", err.Error())
+		c.log.Error("error decoding packet from server", zap.Error(err))
 	}
 	totalProcessed := 0
 	for _, p := range packets {
@@ -301,7 +295,7 @@ func (c *Client) handleServerMessages() {
 	for c.Connected {
 		packets, err := c.readPackets(buf)
 		if err != nil && c.Connected {
-			logger.Log.Error(err)
+			c.log.Error("", zap.Error(err))
 			break
 		}
 
@@ -323,7 +317,7 @@ func (c *Client) sendHeartbeats(interval int) {
 			p, _ := c.packetEncoder.Encode(packet.Heartbeat, []byte{})
 			_, err := c.conn.Write(p)
 			if err != nil {
-				logger.Log.Errorf("error sending heartbeat to server: %s", err.Error())
+				c.log.Error("error sending heartbeat to server", zap.Error(err))
 				return
 			}
 		case <-c.closeChan:

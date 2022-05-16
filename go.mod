@@ -4,13 +4,12 @@ go 1.18
 
 require (
 	github.com/DataDog/datadog-go v4.8.3+incompatible
-	github.com/alkaid/goerrors v1.0.6
+	github.com/alkaid/goerrors v1.0.7
 	github.com/go-playground/validator/v10 v10.10.0
 	github.com/go-redis/redis/v8 v8.11.4
 	github.com/golang/mock v1.6.0
 	github.com/google/uuid v1.3.0
 	github.com/gorilla/websocket v1.4.2
-	github.com/jhump/protoreflect v1.10.1
 	github.com/nats-io/nats-server/v2 v2.6.4
 	github.com/nats-io/nats.go v1.13.1-0.20211018182449-f2416a8b1483
 	github.com/nats-io/nuid v1.0.1

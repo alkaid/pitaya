@@ -28,6 +28,8 @@ import (
 	"strings"
 	"syscall"
 
+	"google.golang.org/protobuf/types/descriptorpb"
+
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -732,8 +734,13 @@ func AddGRPCInfoToMetadata(
 }
 
 // Descriptor returns the protobuf message descriptor for a given message name
-func Descriptor(protoName string) ([]byte, error) {
+func Descriptor(protoName string) ([]*descriptorpb.FileDescriptorProto, error) {
 	return docgenerator.ProtoDescriptors(protoName)
+}
+
+// FileDescriptor returns the protobuf message descriptor for a given .proto name
+func FileDescriptor(protoName string) ([]*descriptorpb.FileDescriptorProto, error) {
+	return docgenerator.ProtoFileDescriptors(protoName)
 }
 
 // StartWorker configures, starts and returns pitaya worker

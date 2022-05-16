@@ -12,15 +12,12 @@ const _ = apierrors.SupportPackageIsVersion1
 
 var errUnknown *apierrors.Error
 var errForbiddenServerOfSession *apierrors.Error
-var errRouteInvalid *apierrors.Error
 
 func init() {
 	errUnknown = apierrors.New(500, "protos.ErrUnknown", "", PitayaError_ErrUnknown.String())
 	apierrors.Register(errUnknown)
 	errForbiddenServerOfSession = apierrors.New(403, "protos.ErrForbiddenServerOfSession", "", "禁止该session请求此服务器,session未绑定")
 	apierrors.Register(errForbiddenServerOfSession)
-	errRouteInvalid = apierrors.New(400, "protos.ErrRouteInvalid", "", "cannot decode route,route invalid")
-	apierrors.Register(errRouteInvalid)
 }
 
 func ErrUnknown() *apierrors.Error {
@@ -30,8 +27,4 @@ func ErrUnknown() *apierrors.Error {
 // ErrForbiddenServerOfSession  禁止该session请求此服务器(session未绑定)
 func ErrForbiddenServerOfSession() *apierrors.Error {
 	return errForbiddenServerOfSession
-}
-
-func ErrRouteInvalid() *apierrors.Error {
-	return errRouteInvalid
 }
