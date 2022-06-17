@@ -20,10 +20,6 @@ func ProtoDescriptors(protoName string) ([]*descriptorpb.FileDescriptorProto, er
 	if strings.HasSuffix(protoName, ".proto") {
 		return nil, constants.ErrProtodescriptor
 	}
-	// 不返回protoc include库，默认客户端自己有该库
-	if strings.HasPrefix(protoName, "google.protobuf") {
-		return nil, nil
-	}
 	var descs []*descriptorpb.FileDescriptorProto
 	protoReflectTypePointer, err := protoregistry.GlobalTypes.FindMessageByName(protoreflect.FullName(protoName))
 	if err != nil {
