@@ -15,57 +15,66 @@ import (
 	"google.golang.org/protobuf/reflect/protoregistry"
 )
 
-// ProtoDescriptors returns the descriptor for a given message name
-func ProtoDescriptors(protoName string) ([]*descriptorpb.FileDescriptorProto, error) {
+// ProtoDescriptors 根据 protoName 获取对应 protobuf 文件及其引用文件的 descriptor
+//  @param protoName
+//  @param protoDescs key为proto文件注册路径
+//  @return error
+func ProtoDescriptors(protoName string, protoDescs map[string]*descriptorpb.FileDescriptorProto) error {
 	if strings.HasSuffix(protoName, ".proto") {
-		return nil, constants.ErrProtodescriptor
+		return constants.ErrProtodescriptor
 	}
-	var descs []*descriptorpb.FileDescriptorProto
+	if protoDescs == nil {
+		return constants.ErrProtodescriptorMapEmpty
+	}
 	protoReflectTypePointer, err := protoregistry.GlobalTypes.FindMessageByName(protoreflect.FullName(protoName))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	fileDesc := protoReflectTypePointer.Descriptor().ParentFile()
 	if fileDesc == nil {
-		return nil, constants.ErrProtodescriptor
+		return constants.ErrProtodescriptor
 	}
-	protoDescriptor := protodesc.ToFileDescriptorProto(fileDesc)
-	descs = append(descs, protoDescriptor)
-	for i := 0; i < fileDesc.Imports().Len(); i++ {
-		importFileDesc := fileDesc.Imports().Get(i).FileDescriptor
-		if importFileDesc == nil {
-			logger.Zap.Warn("importFileDesc is nil", zap.String("protoName", protoName), zap.Int("import", i))
-			continue
-		}
-		importDescProto := protodesc.ToFileDescriptorProto(importFileDesc)
-		descs = append(descs, importDescProto)
-	}
-	return descs, nil
+	recusionImports(fileDesc, protoDescs)
+	return nil
 }
 
-// ProtoFileDescriptors returns the descriptor for a given .proto file
-func ProtoFileDescriptors(protoName string) ([]*descriptorpb.FileDescriptorProto, error) {
-	if !strings.HasSuffix(protoName, ".proto") {
-		return nil, constants.ErrProtodescriptor
+// recusionImports 递归自己及引用,若没有获取过这设置到 protoDescs map 里
+//  @param fileDesc
+//  @param protoDescs
+func recusionImports(fileDesc protoreflect.FileDescriptor, protoDescs map[string]*descriptorpb.FileDescriptorProto) {
+	// 已经获取过 不再递归
+	if _, ok := protoDescs[fileDesc.Path()]; ok {
+		return
 	}
-	var descs []*descriptorpb.FileDescriptorProto
-	fileDesc, err := protoregistry.GlobalFiles.FindFileByPath(protoName)
-	if err != nil {
-		return nil, err
-	}
-	descriptor := protodesc.ToFileDescriptorProto(fileDesc)
-	if descriptor == nil {
-		return nil, constants.ErrProtodescriptor
-	}
-	descs = append(descs, descriptor)
+	protoDescriptor := protodesc.ToFileDescriptorProto(fileDesc)
+	// 设值给集合
+	protoDescs[fileDesc.Path()] = protoDescriptor
+	// 便利递归其引用
 	for i := 0; i < fileDesc.Imports().Len(); i++ {
 		importFileDesc := fileDesc.Imports().Get(i).FileDescriptor
 		if importFileDesc == nil {
-			logger.Zap.Warn("importFileDesc is nil", zap.String("protoName", protoName), zap.Int("import", i))
+			logger.Zap.Warn("importFileDesc is nil", zap.String("parent", fileDesc.Path()), zap.Int("import", i))
 			continue
 		}
-		importDescProto := protodesc.ToFileDescriptorProto(importFileDesc)
-		descs = append(descs, importDescProto)
+		recusionImports(importFileDesc, protoDescs)
 	}
-	return descs, nil
+}
+
+// ProtoFileDescriptors 根据文件名获取对应 protobuf 文件及其引用文件的 descriptor
+//  @param protoName
+//  @param protoDescs key为proto文件注册路径
+//  @return error
+func ProtoFileDescriptors(protoName string, protoDescs map[string]*descriptorpb.FileDescriptorProto) error {
+	if !strings.HasSuffix(protoName, ".proto") {
+		return constants.ErrProtodescriptor
+	}
+	if protoDescs == nil {
+		return constants.ErrProtodescriptorMapEmpty
+	}
+	fileDesc, err := protoregistry.GlobalFiles.FindFileByPath(protoName)
+	if err != nil {
+		return err
+	}
+	recusionImports(fileDesc, protoDescs)
+	return nil
 }

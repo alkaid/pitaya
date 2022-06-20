@@ -733,14 +733,20 @@ func AddGRPCInfoToMetadata(
 	return metadata
 }
 
-// Descriptor returns the protobuf message descriptor for a given message name
-func Descriptor(protoName string) ([]*descriptorpb.FileDescriptorProto, error) {
-	return docgenerator.ProtoDescriptors(protoName)
+// Descriptor 根据 protoName 获取对应 protobuf 文件及其引用文件的 descriptor
+//  @param protoName
+//  @param protoDescs key为proto文件注册路径
+//  @return error
+func Descriptor(protoName string, protoDescs map[string]*descriptorpb.FileDescriptorProto) error {
+	return docgenerator.ProtoDescriptors(protoName, protoDescs)
 }
 
-// FileDescriptor returns the protobuf message descriptor for a given .proto name
-func FileDescriptor(protoName string) ([]*descriptorpb.FileDescriptorProto, error) {
-	return docgenerator.ProtoFileDescriptors(protoName)
+// FileDescriptor 根据文件名获取对应 protobuf 文件及其引用文件的 descriptor
+//  @param protoName
+//  @param protoDescs key为proto文件注册路径
+//  @return error
+func FileDescriptor(protoName string, protoDescs map[string]*descriptorpb.FileDescriptorProto) error {
+	return docgenerator.ProtoFileDescriptors(protoName, protoDescs)
 }
 
 // StartWorker configures, starts and returns pitaya worker

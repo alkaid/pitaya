@@ -66,6 +66,7 @@ var (
 	ErrNotifyOnRequest                = errors.New("tried to notify a request route")
 	ErrOnCloseBackend                 = errors.New("onclose callbacks are not allowed on backend servers")
 	ErrProtodescriptor                = errors.New("failed to get protobuf message descriptor")
+	ErrProtodescriptorMapEmpty        = errors.New("failed to get protobuf message descriptor,map cannot be empty")
 	ErrPushingToUsers                 = errors.New("failed to push message to users, check array with failed uids")
 	ErrRPCClientNotInitialized        = errors.New("RPC client is not running")
 	ErrRPCJobAlreadyRegistered        = errors.New("rpc job was already registered")
