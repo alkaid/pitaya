@@ -47,6 +47,8 @@ func (h *ZapCore) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 				if verbose != basic {
 					ent.Stack = verbose
 				}
+			default:
+				// do nothing
 			}
 		}
 	}

@@ -322,51 +322,41 @@ func NewWithDescriptor(descriptorsRoute string, docsRoute string, log *zap.Logge
 
 // LoadServerInfo load commands information from the server. Addr is the
 // server address.
-func (pc *ProtoClient) LoadServerInfo(addr string) error {
+func (pc *ProtoClient) LoadServerInfo(uri string) error {
 	pc.ready = false
 
-	if err := pc.Client.ConnectToWS(addr, "", &tls.Config{
-		InsecureSkipVerify: true,
-	}); err != nil {
-		if err := pc.Client.ConnectToWS(addr, ""); err != nil {
-			if err := pc.Client.ConnectTo(addr, &tls.Config{
-				InsecureSkipVerify: true,
-			}); err != nil {
-				if err := pc.Client.ConnectTo(addr); err != nil {
-					return err
-				}
-			}
-		}
+	if err := pc.Client.ConnectTo(uri); err != nil {
+		return err
 	}
 
 	// request doc info
 	_, err := pc.SendRequest(pc.docsRoute, make([]byte, 0))
 	if err != nil {
-		pc.Disconnect()
+		pc.Disconnect(CloseReasonFatal)
 		return err
 	}
 	response := <-pc.Client.IncomingMsgChan
 
 	docs := &protos.Doc{}
 	if err := proto.Unmarshal(response.Data, docs); err != nil {
-		pc.Disconnect()
+		pc.Disconnect(CloseReasonFatal)
 		return fmt.Errorf("failed to unmarshal docs route response: %w", err)
 	}
 
 	if err := pc.getDescriptors(docs.Doc); err != nil {
-		pc.Disconnect()
+		pc.Disconnect(CloseReasonFatal)
 		return fmt.Errorf("failed to read proto descriptors: %w", err)
 	}
 	// TODO 这里不明白为什么要断开上层后续自己再重联,可能是descriptor解析耗时操作可能使得服务端踢出?
-	pc.Disconnect()
+	pc.Disconnect(CloseReasonManual)
 	pc.ready = true
 
 	return nil
 }
 
 // Disconnect the client
-func (pc *ProtoClient) Disconnect() {
-	pc.Client.Disconnect()
+func (pc *ProtoClient) Disconnect(reason CloseReason) {
+	pc.Client.Disconnect(reason)
 	if pc.ready {
 		pc.closeChan <- true
 	}
@@ -437,24 +427,6 @@ func (pc *ProtoClient) ConnectTo(addr string, tlsConfig ...*tls.Config) error {
 		return err
 	}
 
-	if !pc.ready {
-		err = pc.LoadServerInfo(addr)
-		if err != nil {
-			return err
-		}
-	}
-
-	if pc.ready {
-		go pc.waitForData()
-	}
-	return nil
-}
-
-func (pc *ProtoClient) ConnectToWS(addr string, path string, tlsConfig ...*tls.Config) error {
-	err := pc.Client.ConnectToWS(addr, path, tlsConfig...)
-	if err != nil {
-		return err
-	}
 	if !pc.ready {
 		err = pc.LoadServerInfo(addr)
 		if err != nil {

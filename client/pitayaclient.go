@@ -30,11 +30,21 @@ import (
 // PitayaClient iface
 type PitayaClient interface {
 	ConnectTo(addr string, tlsConfig ...*tls.Config) error
-	ConnectToWS(addr string, path string, tlsConfig ...*tls.Config) error
 	ConnectedStatus() bool
-	Disconnect()
+	Disconnect(reason CloseReason)
 	MsgChannel() chan *message.Message
 	SendNotify(route string, data []byte) error
 	SendRequest(route string, data []byte) (uint, error)
 	SetClientHandshakeData(data *session.HandshakeData)
+	OnDisconnected(callback func(reason CloseReason))
 }
+
+type CloseReason int // 关闭原因
+
+const (
+	_                 CloseReason = iota
+	CloseReasonFatal              // 发生致命错误后关闭(上层不应该重连而应该检查代码)
+	CloseReasonError              // 发生错误,如网络断开,心跳超时等(可以重连)
+	CloseReasonKicked             // 被服务端踢出(根据需求看是否重连)
+	CloseReasonManual             // 手动关闭(不应该重连)
+)

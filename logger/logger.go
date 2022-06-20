@@ -47,7 +47,7 @@ type Logger struct {
 func NewLogger(cfg zap.Config, opts ...Option) *Logger {
 	log, err := cfg.Build()
 	if err != nil {
-		fmt.Errorf("uber/zap build error: %w", err)
+		fmt.Printf("uber/zap build error: %s", err.Error())
 		return nil
 	}
 	options := &Options{}
@@ -55,9 +55,7 @@ func NewLogger(cfg zap.Config, opts ...Option) *Logger {
 		opt(options)
 	}
 	if options.StackWithFmtFormatter {
-		log = log.WithOptions(zap.WrapCore(func(core zapcore.Core) zapcore.Core {
-			return WrapCore(core)
-		}))
+		log = log.WithOptions(zap.WrapCore(WrapCore))
 	}
 	return &Logger{
 		Log:     log,
@@ -67,43 +65,25 @@ func NewLogger(cfg zap.Config, opts ...Option) *Logger {
 	}
 }
 
-//
-//type Level = string
-//
-//const (
-//	// DebugLevel logs are typically voluminous, and are usually disabled in
-//	// production.
-//	DebugLevel Level = "DEBUG"
-//	// InfoLevel is the default logging priority.
-//	InfoLevel Level = "INFO"
-//	// WarnLevel logs are more important than Info, but don't need individual
-//	// human review.
-//	WarnLevel Level = "WARN"
-//	// ErrorLevel logs are high-priority. If an application is running smoothly,
-//	// it shouldn't generate any error-level logs.
-//	ErrorLevel Level = "ERROR"
-//	// DPanicLevel logs are particularly important errors. In development the
-//	// logger panics after writing the message.
-//	DPanicLevel Level = "DPANIC"
-//	// PanicLevel logs a message, then panics.
-//	PanicLevel Level = "PANIC"
-//	// FatalLevel logs a message, then calls os.Exit(1).
-//	FatalLevel Level = "FATAL"
-//
-//	_minLevel = DebugLevel
-//	_maxLevel = FatalLevel
-//)
-
-//SetLevel 动态改变打印级别
-//  @param level 支持的类型为int,zapcore.Level,string,int,zap.AtomicLevel. 建议使用string
+// SetLevel 动态改变打印级别
+//  @param level 支持的类型为 int,int8,zapcore.Level,string,zap.AtomicLevel. 建议使用string
 //  支持的string为 DEBUG|INFO|WARN|ERROR|DPANIC|PANIC|FATAL
-func (l *Logger) SetLevel(level interface{}) {
+func (l *Logger) SetLevel(level any) {
 	var err error
-	switch level.(type) {
+	switch val := level.(type) {
 	case *zap.AtomicLevel:
-		l.Level.SetLevel(level.(*zap.AtomicLevel).Level())
-	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
-		lnew := level.(zapcore.Level)
+		l.Level.SetLevel(val.Level())
+	case zapcore.Level:
+		l.Level.SetLevel(val)
+	case int:
+		lnew := zapcore.Level(val)
+		if lnew >= zapcore.DebugLevel && lnew <= zapcore.FatalLevel {
+			l.Level.SetLevel(lnew)
+		} else {
+			err = errors.New("illegal log Level")
+		}
+	case int8:
+		lnew := zapcore.Level(val)
 		if lnew >= zapcore.DebugLevel && lnew <= zapcore.FatalLevel {
 			l.Level.SetLevel(lnew)
 		} else {
@@ -111,7 +91,7 @@ func (l *Logger) SetLevel(level interface{}) {
 		}
 	case string:
 		lnew := zapcore.ErrorLevel
-		err = lnew.Set(level.(string))
+		err = lnew.Set(val)
 		if err == nil {
 			l.Level.SetLevel(lnew)
 		}
@@ -123,7 +103,7 @@ func (l *Logger) SetLevel(level interface{}) {
 	}
 }
 
-//SetDevelopment 是否开启开发者模式 true为development mode 否则为production mode
+// SetDevelopment 是否开启开发者模式 true为development mode 否则为production mode
 //  development mode: zap.NewDevelopmentConfig()模式
 //  production mode:zap.NewProductionConfig()模式
 //  @receiver l
@@ -142,9 +122,7 @@ func (l *Logger) SetDevelopment(enable bool) {
 		return
 	}
 	if l.options.StackWithFmtFormatter {
-		log = log.WithOptions(zap.WrapCore(func(core zapcore.Core) zapcore.Core {
-			return WrapCore(core)
-		}))
+		log = log.WithOptions(zap.WrapCore(WrapCore))
 	}
 	l.Log = log
 	l.Sugar = log.Sugar()

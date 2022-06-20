@@ -24,9 +24,11 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -79,6 +81,7 @@ type Client struct {
 	messageEncoder      message.Encoder
 	clientHandshakeData *session.HandshakeData
 	log                 *zap.Logger
+	onDisconnected      func(reason CloseReason)
 }
 
 // MsgChannel return the incoming message channel
@@ -235,7 +238,7 @@ func (c *Client) handlePackets() {
 		case p := <-c.packetChan:
 			switch p.Type {
 			case packet.Data:
-				//handle data
+				// handle data
 				c.log.Debug("client handle packets got", zap.String("data", string(p.Data)))
 				m, err := message.Decode(p.Data)
 				if err != nil {
@@ -255,9 +258,11 @@ func (c *Client) handlePackets() {
 				c.IncomingMsgChan <- m
 			case packet.Kick:
 				c.log.Warn("got kick packet from the server! disconnecting...")
-				c.Disconnect()
+				c.Disconnect(CloseReasonKicked)
 			}
 		case <-c.closeChan:
+			// 避免业务层 range MsgChannel() 死循环
+			close(c.IncomingMsgChan)
 			return
 		}
 	}
@@ -291,7 +296,7 @@ func (c *Client) readPackets(buf *bytes.Buffer) ([]*packet.Packet, error) {
 
 func (c *Client) handleServerMessages() {
 	buf := bytes.NewBuffer(nil)
-	defer c.Disconnect()
+	defer c.Disconnect(CloseReasonError)
 	for c.Connected {
 		packets, err := c.readPackets(buf)
 		if err != nil && c.Connected {
@@ -309,7 +314,7 @@ func (c *Client) sendHeartbeats(interval int) {
 	t := time.NewTicker(time.Duration(interval) * time.Second)
 	defer func() {
 		t.Stop()
-		c.Disconnect()
+		c.Disconnect(CloseReasonError)
 	}()
 	for {
 		select {
@@ -327,59 +332,64 @@ func (c *Client) sendHeartbeats(interval int) {
 }
 
 // Disconnect disconnects the client
-func (c *Client) Disconnect() {
+func (c *Client) Disconnect(reason CloseReason) {
 	if c.Connected {
 		c.Connected = false
 		close(c.closeChan)
 		c.conn.Close()
+		if c.onDisconnected != nil {
+			c.onDisconnected(reason)
+		}
 	}
+}
+
+func (c *Client) OnDisconnected(callback func(reason CloseReason)) {
+	c.onDisconnected = callback
 }
 
 // ConnectTo connects to the server at addr, for now the only supported protocol is tcp
 // if tlsConfig is sent, it connects using TLS
-func (c *Client) ConnectTo(addr string, tlsConfig ...*tls.Config) error {
-	var conn net.Conn
-	var err error
+func (c *Client) ConnectTo(uri string, tlsConfig ...*tls.Config) error {
+	if !strings.Contains(uri, "://") {
+		uri += "tcp://"
+	}
+	u, err := url.ParseRequestURI(uri)
+	if err != nil {
+		return err
+	}
+	var tlsCfg *tls.Config
 	if len(tlsConfig) > 0 {
-		conn, err = tls.Dial("tcp", addr, tlsConfig[0])
+		tlsCfg = tlsConfig[0]
 	} else {
-		conn, err = net.Dial("tcp", addr)
+		tlsCfg = &tls.Config{}
+	}
+	switch u.Scheme {
+	case "wss":
+		tlsCfg.InsecureSkipVerify = true
+		fallthrough
+	case "ws":
+		dialer := websocket.DefaultDialer
+		dialer.TLSClientConfig = tlsCfg
+		var wsconn *websocket.Conn
+		wsconn, _, err = dialer.Dial(u.String(), nil)
+		if err != nil {
+			return err
+		}
+		c.conn, err = acceptor.NewWSConn(wsconn)
+		if err != nil {
+			return err
+		}
+	case "tcps", "tls":
+		tlsCfg.InsecureSkipVerify = true
+		c.conn, err = tls.Dial("tcp", uri, tlsCfg)
+	case "tcp":
+		c.conn, err = net.Dial("tcp", uri)
+	default:
+		return errors.New("unSupport schme:" + u.Scheme)
 	}
 	if err != nil {
 		return err
 	}
-	c.conn = conn
-	c.IncomingMsgChan = make(chan *message.Message, 10)
-
-	if err = c.handleHandshake(); err != nil {
-		return err
-	}
-
-	c.closeChan = make(chan struct{})
-
-	return nil
-}
-
-// ConnectToWS connects using webshocket protocol
-func (c *Client) ConnectToWS(addr string, path string, tlsConfig ...*tls.Config) error {
-	u := url.URL{Scheme: "ws", Host: addr, Path: path}
-	dialer := websocket.DefaultDialer
-
-	if len(tlsConfig) > 0 {
-		dialer.TLSClientConfig = tlsConfig[0]
-		u.Scheme = "wss"
-	}
-
-	conn, _, err := dialer.Dial(u.String(), nil)
-	if err != nil {
-		return err
-	}
-
-	c.conn, err = acceptor.NewWSConn(conn)
-	if err != nil {
-		return err
-	}
-
 	c.IncomingMsgChan = make(chan *message.Message, 10)
 
 	if err = c.handleHandshake(); err != nil {
