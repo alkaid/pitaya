@@ -261,8 +261,6 @@ func (c *Client) handlePackets() {
 				c.Disconnect(CloseReasonKicked)
 			}
 		case <-c.closeChan:
-			// 避免业务层 range MsgChannel() 死循环
-			close(c.IncomingMsgChan)
 			return
 		}
 	}
@@ -351,7 +349,7 @@ func (c *Client) OnDisconnected(callback func(reason CloseReason)) {
 // if tlsConfig is sent, it connects using TLS
 func (c *Client) ConnectTo(uri string, tlsConfig ...*tls.Config) error {
 	if !strings.Contains(uri, "://") {
-		uri += "tcp://"
+		uri = "tcp://" + uri
 	}
 	u, err := url.ParseRequestURI(uri)
 	if err != nil {
@@ -381,9 +379,9 @@ func (c *Client) ConnectTo(uri string, tlsConfig ...*tls.Config) error {
 		}
 	case "tcps", "tls":
 		tlsCfg.InsecureSkipVerify = true
-		c.conn, err = tls.Dial("tcp", uri, tlsCfg)
+		c.conn, err = tls.Dial("tcp", u.Host, tlsCfg)
 	case "tcp":
-		c.conn, err = net.Dial("tcp", uri)
+		c.conn, err = net.Dial("tcp", u.Host)
 	default:
 		return errors.New("unSupport schme:" + u.Scheme)
 	}
