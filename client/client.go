@@ -80,7 +80,6 @@ type Client struct {
 	nextID              uint32
 	messageEncoder      message.Encoder
 	clientHandshakeData *session.HandshakeData
-	log                 *zap.Logger
 	onDisconnected      func(reason CloseReason)
 }
 
@@ -95,7 +94,7 @@ func (c *Client) ConnectedStatus() bool {
 }
 
 // New returns a new client
-func New(log *zap.Logger, requestTimeout ...time.Duration) *Client {
+func New(requestTimeout ...time.Duration) *Client {
 	reqTimeout := 5 * time.Second
 	if len(requestTimeout) > 0 {
 		reqTimeout = requestTimeout[0]
@@ -123,7 +122,6 @@ func New(log *zap.Logger, requestTimeout ...time.Duration) *Client {
 				"age": 30,
 			},
 		},
-		log: log,
 	}
 }
 
@@ -172,7 +170,7 @@ func (c *Client) handleHandshakeResponse() error {
 		return err
 	}
 
-	c.log.Debug("got handshake from sv", zap.Any("data", handshake))
+	Log.Debug("got handshake from sv", zap.Any("data", handshake))
 
 	if handshake.Sys.Dict != nil {
 		message.SetDictionary(handshake.Sys.Dict)
@@ -239,10 +237,10 @@ func (c *Client) handlePackets() {
 			switch p.Type {
 			case packet.Data:
 				// handle data
-				c.log.Debug("client handle packets got", zap.String("data", string(p.Data)))
+				Log.Debug("client handle packets got", zap.String("data", string(p.Data)))
 				m, err := message.Decode(p.Data)
 				if err != nil {
-					c.log.Error("error decoding msg from sv", zap.String("data", string(m.Data)))
+					Log.Error("error decoding msg from sv", zap.String("data", string(m.Data)))
 				}
 				if m.Type == message.Response {
 					c.pendingReqMutex.Lock()
@@ -257,7 +255,7 @@ func (c *Client) handlePackets() {
 				}
 				c.IncomingMsgChan <- m
 			case packet.Kick:
-				c.log.Warn("got kick packet from the server! disconnecting...")
+				Log.Warn("got kick packet from the server! disconnecting...")
 				c.Disconnect(CloseReasonKicked)
 			}
 		case <-c.closeChan:
@@ -281,7 +279,7 @@ func (c *Client) readPackets(buf *bytes.Buffer) ([]*packet.Packet, error) {
 	}
 	packets, err := c.packetDecoder.Decode(buf.Bytes())
 	if err != nil {
-		c.log.Error("error decoding packet from server", zap.Error(err))
+		Log.Error("error decoding packet from server", zap.Error(err))
 	}
 	totalProcessed := 0
 	for _, p := range packets {
@@ -298,7 +296,7 @@ func (c *Client) handleServerMessages() {
 	for c.Connected {
 		packets, err := c.readPackets(buf)
 		if err != nil && c.Connected {
-			c.log.Error("", zap.Error(err))
+			Log.Error("", zap.Error(err))
 			break
 		}
 
@@ -320,7 +318,7 @@ func (c *Client) sendHeartbeats(interval int) {
 			p, _ := c.packetEncoder.Encode(packet.Heartbeat, []byte{})
 			_, err := c.conn.Write(p)
 			if err != nil {
-				c.log.Error("error sending heartbeat to server", zap.Error(err))
+				Log.Error("error sending heartbeat to server", zap.Error(err))
 				return
 			}
 		case <-c.closeChan:

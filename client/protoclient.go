@@ -290,9 +290,9 @@ func (pc *ProtoClient) getDescriptors(data string) error {
 }
 
 // Return the basic structure for the ProtoClient struct.
-func newProto(log *zap.Logger, requestTimeout ...time.Duration) *ProtoClient {
+func newProto(requestTimeout ...time.Duration) *ProtoClient {
 	return &ProtoClient{
-		Client:           *New(log, requestTimeout...),
+		Client:           *New(requestTimeout...),
 		descriptorsNames: make(map[string]bool),
 		info: ProtoBufferInfo{
 			Commands: make(map[string]*Command),
@@ -306,7 +306,7 @@ func newProto(log *zap.Logger, requestTimeout ...time.Duration) *ProtoClient {
 
 // NewProto returns a new protoclient with the auto documentation route.
 func NewProto(docsRoute string, log *zap.Logger, requestTimeout ...time.Duration) *ProtoClient {
-	newclient := newProto(log, requestTimeout...)
+	newclient := newProto(requestTimeout...)
 	newclient.docsRoute = docsRoute
 	return newclient
 }
@@ -314,7 +314,7 @@ func NewProto(docsRoute string, log *zap.Logger, requestTimeout ...time.Duration
 // NewWithDescriptor returns a new protoclient with the descriptors route and
 // auto documentation route.
 func NewWithDescriptor(descriptorsRoute string, docsRoute string, log *zap.Logger, requestTimeout ...time.Duration) *ProtoClient {
-	newclient := newProto(log, requestTimeout...)
+	newclient := newProto(requestTimeout...)
 	newclient.docsRoute = docsRoute
 	newclient.descriptorsRoute = descriptorsRoute
 	return newclient
@@ -382,12 +382,12 @@ func (pc *ProtoClient) waitForData() {
 				errMsg := &apierrors.Status{}
 				err := proto.Unmarshal(response.Data, errMsg)
 				if err != nil {
-					pc.log.Error("Erro decode error", zap.String("data", string(response.Data)))
+					Log.Error("Erro decode error", zap.String("data", string(response.Data)))
 					continue
 				}
 				response.Data, err = json.Marshal(errMsg)
 				if err != nil {
-					pc.log.Error("error encode error to json", zap.String("data", string(response.Data)))
+					Log.Error("error encode error to json", zap.String("data", string(response.Data)))
 					continue
 				}
 				pc.IncomingMsgChan <- response
@@ -395,19 +395,19 @@ func (pc *ProtoClient) waitForData() {
 			}
 
 			if inputMsg == nil {
-				pc.log.Error("not expected data", zap.String("data", string(response.Data)))
+				Log.Error("not expected data", zap.String("data", string(response.Data)))
 				continue
 			}
 
 			err := proto.Unmarshal(response.Data, inputMsg)
 			if err != nil {
-				pc.log.Error("error decode data", zap.String("data", string(response.Data)))
+				Log.Error("error decode data", zap.String("data", string(response.Data)))
 				continue
 			}
 
 			data, err2 := protojson.Marshal(inputMsg)
 			if err2 != nil {
-				pc.log.Error("error encode data to json", zap.String("data", string(response.Data)))
+				Log.Error("error encode data to json", zap.String("data", string(response.Data)))
 				continue
 			}
 
