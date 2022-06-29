@@ -8,53 +8,59 @@ import (
 	"github.com/topfreegames/pitaya/v2/metrics/models"
 )
 
-// type ConfigAll struct {
-// 	Pitaya struct{
-// 		PitayaConfig
-// 		Cluster struct{
-// 			Info InfoRetrieverConfig
-// 			Rpc struct{
-// 				Client struct{
-// 					Grpc GRPCClientConfig
-// 					Nats NatsRPCClientConfig
-// 				}
-// 				Server struct{
-// 					Grpc GRPCServerConfig
-// 					Nats NatsRPCServerConfig
-// 				}
-// 			}
-// 			Sd struct{
-// 				Etcd EtcdServiceDiscoveryConfig
-// 			}
-// 		}
-// 		groups struct{
-// 			Etcd EtcdGroupServiceConfig
-// 			Memory MemoryGroupConfig
-// 		}
-// 		Modules struct{
-// 			BindingStorage struct{
-// 				Etcd ETCDBindingConfig
-// 			}
-// 		}
-// 		Conn struct{
-// 			RateLimiting RateLimitingConfig
-// 		}
-//
-// 		Metrics struct {
-// 			Prometheus struct {
-// 				Enabled bool
-// 			}
-// 			Statsd struct {
-// 				Enabled bool
-// 			}
-// 		}
-// 		DefaultPipelines struct {
-// 			StructValidation struct {
-// 				Enabled bool
-// 			}
-// 		}
-// 	}
-// }
+type PitayaAll struct {
+	PitayaConfig `mapstructure:",squash"`
+	Cluster      struct {
+		Info InfoRetrieverConfig
+		Rpc  struct {
+			Client struct {
+				Grpc GRPCClientConfig
+				Nats NatsRPCClientConfig
+			}
+			Server struct {
+				Grpc GRPCServerConfig
+				Nats NatsRPCServerConfig
+			}
+		}
+		Sd struct {
+			Etcd EtcdServiceDiscoveryConfig
+		}
+	}
+	DefaultPipelines struct {
+		StructValidation struct {
+			Enabled bool
+		}
+	}
+	Groups struct {
+		Etcd   EtcdGroupServiceConfig
+		Memory MemoryGroupConfig
+	}
+	Metrics struct {
+		Prometheus struct {
+			PrometheusConfig `mapstructure:",squash"`
+			Enabled          bool
+		}
+		Statsd struct {
+			StatsdConfig `mapstructure:",squash"`
+			Enabled      bool
+		}
+	}
+	Modules struct {
+		BindingStorage struct {
+			Etcd ETCDBindingConfig
+		}
+	}
+	Conn struct {
+		RateLimiting RateLimitingConfig
+	}
+	Worker struct {
+		WorkerConfig `mapstructure:",squash"`
+		Retry        EnqueueOpts
+	}
+	Storage struct {
+		Redis RedisConfig
+	}
+}
 
 // PitayaConfig provides configuration for a pitaya app
 type PitayaConfig struct {
@@ -88,14 +94,8 @@ type PitayaConfig struct {
 	Metrics struct {
 		Period time.Duration
 	}
-	Conf struct {
-		FilePath  []string      // 配置文件路径,不为空表明使用本地文件配置
-		EtcdAddr  string        // Etcd地址,不为空表明使用远程etcd配置
-		EtcdKeys  []string      // 要读取监听的etcd key列表
-		Interval  time.Duration // 重载间隔
-		Formatter string        // 配置格式 必须为 viper.SupportedRemoteProviders
-	}
-	Log struct {
+	ConfSource ConfSource // 配置源
+	Log        struct {
 		Development bool   // 是否开发模式
 		Level       string // 日志等级
 	}
@@ -105,6 +105,16 @@ type PitayaConfig struct {
 type CoroutineConfig struct {
 	Nums    int
 	Buffers int
+}
+type ConfSource struct {
+	FilePath []string // 配置文件路径,不为空表明使用本地文件配置
+	Etcd     struct {
+		DialTimeout time.Duration
+		Endpoints   []string // Etcd地址,不为空表明使用远程etcd配置
+		Keys        []string // 要读取监听的etcd key列表
+	}
+	Interval  time.Duration // 重载间隔
+	Formatter string        // 配置格式 必须为 viper.SupportedRemoteProviders
 }
 
 // NewDefaultPitayaConfig provides default configuration for Pitaya App
@@ -169,13 +179,7 @@ func NewDefaultPitayaConfig() *PitayaConfig {
 		}{
 			Period: time.Duration(15 * time.Second),
 		},
-		Conf: struct {
-			FilePath  []string
-			EtcdAddr  string
-			EtcdKeys  []string
-			Interval  time.Duration
-			Formatter string
-		}{
+		ConfSource: ConfSource{
 			Interval: time.Duration(5 * time.Minute),
 		},
 		Log: struct {

@@ -305,7 +305,7 @@ func newProto(requestTimeout ...time.Duration) *ProtoClient {
 }
 
 // NewProto returns a new protoclient with the auto documentation route.
-func NewProto(docsRoute string, log *zap.Logger, requestTimeout ...time.Duration) *ProtoClient {
+func NewProto(docsRoute string, requestTimeout ...time.Duration) *ProtoClient {
 	newclient := newProto(requestTimeout...)
 	newclient.docsRoute = docsRoute
 	return newclient
@@ -313,7 +313,7 @@ func NewProto(docsRoute string, log *zap.Logger, requestTimeout ...time.Duration
 
 // NewWithDescriptor returns a new protoclient with the descriptors route and
 // auto documentation route.
-func NewWithDescriptor(descriptorsRoute string, docsRoute string, log *zap.Logger, requestTimeout ...time.Duration) *ProtoClient {
+func NewWithDescriptor(descriptorsRoute string, docsRoute string, requestTimeout ...time.Duration) *ProtoClient {
 	newclient := newProto(requestTimeout...)
 	newclient.docsRoute = docsRoute
 	newclient.descriptorsRoute = descriptorsRoute

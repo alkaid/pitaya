@@ -21,12 +21,14 @@
 package config
 
 import (
+	"errors"
 	"strings"
 	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/spf13/viper"
+	_ "github.com/spf13/viper/remote"
 	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/logger"
 )
@@ -61,10 +63,11 @@ func (l LoaderFactory) Provide() (key string, confStruct interface{}) {
 
 // Config is a wrapper around a viper config
 type Config struct {
-	config   *viper.Viper
-	loaders  []ConfLoader
-	confconf *confMap // 配置的配置
-	onWatch  chan struct{}
+	config    *viper.Viper
+	loaders   []ConfLoader
+	onWatch   chan struct{}
+	pitayaAll *PitayaAll
+	inited    bool
 }
 
 // NewConfig creates a new config with a given viper config if given
@@ -79,9 +82,9 @@ func NewConfig(cfgs ...*viper.Viper) *Config {
 	cfg.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	cfg.AutomaticEnv()
 	c := &Config{
-		config:   cfg,
-		confconf: &confMap{},
-		onWatch:  make(chan struct{}, 20),
+		config:    cfg,
+		pitayaAll: &PitayaAll{},
+		onWatch:   make(chan struct{}, 20),
 	}
 	c.fillDefaultValues()
 	c.AddLoader(c)
@@ -186,13 +189,14 @@ func (c *Config) fillDefaultValues() {
 		"pitaya.storage.redis.addrs":    redisConfig.Addrs,
 		"pitaya.storage.redis.username": redisConfig.Username,
 		"pitaya.storage.redis.password": redisConfig.Password,
-		"pitaya.conf.filepath":          pitayaConfig.Conf.FilePath,
-		"pitaya.conf.etcdaddr":          pitayaConfig.Conf.EtcdAddr,
-		"pitaya.conf.etcdkeys":          pitayaConfig.Conf.EtcdKeys,
-		"pitaya.conf.interval":          pitayaConfig.Conf.Interval,
-		"pitaya.conf.formatter":         pitayaConfig.Conf.Formatter,
 		"pitaya.log.development":        pitayaConfig.Log.Development,
 		"pitaya.log.level":              pitayaConfig.Log.Level,
+		// 配置的来源,比较特殊 由上层提供默认值
+		// "pitaya.confsource.filepath":         pitayaConfig.ConfSource.FilePath,
+		// "pitaya.confsource.etcd.endpoints":   pitayaConfig.ConfSource.Etcd.Endpoints,
+		// "pitaya.confsource.etcd.keys":        pitayaConfig.ConfSource.Etcd.Keys,
+		// "pitaya.confsource.etcd.dialtimeout": pitayaConfig.ConfSource.Etcd.DialTimeout,
+		// "pitaya.confsource.formatter":        pitayaConfig.ConfSource.Formatter,
 	}
 
 	for param := range defaultsMap {
@@ -200,6 +204,16 @@ func (c *Config) fillDefaultValues() {
 			c.config.SetDefault(param, defaultsMap[param])
 		}
 	}
+}
+
+// PitayaAll 获取框架配置
+//  @receiver c
+//  @return PitayaAll
+func (c *Config) PitayaAll() PitayaAll {
+	return *c.pitayaAll
+}
+func (c *Config) Viper() *viper.Viper {
+	return c.config
 }
 
 func (c *Config) AddLoader(loader ConfLoader) {
@@ -213,6 +227,7 @@ func (c *Config) reloadAll() {
 			continue
 		}
 		var err error
+		// TODO 这里可以优化 已经反序列化过的类型可以缓存起来
 		if key != "" {
 			err = c.UnmarshalKey(key, confStruct)
 		} else {
@@ -230,37 +245,33 @@ func (c *Config) Reload(key string, confStruct interface{}) {
 	// cm:=confStruct.(*confMap)
 }
 func (c *Config) Provide() (key string, confStruct interface{}) {
-	return "pitaya.config", c.confconf
-}
-
-type confMap struct {
-	FilePath  []string      // 配置文件路径,不为空表明使用本地文件配置
-	EtcdAddr  string        // Etcd地址,不为空表明使用远程etcd配置
-	EtcdKeys  []string      // 要读取监听的etcd key列表
-	Interval  time.Duration // 重载间隔
-	Formatter string        // 配置格式 必须为 viper.SupportedRemoteProviders
+	return "pitaya", c.pitayaAll
 }
 
 // InitLoad 初始化加载本地或远程配置.业务层创建App前调用,仅允许一次
 //  @receiver c
 func (c *Config) InitLoad() error {
-	cm := c.confconf
-	err := c.UnmarshalKey("pitaya.conf", cm)
+	if c.inited {
+		return errors.New("config already inited")
+	}
+	c.inited = true
+	err := c.UnmarshalKey("pitaya", c.pitayaAll)
 	if err != nil {
 		return err
 	}
-	if len(cm.FilePath) > 0 {
-		for _, fp := range cm.FilePath {
+	cnf := c.pitayaAll.ConfSource
+	if len(cnf.FilePath) > 0 {
+		for _, fp := range cnf.FilePath {
 			c.config.AddConfigPath(fp)
 		}
 		c.config.ReadInConfig()
 	}
-	if len(cm.EtcdKeys) > 0 && cm.EtcdAddr != "" {
-		if cm.Formatter != "" {
-			c.config.SetConfigType(cm.Formatter)
+	if len(cnf.Etcd.Keys) > 0 && len(cnf.Etcd.Endpoints) > 0 {
+		if cnf.Formatter != "" {
+			c.config.SetConfigType(cnf.Formatter)
 		}
-		for _, key := range cm.EtcdKeys {
-			c.config.AddRemoteProvider("etcd", cm.EtcdAddr, key)
+		for _, key := range cnf.Etcd.Keys {
+			c.config.AddRemoteProviderCluster("etcd3", cnf.Etcd.Endpoints, key)
 		}
 		err = c.config.ReadRemoteConfig()
 		if err != nil {
@@ -275,24 +286,22 @@ func (c *Config) InitLoad() error {
 //  @receiver c
 //  @return error
 func (c *Config) watch() error {
-	cm := &confMap{}
-	err := c.UnmarshalKey("pitaya.conf", cm)
+	cnf := &ConfSource{}
+	err := c.UnmarshalKey("pitaya.confsource", cnf)
 	if err != nil {
 		return err
 	}
-	if len(cm.FilePath) > 0 {
+	if len(cnf.FilePath) > 0 {
 		c.config.WatchConfig()
 	}
-	if len(cm.EtcdKeys) > 0 && cm.EtcdAddr != "" {
+	if len(cnf.Etcd.Keys) > 0 && len(cnf.Etcd.Endpoints) > 0 {
 		err = c.config.WatchRemoteConfigWithChannel(c.onWatch)
 		if err != nil {
 			return err
 		}
 	}
-	// TODO 暂时用loop实现配置重载,后期fork viper修改watchKeyValueConfigOnChannel()添加回调来实现
 	co.Go(func() {
 		for {
-			// time.Sleep(c.confconf.Interval)
 			<-c.onWatch
 			c.reloadAll()
 		}
@@ -357,11 +366,11 @@ func NewConfigModule(core *Config) *_ConfigModule {
 }
 
 func (c *_ConfigModule) Init() error {
-	c.core.reloadAll()
-	c.core.watch()
 	return nil
 }
 func (c *_ConfigModule) AfterInit() {
+	c.core.reloadAll()
+	c.core.watch()
 }
 func (c *_ConfigModule) BeforeShutdown() {
 

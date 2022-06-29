@@ -2,6 +2,7 @@ package co
 
 import (
 	"hash/crc32"
+	"math"
 	"strconv"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 
 const (
 	GroupIdPitaya = "_pitaya"
+	MainThreadID  = math.MaxInt // 主线程ID
 )
 
 // LooperInstance 全局默认 Looper. 框架内部私有,若非特殊需求请勿直接调用
@@ -147,6 +149,12 @@ func Go(task func()) {
 		logger.Zap.Error("submit task error", zap.Error(err))
 		return
 	}
+}
+
+// GoMain 派发到主线程
+//  @param task
+func GoMain(task func()) {
+	GoByID(MainThreadID, task)
 }
 
 // Init was called to initialize the component.
