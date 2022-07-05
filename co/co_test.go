@@ -26,3 +26,21 @@ func TestAwait(t *testing.T) {
 	// })
 	// t.Log("a=", a)
 }
+
+func TestGoByID(t *testing.T) {
+	help()
+	go func() {
+		GoByID(1, func() {
+			println(1)
+		})
+	}()
+	GoByID(1, func() {
+		println(2)
+	})
+	go func() {
+		GoByID(1, func() {
+			println(3)
+		})
+	}()
+	// select {}
+}

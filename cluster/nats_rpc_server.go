@@ -63,7 +63,7 @@ type NatsRPCServer struct {
 	userPushCh             chan *protos.Push
 	userKickCh             chan *protos.KickMsg
 	sub                    *nats.Subscription
-	broadcastSubs          []*nats.Subscription //广播订阅
+	broadcastSubs          []*nats.Subscription // 广播订阅
 	dropped                int
 	pitayaServer           protos.PitayaServer
 	metricsReporters       []metrics.Reporter
@@ -217,7 +217,7 @@ func (ns *NatsRPCServer) handleMessages() {
 			if err != nil {
 				logger.Log.Errorf("error getting number of dropped messages: %s", err.Error())
 			}
-			//添加广播订阅的消息丢失日志和统计
+			// 添加广播订阅的消息丢失日志和统计
 			for i := 0; i < len(ns.broadcastSubs); i++ {
 				tmpDropped, err := ns.broadcastSubs[i].Dropped()
 				if err != nil {
@@ -231,7 +231,7 @@ func (ns *NatsRPCServer) handleMessages() {
 			}
 			subsChanLen := float64(len(ns.subChan))
 			maxPending = math.Max(float64(maxPending), subsChanLen)
-			logger.Log.Debugf("subs channel size: %d, max: %d, dropped: %d", subsChanLen, maxPending, dropped)
+			logger.Log.Debugf("subs channel size: %f, max: %f, dropped: %d", subsChanLen, maxPending, dropped)
 			req := &protos.Request{}
 			// TODO: Add tracing here to report delay to start processing message in spans
 			err = proto.Unmarshal(msg.Data, req)
@@ -380,33 +380,35 @@ func (ns *NatsRPCServer) Init() error {
 		return err
 	}
 	ns.broadcastSubs = append(ns.broadcastSubs, bcstSub)
-	//topic = GetForkTopic("", false)
-	//queue = NeedQueueSubscribe(ns.server, true, false)
-	//if bcstSub, err = ns.subscribe(topic, queue); err != nil {
+	// topic = GetForkTopic("", false)
+	// queue = NeedQueueSubscribe(ns.server, true, false)
+	// if bcstSub, err = ns.subscribe(topic, queue); err != nil {
 	//	return err
-	//}
-	//ns.broadcastSubs = append(ns.broadcastSubs, bcstSub)
-	//topic = GetForkTopic(ns.server.Type)
-	//if bcstSub, err = ns.subscribe(topic, false); err != nil {
+	// }
+	// ns.broadcastSubs = append(ns.broadcastSubs, bcstSub)
+	// topic = GetForkTopic(ns.server.Type)
+	// if bcstSub, err = ns.subscribe(topic, false); err != nil {
 	//	return err
-	//}
-	//ns.broadcastSubs = append(ns.broadcastSubs, bcstSub)
-	//topic = GetForkTopic("", true)
-	//queue = NeedQueueSubscribe(ns.server, true, true)
-	//if bcstSub, err = ns.subscribe(topic, queue); err != nil {
+	// }
+	// ns.broadcastSubs = append(ns.broadcastSubs, bcstSub)
+	// topic = GetForkTopic("", true)
+	// queue = NeedQueueSubscribe(ns.server, true, true)
+	// if bcstSub, err = ns.subscribe(topic, queue); err != nil {
 	//	return err
-	//}
-	//ns.broadcastSubs = append(ns.broadcastSubs, bcstSub)
+	// }
+	// ns.broadcastSubs = append(ns.broadcastSubs, bcstSub)
 
 	err = ns.subscribeToBindingsChannel()
 	if err != nil {
 		return err
 	}
 	// this handles remote messages
-	for i := 0; i < ns.service; i++ {
-		threadID := i // 避免闭包值拷贝问题
-		co.Go(func() { ns.processMessages(threadID) })
-	}
+	// for i := 0; i < ns.service; i++ {
+	// 	threadID := i // 避免闭包值拷贝问题
+	// 	co.Go(func() { ns.processMessages(threadID) })
+	// }
+	// 以上改为单线程 使投递过程保序 投递后再session多线程处理
+	co.Go(func() { ns.processMessages(0) })
 
 	ns.sessionPool.OnSessionBind(ns.onSessionBind)
 
