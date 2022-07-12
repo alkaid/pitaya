@@ -27,11 +27,9 @@ import (
 	"github.com/topfreegames/pitaya/v2/constants"
 	pcontext "github.com/topfreegames/pitaya/v2/context"
 	"github.com/topfreegames/pitaya/v2/interfaces"
-	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/protos"
 	"github.com/topfreegames/pitaya/v2/route"
 	"github.com/topfreegames/pitaya/v2/session"
-	"github.com/topfreegames/pitaya/v2/tracing"
 )
 
 // RPCServer interface
@@ -129,16 +127,13 @@ func buildRequest(
 	msg *message.Message,
 	thisServer *Server,
 ) (protos.Request, error) {
+	var err error
 	req := protos.Request{
 		Type: rpcType,
 		Msg: &protos.Msg{
 			Route: route.String(),
 			Data:  msg.Data,
 		},
-	}
-	ctx, err := tracing.InjectSpan(ctx)
-	if err != nil {
-		logger.Log.Errorf("failed to inject span: %s", err)
 	}
 	ctx = pcontext.AddToPropagateCtx(ctx, constants.PeerIDKey, thisServer.ID)
 	ctx = pcontext.AddToPropagateCtx(ctx, constants.PeerServiceKey, thisServer.Type)

@@ -46,9 +46,6 @@ import (
 	"github.com/topfreegames/pitaya/v2/serialize"
 	"github.com/topfreegames/pitaya/v2/serialize/json"
 	"github.com/topfreegames/pitaya/v2/serialize/protobuf"
-	"github.com/topfreegames/pitaya/v2/tracing"
-
-	opentracing "github.com/opentracing/opentracing-go"
 )
 
 func getLoggerFromArgs(args []reflect.Value) interfaces.Logger {
@@ -197,29 +194,6 @@ func CtxWithDefaultLogger(ctx context.Context, route, userID string) context.Con
 	)
 
 	return context.WithValue(ctx, constants.LoggerCtxKey, defaultLogger)
-}
-
-// StartSpanFromRequest starts a tracing span from the request
-func StartSpanFromRequest(
-	ctx context.Context,
-	serverID, route string,
-) context.Context {
-	if ctx == nil {
-		return nil
-	}
-	tags := opentracing.Tags{
-		"local.id":     serverID,
-		"span.kind":    "server",
-		"peer.id":      pcontext.GetFromPropagateCtx(ctx, constants.PeerIDKey),
-		"peer.service": pcontext.GetFromPropagateCtx(ctx, constants.PeerServiceKey),
-		"request.id":   pcontext.GetFromPropagateCtx(ctx, constants.RequestIDKey),
-	}
-	parent, err := tracing.ExtractSpan(ctx)
-	if err != nil {
-		logger.Log.Warnf("failed to retrieve parent span: %s", err.Error())
-	}
-	ctx = tracing.StartSpan(ctx, route, tags, parent)
-	return ctx
 }
 
 // GetContextFromRequest gets the context from a request

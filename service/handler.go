@@ -24,17 +24,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
+	"strconv"
 	"time"
 
 	"github.com/alkaid/goerrors/apierrors"
 
-	"github.com/nats-io/nuid"
 	"github.com/topfreegames/pitaya/v2/acceptor"
 	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/pipeline"
 
-	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/topfreegames/pitaya/v2/agent"
 	"github.com/topfreegames/pitaya/v2/cluster"
 	"github.com/topfreegames/pitaya/v2/component"
@@ -191,7 +189,7 @@ func (h *HandlerService) Handle(conn acceptor.PlayerConn) {
 
 		if err != nil {
 			if err != constants.ErrConnectionClosed {
-				logger.Log.Errorf("Error reading next available message: %s", err.Error())
+				logger.Log.Warnf("Error reading next available message: %s", err.Error())
 			}
 
 			return
@@ -276,18 +274,10 @@ func (h *HandlerService) processPacket(a agent.Agent, p *packet.Packet) error {
 }
 
 func (h *HandlerService) processMessage(a agent.Agent, msg *message.Message) {
-	requestID := nuid.New()
+	requestID := strconv.Itoa(int(msg.ID))
 	ctx := pcontext.AddToPropagateCtx(context.Background(), constants.StartTimeKey, time.Now().UnixNano())
 	ctx = pcontext.AddToPropagateCtx(ctx, constants.RouteKey, msg.Route)
 	ctx = pcontext.AddToPropagateCtx(ctx, constants.RequestIDKey, requestID)
-	tags := opentracing.Tags{
-		"local.id":   h.server.ID,
-		"span.kind":  "server",
-		"msg.type":   strings.ToLower(msg.Type.String()),
-		"user.id":    a.GetSession().UID(),
-		"request.id": requestID,
-	}
-	ctx = tracing.StartSpan(ctx, msg.Route, tags)
 	ctx = context.WithValue(ctx, constants.SessionCtxKey, a.GetSession())
 
 	r, err := route.Decode(msg.Route)
@@ -296,6 +286,17 @@ func (h *HandlerService) processMessage(a agent.Agent, msg *message.Message) {
 		a.AnswerWithError(ctx, msg.ID, apierrors.BadRequest("", "Failed to decode route", "").WithCause(err))
 		return
 	}
+
+	spanInfo := &tracing.SpanInfo{
+		RpcSystem: "pitaya",
+		IsClient:  false,
+		Route:     r,
+		PeerType:  r.SvType,
+		LocalID:   h.server.ID,
+		LocalType: h.server.Type,
+		RequestID: requestID,
+	}
+	ctx = tracing.RPCStartSpan(ctx, spanInfo)
 
 	if r.SvType == "" {
 		r.SvType = h.server.Type

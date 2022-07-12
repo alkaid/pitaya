@@ -28,7 +28,6 @@ import (
 
 	"github.com/alkaid/goerrors/apierrors"
 
-	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
@@ -99,22 +98,22 @@ func (gs *GRPCClient) Call(
 	msg *message.Message,
 	server *Server,
 ) (*protos.Response, error) {
+	var err error
 	c, ok := gs.clientMap.Load(server.ID)
 	if !ok {
 		return nil, constants.ErrNoConnectionToServer
 	}
-
-	parent, err := tracing.ExtractSpan(ctx)
-	if err != nil {
-		logger.Log.Warnf("[grpc client] failed to retrieve parent span: %s", err.Error())
+	spanInfo := &tracing.SpanInfo{
+		RpcSystem: "grpc",
+		IsClient:  true,
+		Route:     route,
+		PeerID:    server.ID,
+		PeerType:  server.Type,
+		LocalID:   gs.server.ID,
+		LocalType: gs.server.Type,
+		RequestID: "",
 	}
-	tags := opentracing.Tags{
-		"span.kind":       "client",
-		"local.id":        gs.server.ID,
-		"peer.serverType": server.Type,
-		"peer.id":         server.ID,
-	}
-	ctx = tracing.StartSpan(ctx, "GRPC RPC Call", tags, parent)
+	ctx = tracing.RPCStartSpan(ctx, spanInfo)
 	defer tracing.FinishSpan(ctx, err)
 
 	req, err := buildRequest(ctx, rpcType, route, session, msg, gs.server)
@@ -260,7 +259,7 @@ func (gs *GRPCClient) RemoveServer(sv *Server) {
 }
 
 func (gs *GRPCClient) ModifyServer(sv *Server, old *Server) {
-	//do nothing
+	// do nothing
 }
 
 // AfterInit runs after initialization

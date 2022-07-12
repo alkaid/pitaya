@@ -25,7 +25,7 @@ import (
 	"encoding/json"
 	"os"
 
-	workers "github.com/topfreegames/go-workers"
+	workers "github.com/alkaid/go-workers"
 	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/constants"

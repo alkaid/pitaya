@@ -23,71 +23,45 @@ package tracing
 import (
 	"context"
 
-	opentracing "github.com/opentracing/opentracing-go"
+	"github.com/topfreegames/pitaya/v2/route"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/baggage"
+	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
+
+	"go.opentelemetry.io/otel/codes"
+
+	"go.opentelemetry.io/otel"
+
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/topfreegames/pitaya/v2/constants"
 	pcontext "github.com/topfreegames/pitaya/v2/context"
-	"github.com/topfreegames/pitaya/v2/logger"
 )
 
-func castValueToCarrier(val interface{}) (opentracing.TextMapCarrier, error) {
-	if v, ok := val.(opentracing.TextMapCarrier); ok {
-		return v, nil
-	}
-	if m, ok := val.(map[string]interface{}); ok {
-		carrier := map[string]string{}
-		for k, v := range m {
-			if s, ok := v.(string); ok {
-				carrier[k] = s
-			} else {
-				logger.Log.Warnf("value from span carrier cannot be cast to string: %+v", v)
-			}
-		}
-		return opentracing.TextMapCarrier(carrier), nil
-	}
-	return nil, constants.ErrInvalidSpanCarrier
-}
+const TraceName = "pitaya"
 
 // ExtractSpan retrieves an opentracing span context from the given context.Context
 // The span context can be received directly (inside the context) or via an RPC call
 // (encoded in binary format)
-func ExtractSpan(ctx context.Context) (opentracing.SpanContext, error) {
-	var spanCtx opentracing.SpanContext
-	span := opentracing.SpanFromContext(ctx)
-	if span == nil {
-		if s := pcontext.GetFromPropagateCtx(ctx, constants.SpanPropagateCtxKey); s != nil {
-			var err error
-			carrier, err := castValueToCarrier(s)
-			if err != nil {
-				return nil, err
-			}
-			tracer := opentracing.GlobalTracer()
-			spanCtx, err = tracer.Extract(opentracing.TextMap, carrier)
-			if err != nil {
-				return nil, err
-			}
-		} else {
-			return nil, nil
-		}
-	} else {
-		spanCtx = span.Context()
+func ExtractSpan(ctx context.Context) (context.Context, trace.SpanContext) {
+	carrier := CarrierFromPropagateCtx(ctx)
+	if carrier != nil {
+		ctx = otel.GetTextMapPropagator().Extract(ctx, carrier)
 	}
-	return spanCtx, nil
+	bags := baggage.FromContext(ctx)
+	ctx = baggage.ContextWithBaggage(ctx, bags)
+	return ctx, trace.SpanContextFromContext(ctx)
 }
 
 // InjectSpan retrieves an opentrancing span from the current context and creates a new context
 // with it encoded in binary format inside the propagatable context content
-func InjectSpan(ctx context.Context) (context.Context, error) {
-	span := opentracing.SpanFromContext(ctx)
-	if span == nil {
-		return ctx, nil
+func InjectSpan(ctx context.Context) context.Context {
+	carrier := CarrierFromPropagateCtx(ctx)
+	if carrier == nil {
+		carrier = make(Carrier)
 	}
-	spanData := opentracing.TextMapCarrier{}
-	tracer := opentracing.GlobalTracer()
-	err := tracer.Inject(span.Context(), opentracing.TextMap, spanData)
-	if err != nil {
-		return nil, err
-	}
-	return pcontext.AddToPropagateCtx(ctx, constants.SpanPropagateCtxKey, spanData), nil
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+	return pcontext.AddToPropagateCtx(ctx, constants.SpanPropagateCtxKey, carrier)
 }
 
 // StartSpan starts a new span with a given parent context, operation name, tags and
@@ -95,15 +69,10 @@ func InjectSpan(ctx context.Context) (context.Context, error) {
 func StartSpan(
 	parentCtx context.Context,
 	opName string,
-	tags opentracing.Tags,
-	reference ...opentracing.SpanContext,
-) context.Context {
-	var ref opentracing.SpanContext
-	if len(reference) > 0 {
-		ref = reference[0]
-	}
-	span := opentracing.StartSpan(opName, opentracing.ChildOf(ref), tags)
-	return opentracing.ContextWithSpan(parentCtx, span)
+	opts ...trace.SpanStartOption,
+) (context.Context, trace.Span) {
+	tr := otel.Tracer(TraceName)
+	return tr.Start(parentCtx, opName, opts...)
 }
 
 // FinishSpan finishes a span retrieved from the given context and logs the error if it exists
@@ -111,12 +80,86 @@ func FinishSpan(ctx context.Context, err error) {
 	if ctx == nil {
 		return
 	}
-	span := opentracing.SpanFromContext(ctx)
-	if span == nil {
+	span := trace.SpanFromContext(ctx)
+	defer span.End()
+	if err == nil {
+		span.SetStatus(codes.Ok, "")
 		return
 	}
-	defer span.Finish()
-	if err != nil {
-		LogError(span, err.Error())
+	LogError(span, err)
+}
+
+type SpanInfo struct {
+	RpcSystem string
+	IsClient  bool
+	Route     *route.Route
+	PeerID    string
+	PeerType  string
+	LocalID   string
+	LocalType string
+	RequestID string
+	MsgType   string
+	UserID    string
+}
+
+func SpanInfoFromRequest(ctx context.Context) *SpanInfo {
+	spInfo := &SpanInfo{}
+	peerTypeAny := pcontext.GetFromPropagateCtx(ctx, constants.PeerServiceKey)
+	if peerTypeAny != nil {
+		spInfo.PeerType = peerTypeAny.(string)
 	}
+	peerIDAny := pcontext.GetFromPropagateCtx(ctx, constants.PeerIDKey)
+	if peerIDAny != nil {
+		spInfo.PeerID = peerIDAny.(string)
+	}
+	if reqIDAny := pcontext.GetFromPropagateCtx(ctx, constants.RequestIDKey); reqIDAny != nil {
+		spInfo.RequestID = reqIDAny.(string)
+	}
+	return spInfo
+}
+
+func RPCStartSpan(ctx context.Context, spanInfo *SpanInfo, attrs ...attribute.KeyValue) context.Context {
+	ctx, parent := ExtractSpan(ctx)
+	attrs = append(attrs, semconv.RPCSystemKey.String(spanInfo.RpcSystem))
+	attrs = append(attrs, semconv.RPCMethodKey.String(spanInfo.Route.Method))
+	attrs = append(attrs, semconv.RPCServiceKey.String(spanInfo.Route.SvType))
+	var clientType, clientID, svID string
+	if spanInfo.IsClient {
+		clientType = spanInfo.LocalType
+		clientID = spanInfo.LocalID
+		svID = spanInfo.PeerID
+	} else {
+		clientType = spanInfo.PeerType
+		clientID = spanInfo.PeerID
+		svID = spanInfo.LocalID
+	}
+	attrs = append(attrs, RPCClientKey.String(clientType))
+	attrs = append(attrs, RPCClientIDKey.String(clientID))
+	attrs = append(attrs, RPCServiceIDKey.String(svID))
+	if spanInfo.RequestID != "" {
+		attrs = append(attrs, attribute.Key("request.id").String(spanInfo.RequestID))
+	}
+	if spanInfo.MsgType != "" {
+		attrs = append(attrs, attribute.Key("msg.type").String(spanInfo.MsgType))
+	}
+	if spanInfo.UserID != "" {
+		attrs = append(attrs, attribute.Key("user.id").String(spanInfo.UserID))
+	}
+	kind := trace.SpanKindServer
+	if spanInfo.IsClient {
+		kind = trace.SpanKindClient
+	}
+	if spanInfo.IsClient {
+		ctx = trace.ContextWithSpanContext(ctx, parent)
+	} else {
+		ctx = trace.ContextWithRemoteSpanContext(ctx, parent)
+	}
+	ctx, _ = StartSpan(ctx,
+		spanInfo.Route.String(),
+		trace.WithSpanKind(kind),
+		trace.WithAttributes(attrs...))
+	if spanInfo.IsClient {
+		ctx = InjectSpan(ctx)
+	}
+	return ctx
 }

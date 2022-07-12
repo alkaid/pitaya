@@ -43,24 +43,24 @@ func (app *App) RPCTo(ctx context.Context, serverID, routeStr string, reply prot
 	return app.doSendRPC(ctx, serverID, routeStr, reply, arg, "")
 }
 
-//Notify
+// Notify
 //  @implement Pitaya.Notify
 func (app *App) Notify(ctx context.Context, routeStr string, arg proto.Message, uid string) error {
 	return app.doSendNotify(ctx, "", routeStr, arg, uid)
 }
 
-//NotifyAll
+// NotifyAll
 //  @implement Pitaya.NotifyAll
 func (app *App) NotifyAll(ctx context.Context, routeStr string, arg proto.Message, uid string) error {
 	return app.doSendNotifyAll(ctx, routeStr, arg, uid)
 }
 
-//Fork implement Pitaya.Fork
+// Fork implement Pitaya.Fork
 func (app *App) Fork(ctx context.Context, routeStr string, arg proto.Message, uid string) error {
 	return app.doFork(ctx, routeStr, arg, uid)
 }
 
-//NotifyTo
+// NotifyTo
 //  @implement Pitaya.NotifyTo
 func (app *App) NotifyTo(ctx context.Context, serverID, routeStr string, arg proto.Message) error {
 	return app.doSendNotify(ctx, serverID, routeStr, arg, "")

@@ -162,7 +162,16 @@ func (r *RemoteService) GetRemoteBindingListener() []cluster.RemoteBindingListen
 //  @implement protos.PitayaServer
 func (r *RemoteService) Call(ctx context.Context, req *protos.Request) (*protos.Response, error) {
 	c, err := util.GetContextFromRequest(req, r.server.ID)
-	c = util.StartSpanFromRequest(c, r.server.ID, req.GetMsg().GetRoute())
+	rt, err := route.Decode(req.GetMsg().GetRoute())
+	if err != nil {
+		return nil, err
+	}
+	spanInfo := tracing.SpanInfoFromRequest(ctx)
+	spanInfo.IsClient = false
+	spanInfo.Route = rt
+	spanInfo.LocalID = r.server.ID
+	spanInfo.LocalType = r.server.Type
+	c = tracing.RPCStartSpan(ctx, spanInfo)
 	var res *protos.Response
 	if err != nil {
 		res = &protos.Response{

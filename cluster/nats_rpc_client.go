@@ -30,7 +30,6 @@ import (
 	"go.uber.org/zap"
 
 	nats "github.com/nats-io/nats.go"
-	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
@@ -143,17 +142,18 @@ func (ns *NatsRPCClient) Call(
 	msg *message.Message,
 	server *Server,
 ) (*protos.Response, error) {
-	parent, err := tracing.ExtractSpan(ctx)
-	if err != nil {
-		logger.Log.Warnf("failed to retrieve parent span: %s", err.Error())
+	var err error
+	spanInfo := &tracing.SpanInfo{
+		RpcSystem: "nats",
+		IsClient:  true,
+		Route:     route,
+		PeerID:    server.ID,
+		PeerType:  server.Type,
+		LocalID:   ns.server.ID,
+		LocalType: ns.server.Type,
+		RequestID: "",
 	}
-	tags := opentracing.Tags{
-		"span.kind":       "client",
-		"local.id":        ns.server.ID,
-		"peer.serverType": server.Type,
-		"peer.id":         server.ID,
-	}
-	ctx = tracing.StartSpan(ctx, "NATS RPC Call", tags, parent)
+	ctx = tracing.RPCStartSpan(ctx, spanInfo)
 	defer tracing.FinishSpan(ctx, err)
 
 	if !ns.running {
@@ -220,17 +220,16 @@ func (ns *NatsRPCClient) Fork(
 	msg *message.Message,
 ) error {
 	msg.Type = message.Notify
-	parent, err := tracing.ExtractSpan(ctx)
-	if err != nil {
-		logger.Log.Warnf("failed to retrieve parent span: %s", err.Error())
+	var err error
+	spanInfo := &tracing.SpanInfo{
+		RpcSystem: "nats",
+		IsClient:  true,
+		Route:     route,
+		LocalID:   ns.server.ID,
+		LocalType: ns.server.Type,
+		RequestID: "",
 	}
-	tags := opentracing.Tags{
-		"span.kind":       "client",
-		"local.id":        ns.server.ID,
-		"peer.serverType": "broadcast",
-		"peer.id":         "",
-	}
-	ctx = tracing.StartSpan(ctx, "NATS Fork", tags, parent)
+	ctx = tracing.RPCStartSpan(ctx, spanInfo)
 	defer tracing.FinishSpan(ctx, err)
 
 	if !ns.running {

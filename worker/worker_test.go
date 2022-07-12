@@ -5,9 +5,9 @@ import (
 	"errors"
 	"testing"
 
+	workers "github.com/alkaid/go-workers"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
-	workers "github.com/topfreegames/go-workers"
 	"github.com/topfreegames/pitaya/v2/worker/mocks"
 )
 

@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/panjf2000/ants/v2"
 	"github.com/topfreegames/pitaya/v2/session"
 
-	"github.com/panjf2000/ants/v2"
 	"github.com/topfreegames/pitaya/v2/constants"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"go.uber.org/zap"

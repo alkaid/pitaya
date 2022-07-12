@@ -30,6 +30,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/alkaid/goerrors/apierrors"
 
 	"github.com/topfreegames/pitaya/v2/co"
@@ -45,8 +47,6 @@ import (
 	"github.com/topfreegames/pitaya/v2/tracing"
 	"github.com/topfreegames/pitaya/v2/util"
 	"github.com/topfreegames/pitaya/v2/util/compression"
-
-	opentracing "github.com/opentracing/opentracing-go"
 )
 
 var (
@@ -552,9 +552,9 @@ func (a *agentImpl) AnswerWithError(ctx context.Context, mid uint, err error) {
 		}
 	}()
 	if ctx != nil && err != nil {
-		s := opentracing.SpanFromContext(ctx)
+		s := trace.SpanFromContext(ctx)
 		if s != nil {
-			tracing.LogError(s, err.Error())
+			tracing.LogError(s, err)
 		}
 	}
 	p, e := util.GetErrorPayload(a.serializer, err)

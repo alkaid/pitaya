@@ -28,6 +28,8 @@ import (
 	"strings"
 	"syscall"
 
+	"go.opentelemetry.io/otel/trace"
+
 	"google.golang.org/protobuf/types/descriptorpb"
 
 	"time"
@@ -36,7 +38,6 @@ import (
 	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/pipeline"
 
-	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/topfreegames/pitaya/v2/acceptor"
 	"github.com/topfreegames/pitaya/v2/cluster"
 	"github.com/topfreegames/pitaya/v2/component"
@@ -697,7 +698,7 @@ func GetFromPropagateCtx(ctx context.Context, key string) interface{} {
 
 // ExtractSpan retrieves an opentracing span context from the given context
 // The span context can be received directly or via an RPC call
-func ExtractSpan(ctx context.Context) (opentracing.SpanContext, error) {
+func ExtractSpan(ctx context.Context) (context.Context, trace.SpanContext) {
 	return tracing.ExtractSpan(ctx)
 }
 
