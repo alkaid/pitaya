@@ -289,7 +289,7 @@ func (ns *NatsRPCServer) processMessages(threadID int) {
 				p, err := ns.marshalResponse(ns.responses[threadID])
 				err = ns.conn.Publish(ns.requests[threadID].GetMsg().GetReply(), p)
 				if err != nil {
-					logger.Log.Error("error sending message response")
+					logger.Zap.Error("error sending message response")
 				}
 			}
 		} else {
@@ -307,14 +307,21 @@ func (ns *NatsRPCServer) processMessages(threadID int) {
 					goID = int(crc32.ChecksumIEEE([]byte(fmt.Sprintf("%s%d", ns.requests[threadID].FrontendID, sess.Id))))
 				}
 			}
+			logger.Zap.Debug("rpcsv processing msg",
+				zap.String("route", ns.requests[threadID].Msg.Route),
+				zap.Int("goID", goID))
 			// 有session派发到session绑定线程,没有session 随机派发
+			req := ns.requests[threadID] // 拷贝一个给线程避免闭包问题
 			co.GoByID(goID, func() {
-				ns.responses[threadID], _ = ns.pitayaServer.Call(ctx, ns.requests[threadID])
-				if ns.requests[threadID].GetMsg().Type != protos.MsgType_MsgNotify {
-					p, err := ns.marshalResponse(ns.responses[threadID])
-					err = ns.conn.Publish(ns.requests[threadID].GetMsg().GetReply(), p)
+				resp, err := ns.pitayaServer.Call(ctx, req)
+				if err != nil {
+					logger.Zap.Error("rpc error calling pitayaServer", zap.Error(err))
+				}
+				if req.GetMsg().Type != protos.MsgType_MsgNotify {
+					p, err := ns.marshalResponse(resp)
+					err = ns.conn.Publish(req.GetMsg().GetReply(), p)
 					if err != nil {
-						logger.Log.Error("error sending message response")
+						logger.Zap.Error("error sending message response")
 					}
 				}
 			})
