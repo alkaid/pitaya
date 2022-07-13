@@ -23,20 +23,27 @@ package context
 import (
 	"context"
 	"encoding/json"
+	"sync"
 
 	"github.com/topfreegames/pitaya/v2/constants"
 )
 
+var lock sync.RWMutex
+
 // AddToPropagateCtx adds a key and value that will be propagated through RPC calls
 func AddToPropagateCtx(ctx context.Context, key string, val interface{}) context.Context {
 	propagate := ToMap(ctx)
+	lock.Lock()
 	propagate[key] = val
+	lock.Unlock()
 	return context.WithValue(ctx, constants.PropagateCtxKey, propagate)
 }
 
 // GetFromPropagateCtx get a value from the propagate
 func GetFromPropagateCtx(ctx context.Context, key string) interface{} {
 	propagate := ToMap(ctx)
+	lock.RLock()
+	defer lock.RUnlock()
 	if val, ok := propagate[key]; ok {
 		return val
 	}
