@@ -767,6 +767,7 @@ func (s *sessionImpl) OnClose(c func()) error {
 // Close terminates current session, session related data will not be released,
 // all related data should be cleared explicitly in Session closed callback
 func (s *sessionImpl) Close(callback map[string]string, reason ...CloseReason) {
+	logger.Zap.Debug("session close", zap.Int64("id", s.ID()), zap.String("uid", s.UID()))
 	atomic.AddInt64(&s.pool.SessionCount, -1)
 	s.pool.sessionsByID.Delete(s.ID())
 	s.pool.sessionsByUID.Delete(s.UID())

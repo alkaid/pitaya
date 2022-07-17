@@ -27,6 +27,8 @@ import (
 	"reflect"
 	"sync"
 
+	"github.com/alkaid/goerrors/errors"
+
 	"github.com/topfreegames/pitaya/v2/co"
 	"google.golang.org/protobuf/proto"
 
@@ -349,20 +351,44 @@ func (r *RemoteService) Notify(ctx context.Context, serverID string, ro *route.R
 			return err
 		}
 	}
-	// 服务器为空 全局广播(每种服务器只有一个实例消费)
-	if ro.SvType == "" && serverID == "" {
-		for _, server := range r.serviceDiscovery.GetServerTypes() {
-			newRoute, err := route.Decode(server.Type + "." + ro.Short())
-			if err != nil {
-				return err
-			}
-			r.DoNotify(ctx, "", newRoute, data, session)
-		}
-	} else {
-		err = r.DoNotify(ctx, serverID, ro, data, session)
+	err = r.DoNotify(ctx, serverID, ro, data, session)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// NotifyAll 通知集群内所有服务,不包括自己
+//  @receiver r
+//  @param ctx
+//  @param ro
+//  @param self
+//  @param arg
+//  @param session
+//  @return error
+func (r *RemoteService) NotifyAll(ctx context.Context, ro *route.Route, self *cluster.Server, arg proto.Message, session session.Session) error {
+	var data []byte
+	var err error
+	if arg != nil {
+		data, err = proto.Marshal(arg)
 		if err != nil {
 			return err
 		}
+	}
+	if ro.SvType != "" {
+		return errors.WithStack(constants.ErrNotifyAllSvTypeNotEmpty)
+	}
+	// 服务器为空 全局广播(每种服务器只有一个实例消费)
+	for _, server := range r.serviceDiscovery.GetServerTypes() {
+		// 排除自己
+		if server.Type == self.Type {
+			continue
+		}
+		newRoute, err := route.Decode(server.Type + "." + ro.Short())
+		if err != nil {
+			return err
+		}
+		r.DoNotify(ctx, "", newRoute, data, session)
 	}
 	return nil
 }

@@ -57,7 +57,7 @@ func (sys *Sys) Init() {
 	sys.sessionPool.OnSessionBind(func(ctx context.Context, s session.Session, callback map[string]string) error {
 		// 绑定当前frontendID 其实这里只可能是frontend 不用判断考虑stateful backend的处理
 		if !sys.server.Frontend {
-			//非frontend的转发逻辑在 session.Session.Bind() 内部
+			// 非frontend的转发逻辑在 session.Session.Bind() 内部
 			return nil
 		}
 		var err error
@@ -92,25 +92,17 @@ func (sys *Sys) Init() {
 			if err != nil {
 				break
 			}
+			// 通知所有frontend实例
 			err = sys.remote.Fork(ctx, r, msg, s)
 			if err != nil {
 				break
 			}
-			// err = sys.remote.Notify(ctx, "", r, msg, s)
-			r, err = route.Decode(sys.server.Type + "." + constants.SessionBoundRoute)
+			// 通知所有其他服务
+			r, err = route.Decode(constants.SessionBoundRoute)
 			if err != nil {
 				break
 			}
-			for _, sv := range sys.serverDiscovery.GetServerTypes() {
-				r, err = route.Decode(sv.Type + "." + constants.SessionBoundRoute)
-				if err != nil {
-					break
-				}
-				err = sys.remote.Notify(ctx, "", r, msg, s)
-				if err != nil {
-					break
-				}
-			}
+			err = sys.remote.NotifyAll(ctx, r, sys.server, msg, s)
 		}
 		if err != nil {
 			// 回滚
@@ -144,7 +136,7 @@ func (sys *Sys) Init() {
 			UserId:   s.UID(),
 			Metadata: callback,
 		}
-		err = sys.remote.Notify(context.Background(), "", r, msg, s)
+		err = sys.remote.NotifyAll(context.Background(), r, sys.server, msg, s)
 		if err != nil {
 			logW.Error("session on close error", zap.Error(err))
 			return

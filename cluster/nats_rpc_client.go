@@ -25,6 +25,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/alkaid/goerrors/errors"
+
 	"github.com/alkaid/goerrors/apierrors"
 
 	"go.uber.org/zap"
@@ -158,15 +160,15 @@ func (ns *NatsRPCClient) Call(
 
 	if !ns.running {
 		err = constants.ErrRPCClientNotInitialized
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	req, err := buildRequest(ctx, rpcType, route, session, msg, ns.server)
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	marshalledData, err := proto.Marshal(&req)
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 
 	var m *nats.Msg
@@ -185,7 +187,7 @@ func (ns *NatsRPCClient) Call(
 	if msg.Type == message.Notify {
 		err = ns.Send(getChannel(server.Type, server.ID), marshalledData)
 		if err != nil {
-			return nil, err
+			return nil, errors.WithStack(err)
 		}
 		return &protos.Response{}, nil
 	}
@@ -197,17 +199,17 @@ func (ns *NatsRPCClient) Call(
 			logger.Zap.Error("rpc timeout", zap.Error(err))
 			err = constants.ErrRPCTimeout
 		}
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 
 	res := &protos.Response{}
 	err = proto.Unmarshal(m.Data, res)
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 
 	if res.Status != nil {
-		return nil, apierrors.FromStatus(res.Status)
+		return nil, apierrors.FromStatus(res.Status).WithStack()
 	}
 	return res, nil
 }
@@ -234,15 +236,15 @@ func (ns *NatsRPCClient) Fork(
 
 	if !ns.running {
 		err = constants.ErrRPCClientNotInitialized
-		return err
+		return errors.WithStack(err)
 	}
 	req, err := buildRequest(ctx, protos.RPCType_User, route, session, msg, ns.server)
 	if err != nil {
-		return err
+		return errors.WithStack(err)
 	}
 	marshalledData, err := proto.Marshal(&req)
 	if err != nil {
-		return err
+		return errors.WithStack(err)
 	}
 	if ns.metricsReporters != nil {
 		startTime := time.Now()

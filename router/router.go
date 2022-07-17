@@ -26,6 +26,10 @@ import (
 	"math/rand"
 	"time"
 
+	"github.com/alkaid/goerrors/errors"
+
+	"go.uber.org/zap"
+
 	"github.com/topfreegames/pitaya/v2/session"
 
 	"github.com/topfreegames/pitaya/v2/cluster"
@@ -81,21 +85,30 @@ func (r *Router) defaultRoute(
 		srvList = append(srvList, v)
 	}
 	server := srvList[rnd.Intn(len(srvList))]
+	var err error
 	if session != nil {
+		logW := logger.Zap.With(zap.String("uid", session.UID()), zap.String("frontend", session.GetFrontendID()), zap.Int64("fsID", session.GetFrontendSessionID()))
 		svId := ""
 		if server.Frontend {
 			svId = session.GetFrontendID()
+			logW.Debug("frontend route request by session's frontendID", zap.String("svID", svId))
 		} else if server.SessionStickiness {
 			svId = session.GetBackendID(server.Type)
+			logW.Debug("stickiness backend route request by session's backendID", zap.String("svID", svId))
 		} else {
+			logW.Debug("normal backend route request by consist hash")
 			// 尝试hash一致性路由
 			if session.UID() != "" {
-				svId, _ = r.serviceDiscovery.GetConsistentHashNode(svType, session.UID())
+				svId, err = r.serviceDiscovery.GetConsistentHashNode(svType, session.UID())
 			} else if session.GetFrontendID() != "" && session.GetFrontendSessionID() > 0 {
-				svId, _ = r.serviceDiscovery.GetConsistentHashNode(svType, fmt.Sprintf("%s-%d", session.GetFrontendID(), session.GetFrontendSessionID()))
+				svId, err = r.serviceDiscovery.GetConsistentHashNode(svType, fmt.Sprintf("%s-%d", session.GetFrontendID(), session.GetFrontendSessionID()))
+			} else {
+				logW.Debug("normal backend route request try consist hash failed,change by random")
+				return server, nil
 			}
 			// 获取不到hash node则随机路由
-			if svId == "" {
+			if err != nil {
+				logW.Error("route by consist hash error,will route random", zap.Error(err), zap.String("svID", server.ID))
 				return server, nil
 			}
 		}
@@ -106,9 +119,9 @@ func (r *Router) defaultRoute(
 		// 需要路由到绑定session的服务,但是找不到，报错
 		return nil, protos.ErrForbiddenServerOfSession().WithMetadata(map[string]string{
 			"server": server.Type,
-		})
-
+		}).WithStack()
 	}
+	logger.Zap.Debug("session is nil,route random", zap.String("svType", svType))
 	return server, nil
 }
 
@@ -126,12 +139,13 @@ func (r *Router) Route(
 	msg *message.Message,
 	session session.Session,
 ) (*cluster.Server, error) {
+	logger.Zap.Debug("router routing", zap.String("route", route.String()))
 	if r.serviceDiscovery == nil {
-		return nil, constants.ErrServiceDiscoveryNotInitialized
+		return nil, errors.WithStack(constants.ErrServiceDiscoveryNotInitialized)
 	}
 	serversOfType, err := r.serviceDiscovery.GetServersByType(svType)
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	// RPCType_Usser类型的route改成也允许使用自定义route
 	// if rpcType == protos.RPCType_User {

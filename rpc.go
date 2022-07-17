@@ -123,7 +123,15 @@ func (app *App) doSendNotifyAll(ctx context.Context, routeStr string, arg proto.
 	if r.SvType != "" {
 		return constants.ErrNotifyAllSvTypeNotEmpty
 	}
-	return app.doSendNotify(ctx, "", routeStr, arg, uid)
+	if app.rpcServer == nil {
+		return constants.ErrRPCServerNotInitialized
+	}
+
+	var sess session.Session = nil
+	if uid != "" {
+		sess, err = app.imperfectSessionForRPC(ctx, uid)
+	}
+	return app.remoteService.NotifyAll(ctx, r, app.server, arg, sess)
 }
 
 // doSendNotify only support nats,don't use grpc.(copy then modify from doSendRPC)
