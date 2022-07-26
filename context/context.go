@@ -71,6 +71,8 @@ func FromMap(val map[string]interface{}) context.Context {
 func Encode(ctx context.Context) ([]byte, error) {
 	m := ToMap(ctx)
 	if len(m) > 0 {
+		lock.RLock()
+		defer lock.RUnlock()
 		return json.Marshal(m)
 	}
 	return nil, nil
