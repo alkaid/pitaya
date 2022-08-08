@@ -58,9 +58,18 @@ func (sys *Sys) Init() {
 		// 绑定当前frontendID 其实这里只可能是frontend 不用判断考虑stateful backend的处理
 		if !sys.server.Frontend {
 			// 非frontend的转发逻辑在 session.Session.Bind() 内部
+			// 这个分支逻辑永远都不应该走进来
+			logger.Zap.Error("developer logic fatal!!")
 			return nil
 		}
 		var err error
+		oldSession := sys.sessionPool.GetSessionByUID(s.UID())
+		if oldSession != nil {
+			err = oldSession.Kick(ctx, nil, session.CloseReasonRebind)
+			if err != nil {
+				return err
+			}
+		}
 		olddata := s.GetDataEncoded()
 		for i := 0; i < 1; i++ {
 			// 从redis同步backend bind数据到本地

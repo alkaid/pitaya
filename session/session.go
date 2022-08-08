@@ -532,9 +532,13 @@ func (s *sessionImpl) GetIsFrontend() bool {
 	return s.IsFrontend
 }
 func (s *sessionImpl) GetFrontendID() string {
+	s.RLock()
+	defer s.RUnlock()
 	return s.frontendID
 }
 func (s *sessionImpl) GetFrontendSessionID() int64 {
+	s.RLock()
+	defer s.RUnlock()
 	return s.frontendSessionID
 }
 
@@ -623,9 +627,16 @@ func (s *sessionImpl) SetDataEncoded(encodedData []byte) error {
 
 // SetFrontendData sets frontend id and session id
 func (s *sessionImpl) SetFrontendData(frontendID string, frontendSessionID int64) {
+	s.Lock()
+	defer s.Unlock()
 	s.frontendID = frontendID
 	s.frontendSessionID = frontendSessionID
-	s.Set(fieldKeyFrontendID, frontendID)
+
+	s.data[fieldKeyFrontendID] = frontendID
+	err := s.updateEncodedData()
+	if err != nil {
+		logger.Zap.Error("set frontend data error", zap.Error(err))
+	}
 }
 
 // Bind bind UID to current session
@@ -783,6 +794,7 @@ func (s *sessionImpl) Close(callback map[string]string, reason ...CloseReason) {
 			}
 		}
 	}
+	s.Subscriptions = nil
 	s.entity.Close(callback, reason...)
 }
 
