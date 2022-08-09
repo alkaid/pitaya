@@ -54,7 +54,7 @@ func (u *UniqueSession) OnUserBind(uid, fid string) {
 	oldSession := u.sessionPool.GetSessionByUID(uid)
 	if oldSession != nil {
 		// TODO: it would be nice to set this correctly
-		oldSession.Kick(context.Background(), nil, session.CloseReasonRebind)
+		oldSession.Kick(context.Background(), nil, session.CloseReasonKickRebind)
 	}
 }
 
@@ -66,7 +66,7 @@ func (u *UniqueSession) OnUserBindBackend(uid, serverType, serverId string) {
 	}
 	oldSession := u.sessionPool.GetSessionByUID(uid)
 	if oldSession != nil {
-		oldSession.KickBackend(context.Background(), serverType, nil, session.CloseReasonRebind)
+		oldSession.KickBackend(context.Background(), serverType, nil, session.CloseReasonKickRebind)
 	}
 }
 
@@ -76,7 +76,7 @@ func (u *UniqueSession) Init() error {
 	// u.sessionPool.OnSessionBind(func(ctx context.Context, s session.Session) error {
 	// 	oldSession := u.sessionPool.GetSessionByUID(s.UID())
 	// 	if oldSession != nil {
-	// 		oldSession.Kick(ctx, session.CloseReasonRebind)
+	// 		oldSession.Kick(ctx, session.CloseReasonKickRebind)
 	// 	}
 	// 	err := u.rpcClient.BroadcastSessionBind(s.UID())
 	// 	return err

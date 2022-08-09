@@ -22,8 +22,10 @@ package service
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"go.uber.org/zap"
 	"strconv"
 	"time"
 
@@ -260,13 +262,28 @@ func (h *HandlerService) processPacket(a agent.Agent, p *packet.Packet) error {
 		h.processMessage(a, msg)
 
 	case packet.Heartbeat:
-		if err := a.SendHeartbeatResponse(); err != nil {
+		var rawUnixMillTime int64 = 0
+		if len(p.Data) > 0 {
+			rawUnixMillTime = int64(binary.BigEndian.Uint64(p.Data))
+		}
+		if err := a.SendHeartbeatResponse(rawUnixMillTime); err != nil {
 			logger.Log.Errorf("Error sending handshake response: %s", err.Error())
 			return err
 		}
 
 	case packet.HeartbeatAck:
-		// expected
+		var rawUnixMillTime int64 = 0
+		if len(p.Data) > 0 {
+			rawUnixMillTime = int64(binary.BigEndian.Uint64(p.Data))
+			if rawUnixMillTime > 0 {
+				lastTime := time.UnixMilli(rawUnixMillTime)
+				latency := time.Now().Sub(lastTime)
+				if latency > time.Millisecond*100 {
+					logger.Zap.Debug("client latency too much", zap.Int64("id", a.GetSession().ID()), zap.String("uid", a.GetSession().UID()), zap.Duration("latency", latency))
+				}
+				// TODO 上报监控
+			}
+		}
 	}
 
 	a.SetLastAt()
@@ -330,7 +347,7 @@ func (h *HandlerService) localProcess(ctx context.Context, a agent.Agent, route 
 	// 根据session数据决策派发线程id
 	sess := a.GetSession()
 	// 派发给session绑定的线程
-	co.GoBySession(sess, func() {
+	sess.GoBySession(func() {
 		ret, err := h.handlerPool.ProcessHandlerMessage(ctx, route, h.serializer, h.handlerHooks, a.GetSession(), msg.Data, msg.Type, false)
 		if msg.Type != message.Notify {
 			if err != nil {

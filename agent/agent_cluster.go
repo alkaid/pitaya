@@ -32,7 +32,7 @@ func NewCluster(
 }
 
 // Kick kicks the user
-func (c *Cluster) Kick(ctx context.Context) error {
+func (c *Cluster) Kick(ctx context.Context, reason ...session.CloseReason) error {
 	logger.Zap.Error("not support in cluster session!", zap.Error(constants.ErrNotImplemented))
 	return nil
 }

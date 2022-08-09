@@ -22,13 +22,19 @@ package agent
 
 import (
 	"context"
+	"encoding/binary"
 	gojson "encoding/json"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/topfreegames/pitaya/v2/acceptor"
+	"go.uber.org/zap"
 
 	"go.opentelemetry.io/otel/trace"
 
@@ -107,13 +113,13 @@ type (
 		RemoteAddr() net.Addr
 		String() string
 		GetStatus() int32
-		Kick(ctx context.Context) error
+		Kick(ctx context.Context, reason ...session.CloseReason) error
 		SetLastAt()
 		SetStatus(state int32)
 		Handle()
 		IPVersion() string
 		SendHandshakeResponse() error
-		SendHeartbeatResponse() error
+		SendHeartbeatResponse(unixMillTime int64) error
 		SendRequest(ctx context.Context, serverID, route string, v interface{}) (*protos.Response, error)
 		AnswerWithError(ctx context.Context, mid uint, err error)
 	}
@@ -370,7 +376,15 @@ func (a *agentImpl) Close(callback map[string]string, reason ...session.CloseRea
 	}
 
 	metrics.ReportNumberOfConnectedClients(a.metricsReporters, a.sessionPool.GetSessionCount())
-
+	closeReason := session.CloseReasonNormal
+	if len(reason) > 0 {
+		closeReason = reason[0]
+	}
+	// 若是websocket 且是被踢的 返回自定义reason
+	if wsConn, ok := a.conn.(*acceptor.WSConn); ok && closeReason > session.CloseReasonKickMin {
+		err := wsConn.InnerConn().WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, strconv.Itoa(closeReason)), time.Time{})
+		logger.Zap.Warn("write close control message by kick reason error", zap.Error(err))
+	}
 	return a.conn.Close()
 }
 
@@ -391,9 +405,15 @@ func (a *agentImpl) GetStatus() int32 {
 }
 
 // Kick sends a kick packet to a client
-func (a *agentImpl) Kick(ctx context.Context) error {
+func (a *agentImpl) Kick(ctx context.Context, reason ...session.CloseReason) error {
 	// packet encode
-	p, err := a.encoder.Encode(packet.Kick, nil)
+	kickReason := session.CloseReasonKickRebind
+	if len(reason) > 0 {
+		kickReason = reason[0]
+	}
+	bs := make([]byte, 4)
+	binary.BigEndian.PutUint32(bs, uint32(kickReason))
+	p, err := a.encoder.Encode(packet.Kick, bs)
 	if err != nil {
 		return err
 	}
@@ -456,10 +476,15 @@ func (a *agentImpl) heartbeat() {
 				logger.Log.Debugf("Session heartbeat timeout, LastTime=%d, Deadline=%d", atomic.LoadInt64(&a.lastAt), deadline)
 				return
 			}
-
+			bs := make([]byte, 8)
+			binary.BigEndian.PutUint64(bs, uint64(time.Now().UnixMilli()))
+			hbData, err := a.encoder.Encode(packet.Heartbeat, bs)
+			if err != nil {
+				logger.Zap.Error("encode hearbeat ")
+			}
 			// chSend is never closed so we need this to don't block if agent is already closed
 			select {
-			case a.chSend <- pendingWrite{data: hbd}:
+			case a.chSend <- pendingWrite{data: hbData}:
 			case <-a.chDie:
 				return
 			case <-a.chStopHeartbeat:
@@ -498,10 +523,22 @@ func (a *agentImpl) SendHandshakeResponse() error {
 	_, err := a.conn.Write(hrd)
 	return err
 }
-func (a *agentImpl) SendHeartbeatResponse() error {
+func (a *agentImpl) SendHeartbeatResponse(unixMillTime int64) error {
+	hbAckData := hbAck
+	var err error
+	if unixMillTime > 0 {
+		bs := make([]byte, 8)
+		binary.BigEndian.PutUint64(bs, uint64(unixMillTime))
+		hbAckData, err = a.encoder.Encode(packet.HandshakeAck, bs)
+		if err != nil {
+			logger.Zap.Error("encode hearbeat ack error ")
+			hbAckData = hbAck
+		}
+	}
+
 	pWrite := pendingWrite{
 		ctx:  context.Background(),
-		data: hbAck,
+		data: hbAckData,
 	}
 
 	// chSend is never closed so we need this to don't block if agent is already closed

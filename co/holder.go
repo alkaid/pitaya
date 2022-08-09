@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/panjf2000/ants/v2"
-	"github.com/topfreegames/pitaya/v2/session"
 
 	"github.com/topfreegames/pitaya/v2/constants"
 	"github.com/topfreegames/pitaya/v2/logger"
@@ -111,6 +110,28 @@ func GoByID(goID int, task func()) {
 	}
 }
 
+func WaitByID(goID int, task func()) {
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	GoByID(goID, func() {
+		task()
+		wg.Done()
+	})
+	wg.Wait()
+}
+
+func WaitByUID(uid string, task func()) {
+	if uid == "" {
+		logger.Zap.Error("uid can not be empty")
+	}
+	goID, err := strconv.Atoi(uid)
+	if err != nil {
+		logger.Zap.Warn("can't atoi uid", zap.String("uid", uid), zap.Error(err))
+		goID = int(crc32.ChecksumIEEE([]byte(uid)))
+	}
+	WaitByID(goID, task)
+}
+
 // GoByUID 根据uid派发任务线程
 //  @param uid
 //  @param task
@@ -126,20 +147,20 @@ func GoByUID(uid string, task func()) {
 	GoByID(goID, task)
 }
 
-// GoBySession 根据session数据决策派发任务线程
-//  @param sess
-//  @param task
-func GoBySession(sess session.Session, task func()) {
-	if sess.UID() != "" {
-		GoByUID(sess.UID(), task)
-		return
-	}
-	goID := 0
-	if sess.ID() > 0 {
-		goID = int(sess.ID())
-	}
-	GoByID(goID, task)
-}
+// // GoBySession 根据session数据决策派发任务线程
+// //  @param sess
+// //  @param task
+// func GoBySession(sess session.Session, task func()) {
+// 	if sess.UID() != "" {
+// 		GoByUID(sess.UID(), task)
+// 		return
+// 	}
+// 	goID := 0
+// 	if sess.ID() > 0 {
+// 		goID = int(sess.ID())
+// 	}
+// 	GoByID(goID, task)
+// }
 
 // Go 从默认线程池获取一个goroutine并派发任务
 //  @param task

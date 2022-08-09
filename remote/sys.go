@@ -65,7 +65,7 @@ func (sys *Sys) Init() {
 		var err error
 		oldSession := sys.sessionPool.GetSessionByUID(s.UID())
 		if oldSession != nil {
-			err = oldSession.Kick(ctx, nil, session.CloseReasonRebind)
+			err = oldSession.Kick(ctx, nil, session.CloseReasonKickRebind)
 			if err != nil {
 				return err
 			}
@@ -123,14 +123,15 @@ func (sys *Sys) Init() {
 		}
 		return err
 	})
-	// 移除frontendID 同步redis
+	// 网关本地session关闭回调,通知其他服务器
 	sys.sessionPool.OnSessionClose(func(s session.Session, callback map[string]string, reason session.CloseReason) {
-		// 解绑当前frontendID 其实这里只可能是frontend 不用判断考虑stateful backend的处理
 		if !sys.server.Frontend {
+			// 这个分支逻辑永远都不应该走进来
+			logger.Zap.Error("developer logic fatal!!")
 			return
 		}
 		// 重绑定发起的kick不做处理
-		if reason == session.CloseReasonRebind {
+		if reason == session.CloseReasonKickRebind {
 			return
 		}
 		// 与stateful backend不同,frontend的绑定数据无须清除
@@ -231,7 +232,7 @@ func (sys *Sys) Init() {
 				// 本地存储
 				sys.sessionPool.RemoveSessionLocal(s)
 				// 重绑定发起的kick不继续处理
-				if reason == session.CloseReasonRebind {
+				if reason == session.CloseReasonKickRebind {
 					return nil
 				}
 				// 同步到redis
@@ -313,7 +314,7 @@ func (s *Sys) Kick(ctx context.Context, msg *protos.KickMsg) (*protos.KickAnswer
 	if sess == nil {
 		return res, constants.ErrSessionNotFound
 	}
-	err := sess.Kick(ctx, msg.Metadata)
+	err := sess.Kick(ctx, msg.Metadata, session.CloseReason(msg.Reason))
 	if err != nil {
 		return res, err
 	}
@@ -394,7 +395,7 @@ func (s *Sys) SessionBound(ctx context.Context, msg *protos.BindMsg) (*protos.Re
 		sess.SetFrontendData(msg.Fid, msg.Sid)
 	}
 	for _, r := range s.remote.GetRemoteSessionListener() {
-		co.GoBySession(sess, func() {
+		sess.GoBySession(func() {
 			r.OnUserBound(msg.Uid, msg.Fid, msg.Metadata)
 		})
 	}

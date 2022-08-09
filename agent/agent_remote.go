@@ -88,12 +88,19 @@ func NewRemote(
 }
 
 // Kick kicks the user
-func (a *Remote) Kick(ctx context.Context) error {
+func (a *Remote) Kick(ctx context.Context, reason ...session.CloseReason) error {
 	if a.Session.UID() == "" {
 		return constants.ErrNoUIDBind
 	}
+	rea := 0
+	if len(reason) > 0 {
+		rea = reason[0]
+	} else {
+		rea = session.CloseReasonKickManual
+	}
 	b, err := proto.Marshal(&protos.KickMsg{
 		UserId: a.Session.UID(),
+		Reason: int32(rea),
 	})
 	if err != nil {
 		return err
@@ -136,15 +143,15 @@ func (a *Remote) ResponseMID(ctx context.Context, mid uint, v interface{}, isErr
 
 	if mid <= 0 {
 		return constants.ErrSessionOnNotify
-		//改成用push通知客户端系统错误
-		//return a.send(pendingMessage{
+		// 改成用push通知客户端系统错误
+		// return a.send(pendingMessage{
 		//	ctx:     ctx,
 		//	typ:     message.Push,
 		//	route:   constants.ServerInternalErrorToClientRoute,
 		//	mid:     0,
 		//	payload: v,
 		//	err:     err,
-		//}, a.reply)
+		// }, a.reply)
 	}
 
 	switch d := v.(type) {

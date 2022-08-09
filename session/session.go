@@ -30,6 +30,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pkg/errors"
+	"github.com/topfreegames/pitaya/v2/co"
+
 	"github.com/topfreegames/pitaya/v2/util"
 
 	nats "github.com/nats-io/nats.go"
@@ -48,11 +51,16 @@ const (
 	fieldKeyUID           = "_uid"
 )
 
-type CloseReason = int
+type CloseReason = int // 关闭原因
 
 const (
-	CloseReasonNormal CloseReason = iota
-	CloseReasonRebind
+	CloseReasonNormal CloseReason = iota // 默认关闭
+)
+const (
+	CloseReasonKickMin    CloseReason = 100
+	CloseReasonKickRebind             = 101 // 重新绑定,同一session在其他设备登录时发生
+	CloseReasonKickManual             = 102 // 手动被踢(封号)
+	CloseReasonKickMax    CloseReason = 1000
 )
 
 type OnSessionBindFunc func(ctx context.Context, s Session, callback map[string]string) error
@@ -269,6 +277,10 @@ type Session interface {
 	//  @receiver s
 	//  @return error
 	ObtainFromCluster() error
+	// GoBySession 根据session派发线程
+	//  @see co.GoByUID or co.GoByID
+	//  @param task
+	GoBySession(task func())
 }
 
 type sessionIDService struct {
@@ -644,24 +656,24 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, callback map[string]
 	if uid == "" {
 		return constants.ErrIllegalUID
 	}
-
+	var err error
 	if s.UID() != "" && s.UID() != uid {
-		return constants.ErrSessionAlreadyBound
+		return errors.WithStack(constants.ErrSessionAlreadyBound)
 	}
 
 	s.uid = uid
 	for _, cb := range s.pool.sessionBindCallbacks {
-		err := cb(ctx, s, callback)
+		err = cb(ctx, s, callback)
 		if err != nil {
 			s.uid = ""
-			return err
+			return errors.WithStack(err)
 		}
 	}
 	for _, cb := range s.pool.afterBindCallbacks {
-		err := cb(ctx, s, callback)
+		err = cb(ctx, s, callback)
 		if err != nil {
 			s.uid = ""
-			return err
+			return errors.WithStack(err)
 		}
 	}
 
@@ -671,11 +683,11 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, callback map[string]
 	} else {
 		// If frontentID is set this means it is a remote call and the current server
 		// is not the frontend server that received the user request
-		err := s.bindInFront(ctx, callback)
+		err = s.bindInFront(ctx, callback)
 		if err != nil {
 			logger.Log.Error("error while trying to push session to front: ", err)
 			s.uid = ""
-			return err
+			return errors.WithStack(err)
 		}
 	}
 
@@ -718,12 +730,12 @@ func (s *sessionImpl) BindBackend(ctx context.Context, targetServerType string, 
 
 // Kick kicks the user
 func (s *sessionImpl) Kick(ctx context.Context, callback map[string]string, reason ...CloseReason) error {
-	err := s.entity.Kick(ctx)
+	err := s.entity.Kick(ctx, reason...)
 	if err != nil {
 		return err
 	}
 	// TODO 这里理应调用session.close(),不知道为什么原来是这样，测试时注意下是否有问题
-	// return s.entity.Close()
+	// return s.entity.Close(callback, reason...)
 	s.Close(callback, reason...)
 	return nil
 }
@@ -781,7 +793,13 @@ func (s *sessionImpl) Close(callback map[string]string, reason ...CloseReason) {
 	logger.Zap.Debug("session close", zap.Int64("id", s.ID()), zap.String("uid", s.UID()))
 	atomic.AddInt64(&s.pool.SessionCount, -1)
 	s.pool.sessionsByID.Delete(s.ID())
-	s.pool.sessionsByUID.Delete(s.UID())
+	// 须校验存的session和要关闭的是否同一个session，相同才清uid-session map中的值。否则互相频繁顶号时会有误删的异步问题
+	oldSession := s.pool.GetSessionByUID(s.UID())
+	if oldSession != nil && oldSession.ID() == s.ID() {
+		s.pool.sessionsByUID.Delete(s.UID())
+	} else {
+		logger.Zap.Debug("stored session not equal current session,ignore delete stored session", zap.Int64("oldid", oldSession.ID()), zap.Int64("id", s.ID()), zap.String("uid", s.UID()))
+	}
 	// TODO: this logic should be moved to nats rpc server
 	if s.IsFrontend && s.Subscriptions != nil && len(s.Subscriptions) > 0 {
 		// if the user is bound to an userid and nats rpc server is being used we need to unsubscribe
@@ -1260,4 +1278,18 @@ func (s *sessionImpl) ObtainFromCluster() error {
 		return err
 	}
 	return nil
+}
+
+// GoBySession 根据session数据决策派发任务线程
+//  @param task
+func (s *sessionImpl) GoBySession(task func()) {
+	if s.UID() != "" {
+		co.GoByUID(s.UID(), task)
+		return
+	}
+	goID := 0
+	if s.ID() > 0 {
+		goID = int(s.ID())
+	}
+	co.GoByID(goID, task)
 }

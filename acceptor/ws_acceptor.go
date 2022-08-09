@@ -177,6 +177,10 @@ func NewWSConn(conn *websocket.Conn) (*WSConn, error) {
 	return c, nil
 }
 
+func (c *WSConn) InnerConn() *websocket.Conn {
+	return c.conn
+}
+
 // GetNextMessage reads the next message available in the stream
 func (c *WSConn) GetNextMessage() (b []byte, err error) {
 	_, msgBytes, err := c.conn.ReadMessage()

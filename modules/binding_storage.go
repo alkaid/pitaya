@@ -94,7 +94,7 @@ func (b *ETCDBindingStorage) GetUserFrontendID(uid, frontendType string) (string
 
 func (b *ETCDBindingStorage) setupOnSessionCloseCB() {
 	b.sessionPool.OnSessionClose(func(s session.Session, callback map[string]string, reason session.CloseReason) {
-		if s.UID() != "" && reason != session.CloseReasonRebind {
+		if s.UID() != "" && reason != session.CloseReasonKickRebind {
 			err := b.removeBinding(s.UID())
 			if err != nil {
 				logger.Log.Errorf("error removing binding info from storage: %v", err)
