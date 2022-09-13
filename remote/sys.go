@@ -190,16 +190,21 @@ func (sys *Sys) Init() {
 				if err != nil {
 					break
 				}
-				for _, sv := range sys.serverDiscovery.GetServerTypes() {
-					r, err = route.Decode(sv.Type + "." + constants.SessionBoundBackendRoute)
-					if err != nil {
-						break
-					}
-					err = sys.remote.Notify(ctx, "", r, msg, s)
-					if err != nil {
-						break
-					}
+				// for _, sv := range sys.serverDiscovery.GetServerTypes() {
+				// 	r, err = route.Decode(sv.Type + "." + constants.SessionBoundBackendRoute)
+				// 	if err != nil {
+				// 		break
+				// 	}
+				// 	err = sys.remote.Notify(ctx, "", r, msg, s)
+				// 	if err != nil {
+				// 		break
+				// 	}
+				// }
+				r, err := route.Decode(constants.SessionBoundBackendRoute)
+				if err != nil {
+					break
 				}
+				err = sys.remote.NotifyAll(ctx, r, sys.server, msg, s)
 			}
 			if err != nil {
 				// 回滚
@@ -246,7 +251,7 @@ func (sys *Sys) Init() {
 				if err != nil {
 					break
 				}
-				err = sys.remote.Notify(ctx, "", r, msg, s)
+				err = sys.remote.NotifyAll(ctx, r, sys.server, msg, s)
 			}
 			if err != nil {
 				// 回滚
