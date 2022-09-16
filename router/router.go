@@ -87,7 +87,7 @@ func (r *Router) defaultRoute(
 	server := srvList[rnd.Intn(len(srvList))]
 	var err error
 	if session != nil {
-		logW := logger.Zap.With(zap.String("uid", session.UID()), zap.String("frontend", session.GetFrontendID()), zap.Int64("fsID", session.GetFrontendSessionID()))
+		logW := logger.Zap.With(zap.String("uid", session.UID()), zap.String("frontend", session.GetFrontendID()), zap.Int64("frontSessID", session.GetFrontendSessionID()), zap.String("sv", svType))
 		svId := ""
 		if server.Frontend {
 			svId = session.GetFrontendID()
@@ -113,7 +113,12 @@ func (r *Router) defaultRoute(
 			}
 		}
 		if svId != "" {
-			return servers[svId], nil
+			sv, ok := servers[svId]
+			if !ok {
+				logW.Info("router server not found", zap.String("svID", svId))
+				err = errors.WithStack(constants.ErrServerNotFound)
+			}
+			return sv, err
 		}
 		// return nil,constants.ErrNoServersAvailableOfType
 		// 需要路由到绑定session的服务,但是找不到，报错

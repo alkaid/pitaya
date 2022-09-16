@@ -247,7 +247,8 @@ type Pitaya interface {
 	//  @return error
 	KickBackend(ctx context.Context, uid string, targetServerType string, callback map[string]string) error
 
-	// GetBoundData 获取绑定数据
+	// GetBoundData 获取uid对应session绑定的数据,仅在uid session bound到网关后才有效,因为bound后才会从cluster缓存同步数据给session
+	//  @receiver app
 	//  @param ctx
 	//  @param uid
 	//  @return *session.BoundData
@@ -469,6 +470,12 @@ func (app *App) KickBackend(ctx context.Context, uid string, targetServerType st
 	return sess.KickBackend(ctx, targetServerType, callback)
 }
 
+// GetBoundData 获取uid对应session绑定的数据,仅在uid session bound到网关后才有效,因为bound后才会从cluster缓存同步数据给session
+//  @receiver app
+//  @param ctx
+//  @param uid
+//  @return *session.BoundData
+//  @return error
 func (app *App) GetBoundData(ctx context.Context, uid string) (*session.BoundData, error) {
 	sess, err := app.imperfectSessionForRPC(ctx, uid)
 	if err != nil {

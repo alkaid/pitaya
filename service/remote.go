@@ -256,7 +256,7 @@ func (r *RemoteService) DoRPC(ctx context.Context, serverID string, route *route
 
 	target, _ := r.serviceDiscovery.GetServer(serverID)
 	if target == nil {
-		return nil, constants.ErrServerNotFound
+		return nil, errors.WithStack(constants.ErrServerNotFound)
 	}
 
 	return r.remoteCall(ctx, target, protos.RPCType_User, route, session, msg)
@@ -320,7 +320,7 @@ func (r *RemoteService) RPC(ctx context.Context, serverID string, route *route.R
 	if arg != nil {
 		data, err = proto.Marshal(arg)
 		if err != nil {
-			return err
+			return errors.WithStack(err)
 		}
 	}
 	res, err := r.DoRPC(ctx, serverID, route, data, session)
@@ -335,7 +335,7 @@ func (r *RemoteService) RPC(ctx context.Context, serverID string, route *route.R
 	if reply != nil {
 		err = proto.Unmarshal(res.GetData(), reply)
 		if err != nil {
-			return err
+			return errors.WithStack(err)
 		}
 	}
 	return nil
@@ -383,6 +383,14 @@ func (r *RemoteService) NotifyAll(ctx context.Context, ro *route.Route, self *cl
 		// 排除自己
 		if server.Type == self.Type {
 			continue
+		}
+		// 排除session未绑定的sessionStickness服务
+		if server.SessionStickiness && session != nil {
+			svId := session.GetBackendID(server.Type)
+			if svId == "" {
+				logger.Zap.Debug("NotifyAll ignore unbound sessionStickness server", zap.String("server", server.Type))
+				continue
+			}
 		}
 		newRoute, err := route.Decode(server.Type + "." + ro.Short())
 		if err != nil {

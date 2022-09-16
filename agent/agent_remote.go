@@ -77,10 +77,13 @@ func NewRemote(
 
 	// binding session
 	s := sessionPool.NewSession(a, false, sess.GetUid())
-	s.SetFrontendData(frontendID, sess.GetId())
-	err := s.SetDataEncoded(sess.GetData())
-	if err != nil {
-		return nil, err
+	// 如果当前服务是网关,则不应该覆盖data,data数据应以网关为准
+	if !serviceDiscovery.GetSelfServer().Frontend {
+		// s.SetFrontendData(frontendID, sess.GetId())  // 功能和SetDataEncoded重复
+		err := s.SetDataEncoded(sess.GetData())
+		if err != nil {
+			return nil, err
+		}
 	}
 	a.Session = s
 

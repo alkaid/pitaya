@@ -25,18 +25,22 @@ import "github.com/topfreegames/pitaya/v2/interfaces"
 // ServiceDiscovery is the interface for a service discovery client
 type ServiceDiscovery interface {
 	GetServersByType(serverType string) (map[string]*Server, error)
-	//GetSelfServer 获取当前服务
+	// GetSelfServer 获取当前服务
 	//  @return *Server
 	GetSelfServer() *Server
 	GetServer(id string) (*Server, error)
 	GetServers() []*Server
-	//GetServerTypes 获得serverType列表,取每种serverType的第一个Server
+	// GetAnyFrontend 获取任意一个frontend
+	//  @return *Server
+	//  @return error
+	GetAnyFrontend() (*Server, error)
+	// GetServerTypes 获得serverType列表,取每种serverType的第一个Server
 	//  @receiver sd
 	//  @return map[string]*Server 索引为serverType,元素为Server
 	GetServerTypes() map[string]*Server
 	SyncServers(firstSync bool) error
 	AddListener(listener SDListener)
-	//FlushServer2Cluster 将修改后的server数据保存到云端(etcd)
+	// FlushServer2Cluster 将修改后的server数据保存到云端(etcd)
 	//  @param server
 	//  @return error
 	FlushServer2Cluster(server *Server) error

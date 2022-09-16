@@ -24,6 +24,9 @@ import (
 	"context"
 	"reflect"
 
+	"github.com/topfreegames/pitaya/v2/logger"
+	"go.uber.org/zap"
+
 	agent2 "github.com/topfreegames/pitaya/v2/agent"
 	"github.com/topfreegames/pitaya/v2/session"
 
@@ -175,20 +178,33 @@ func (app *App) doFork(ctx context.Context, routeStr string, arg proto.Message, 
 	}
 	return app.remoteService.Fork(ctx, r, arg, sess)
 }
+
+// imperfectSessionForRPC 为rpc调用获取一个可能不健全的session
+//  - 本地pool有session返回session(数据和cluster是同步的)
+//  - context里有session返回session(bind后的session数据是和cluster同步的,因为从网关转发时打包了数据)
+//  - 上述都不存在时从cluster获取缓存数据构建一个虚拟session
+//  @receiver app
+//  @param ctx
+//  @param uid
+//  @return session.Session
+//  @return error
 func (app *App) imperfectSessionForRPC(ctx context.Context, uid string) (session.Session, error) {
 	if uid == "" {
 		return nil, constants.ErrIllegalUID
 	}
 	sess := app.sessionPool.GetSessionByUID(uid)
 	if sess != nil {
+		logger.Zap.Debug("use session from sessionPool for rpc", zap.String("uid", uid))
 		return sess, nil
 	}
 	sess = app.GetSessionFromCtx(ctx)
 	if sess != nil && sess.UID() == uid {
+		logger.Zap.Debug("use session from context for rpc", zap.String("uid", uid))
 		return sess, nil
 	}
 	agent, err := agent2.NewCluster(uid, app.sessionPool)
 	if err != nil {
+		logger.Zap.Debug("use session from cacheCluster for rpc", zap.String("uid", uid))
 		return nil, err
 	}
 	return agent.Session, nil

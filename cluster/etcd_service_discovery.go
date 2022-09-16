@@ -28,6 +28,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pkg/errors"
+
 	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/constants"
@@ -350,6 +352,22 @@ func (sd *etcdServiceDiscovery) GetServers() []*Server {
 		return true
 	})
 	return ret
+}
+
+func (sd *etcdServiceDiscovery) GetAnyFrontend() (*Server, error) {
+	var frontend *Server
+	sd.serverMapByID.Range(func(k, v interface{}) bool {
+		sv := v.(*Server)
+		if sv.Frontend {
+			frontend = sv
+			return false
+		}
+		return true
+	})
+	if frontend == nil {
+		return nil, errors.New("not found any frontend")
+	}
+	return frontend, nil
 }
 
 // GetServerTypes

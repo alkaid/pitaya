@@ -25,9 +25,10 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"go.uber.org/zap"
 	"strconv"
 	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/alkaid/goerrors/apierrors"
 
@@ -238,10 +239,11 @@ func (h *HandlerService) processPacket(a agent.Agent, p *packet.Packet) error {
 
 		a.GetSession().SetHandshakeData(handshakeData)
 		a.SetStatus(constants.StatusHandshake)
-		err = a.GetSession().Set(constants.IPVersionKey, a.IPVersion())
-		if err != nil {
-			logger.Log.Warnf("failed to save ip version on session: %q\n", err)
-		}
+		// ipversion 暂时用不到
+		// err = a.GetSession().Set(constants.IPVersionKey, a.IPVersion())
+		// if err != nil {
+		// 	logger.Log.Warnf("failed to save ip version on session: %q\n", err)
+		// }
 
 		logger.Log.Debug("Successfully saved handshake data")
 

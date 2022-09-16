@@ -21,18 +21,19 @@
 package route
 
 import (
-	"errors"
+	stderr "errors"
 	"fmt"
 	"strings"
 
+	"github.com/pkg/errors"
 	"github.com/topfreegames/pitaya/v2/logger"
 )
 
 var (
 	// ErrRouteFieldCantEmpty error
-	ErrRouteFieldCantEmpty = errors.New("route field can not be empty")
+	ErrRouteFieldCantEmpty = stderr.New("route field can not be empty")
 	// ErrInvalidRoute error
-	ErrInvalidRoute = errors.New("invalid route")
+	ErrInvalidRoute = stderr.New("invalid route")
 )
 
 // Route struct
@@ -65,7 +66,7 @@ func Decode(route string) (*Route, error) {
 	r := strings.Split(route, ".")
 	for _, s := range r {
 		if strings.TrimSpace(s) == "" {
-			return nil, ErrRouteFieldCantEmpty
+			return nil, errors.WithStack(ErrRouteFieldCantEmpty)
 		}
 	}
 	switch len(r) {
@@ -75,6 +76,6 @@ func Decode(route string) (*Route, error) {
 		return NewRoute("", r[0], r[1]), nil
 	default:
 		logger.Log.Errorf("invalid route: " + route)
-		return nil, ErrInvalidRoute
+		return nil, errors.WithStack(ErrInvalidRoute)
 	}
 }

@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,10 +46,11 @@ import (
 )
 
 const (
-	cacheKeyPitayaSession = "pitaya:sess:%s:"
-	fieldKeyFrontendID    = "_fid"
-	fieldKeyBackends      = "_backends"
-	fieldKeyUID           = "_uid"
+	cacheKeyPitayaSession  = "pit:s:%s:" // pitaya session key = pitaya:session:<uid>
+	fieldKeyFrontendID     = "f"         // frontend id
+	fieldKeyFrontendSessID = "s"         // frontend session id
+	fieldKeyBackends       = "bs"        // backends id list
+	fieldKeyUID            = "u"         // uid
 )
 
 type CloseReason = int // 关闭原因
@@ -465,7 +467,7 @@ func (pool *sessionPoolImpl) DecodeSessionData(encodedData []byte) (map[string]i
 //  @return error
 func (pool *sessionPoolImpl) StoreSessionLocal(session Session) error {
 	if len(session.UID()) <= 0 {
-		return constants.ErrEmptyUID
+		return errors.WithStack(constants.ErrEmptyUID)
 	}
 	pool.sessionsByUID.Store(session.UID(), session)
 	if _, ok := pool.sessionsByID.Load(session.ID()); ok {
@@ -611,6 +613,11 @@ func (s *sessionImpl) SetData(data map[string]interface{}) error {
 	s.data = data
 	s.frontendID = s.stringUnsafe(fieldKeyFrontendID)
 	s.uid = s.stringUnsafe(fieldKeyUID)
+	tmpId, err := strconv.Atoi(s.stringUnsafe(fieldKeyFrontendSessID))
+	if err != nil {
+		logger.Zap.Warn("", zap.Error(err))
+	}
+	s.frontendSessionID = int64(tmpId)
 	return s.updateEncodedData()
 }
 
@@ -621,6 +628,7 @@ func (s *sessionImpl) GetDataEncoded() []byte {
 	// 打包
 	s.data[fieldKeyUID] = s.uid
 	s.data[fieldKeyFrontendID] = s.frontendID
+	s.data[fieldKeyFrontendSessID] = strconv.Itoa(int(s.frontendSessionID))
 	s.updateEncodedData()
 	return s.encodedData
 }
@@ -645,6 +653,7 @@ func (s *sessionImpl) SetFrontendData(frontendID string, frontendSessionID int64
 	s.frontendSessionID = frontendSessionID
 
 	s.data[fieldKeyFrontendID] = frontendID
+	s.data[fieldKeyFrontendSessID] = strconv.Itoa(int(s.frontendSessionID))
 	err := s.updateEncodedData()
 	if err != nil {
 		logger.Zap.Error("set frontend data error", zap.Error(err))
@@ -689,6 +698,12 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, callback map[string]
 			s.uid = ""
 			return errors.WithStack(err)
 		}
+
+		// 绑定成功 同步数据到当前session 否则后续从context中获取的session拿不到boundData数据
+		err = s.ObtainFromCluster()
+		if err != nil {
+			return errors.WithStack(err)
+		}
 	}
 
 	return nil
@@ -703,14 +718,11 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, callback map[string]
 //  @return error
 func (s *sessionImpl) BindBackend(ctx context.Context, targetServerType string, targetServerID string, callback map[string]string) error {
 	if s.UID() == "" {
-		return constants.ErrIllegalUID
+		return errors.WithStack(constants.ErrIllegalUID)
 	}
 	if s.GetBackendID(targetServerType) != "" {
-		return constants.ErrSessionAlreadyBound
+		return errors.WithStack(constants.ErrSessionAlreadyBound)
 	}
-	// if !targetServer.StatefulBackend() {
-	//	return constants.ErrSessionCantBindBackend
-	// }
 	s.SetBackendID(targetServerType, targetServerID)
 	var err error
 	for _, cb := range s.pool.bindBackendCallbacks {
@@ -750,11 +762,11 @@ func (s *sessionImpl) Kick(ctx context.Context, callback map[string]string, reas
 func (s *sessionImpl) KickBackend(ctx context.Context, targetServerType string, callback map[string]string, reason ...CloseReason) error {
 	var err error = nil
 	if s.UID() == "" {
-		return constants.ErrIllegalUID
+		return errors.WithStack(constants.ErrIllegalUID)
 	}
 	backendID := s.GetBackendID(targetServerType)
 	if backendID == "" {
-		return constants.ErrSessionNotBoundBackend
+		return errors.WithStack(constants.ErrSessionNotBoundBackend)
 	}
 	rea := CloseReasonNormal
 	if len(reason) > 0 {
