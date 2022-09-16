@@ -294,9 +294,7 @@ func (h *HandlerService) processPacket(a agent.Agent, p *packet.Packet) error {
 
 func (h *HandlerService) processMessage(a agent.Agent, msg *message.Message) {
 	requestID := strconv.Itoa(int(msg.ID))
-	ctx := pcontext.AddToPropagateCtx(context.Background(), constants.StartTimeKey, time.Now().UnixNano())
-	ctx = pcontext.AddToPropagateCtx(ctx, constants.RouteKey, msg.Route)
-	ctx = pcontext.AddToPropagateCtx(ctx, constants.RequestIDKey, requestID)
+	ctx := pcontext.AddListToPropagateCtx(context.Background(), constants.StartTimeKey, time.Now().UnixNano(), constants.RouteKey, msg.Route, constants.RequestIDKey, requestID)
 	ctx = context.WithValue(ctx, constants.SessionCtxKey, a.GetSession())
 
 	r, err := route.Decode(msg.Route)

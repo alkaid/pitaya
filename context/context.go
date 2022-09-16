@@ -23,47 +23,78 @@ package context
 import (
 	"context"
 	"encoding/json"
-	"sync"
+
+	"github.com/topfreegames/pitaya/v2/logger"
 
 	"github.com/topfreegames/pitaya/v2/constants"
 )
 
-var lock sync.RWMutex
-
 // AddToPropagateCtx adds a key and value that will be propagated through RPC calls
-func AddToPropagateCtx(ctx context.Context, key string, val interface{}) context.Context {
+func AddToPropagateCtx(ctx context.Context, key string, val any) context.Context {
 	propagate := ToMap(ctx)
-	lock.Lock()
 	propagate[key] = val
-	lock.Unlock()
+	return context.WithValue(ctx, constants.PropagateCtxKey, propagate)
+}
+func AddListToPropagateCtx(ctx context.Context, keyOrValList ...any) context.Context {
+	if len(keyOrValList) == 0 {
+		logger.Zap.Warn("keyOrValList cannot be empty")
+		return ctx
+	}
+	propagate := ToMap(ctx)
+	key := ""
+	for i, keyOrVal := range keyOrValList {
+		if i%2 == 0 {
+			key = keyOrVal.(string)
+		} else {
+			propagate[key] = keyOrVal
+		}
+	}
 	return context.WithValue(ctx, constants.PropagateCtxKey, propagate)
 }
 
 // GetFromPropagateCtx get a value from the propagate
-func GetFromPropagateCtx(ctx context.Context, key string) interface{} {
-	propagate := ToMap(ctx)
-	lock.RLock()
-	defer lock.RUnlock()
+func GetFromPropagateCtx(ctx context.Context, key string) any {
+	propagate := toRaw(ctx)
 	if val, ok := propagate[key]; ok {
 		return val
 	}
 	return nil
 }
 
-// ToMap returns the values that will be propagated through RPC calls in map[string]interface{} format
-func ToMap(ctx context.Context) map[string]interface{} {
+// toRaw returns the values that will be propagated through RPC calls in map[string]any format
+//  框架内部使用
+//  @param ctx
+//  @return map[string]any
+func toRaw(ctx context.Context) map[string]any {
 	if ctx == nil {
-		return map[string]interface{}{}
+		return map[string]any{}
 	}
 	p := ctx.Value(constants.PropagateCtxKey)
 	if p != nil {
-		return p.(map[string]interface{})
+		return p.(map[string]any)
 	}
-	return map[string]interface{}{}
+	return map[string]any{}
+}
+
+// ToMap returns the values that will be propagated through RPC calls in map[string]any format
+func ToMap(ctx context.Context) map[string]any {
+	if ctx == nil {
+		return map[string]any{}
+	}
+	p := ctx.Value(constants.PropagateCtxKey)
+	if p != nil {
+		tmpP := p.(map[string]any)
+		ret := map[string]any{}
+		for k, v := range tmpP {
+			ret[k] = v
+		}
+		return ret
+	}
+	return map[string]any{}
 }
 
 // FromMap creates a new context from a map with propagated values
-func FromMap(val map[string]interface{}) context.Context {
+func FromMap(val map[string]any) context.Context {
 	return context.WithValue(context.Background(), constants.PropagateCtxKey, val)
 }
 
@@ -71,8 +102,6 @@ func FromMap(val map[string]interface{}) context.Context {
 func Encode(ctx context.Context) ([]byte, error) {
 	m := ToMap(ctx)
 	if len(m) > 0 {
-		lock.RLock()
-		defer lock.RUnlock()
 		return json.Marshal(m)
 	}
 	return nil, nil
@@ -84,7 +113,7 @@ func Decode(m []byte) (context.Context, error) {
 		// TODO maybe return an error
 		return nil, nil
 	}
-	mp := make(map[string]interface{}, 0)
+	mp := make(map[string]any, 0)
 	err := json.Unmarshal(m, &mp)
 	if err != nil {
 		return nil, err

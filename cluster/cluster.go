@@ -135,8 +135,7 @@ func buildRequest(
 			Data:  msg.Data,
 		},
 	}
-	ctx = pcontext.AddToPropagateCtx(ctx, constants.PeerIDKey, thisServer.ID)
-	ctx = pcontext.AddToPropagateCtx(ctx, constants.PeerServiceKey, thisServer.Type)
+	ctx = pcontext.AddListToPropagateCtx(ctx, constants.PeerIDKey, thisServer.ID, constants.PeerServiceKey, thisServer.Type)
 	req.Metadata, err = pcontext.Encode(ctx)
 	if err != nil {
 		return req, err

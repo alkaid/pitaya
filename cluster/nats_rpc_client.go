@@ -175,8 +175,7 @@ func (ns *NatsRPCClient) Call(
 
 	if ns.metricsReporters != nil {
 		startTime := time.Now()
-		ctx = pcontext.AddToPropagateCtx(ctx, constants.StartTimeKey, startTime.UnixNano())
-		ctx = pcontext.AddToPropagateCtx(ctx, constants.RouteKey, route.String())
+		ctx = pcontext.AddListToPropagateCtx(ctx, constants.StartTimeKey, startTime.UnixNano(), constants.RouteKey, route.String())
 		defer func() {
 			typ := "rpc"
 			metrics.ReportTimingFromCtx(ctx, ns.metricsReporters, typ, err)
@@ -248,8 +247,7 @@ func (ns *NatsRPCClient) Fork(
 	}
 	if ns.metricsReporters != nil {
 		startTime := time.Now()
-		ctx = pcontext.AddToPropagateCtx(ctx, constants.StartTimeKey, startTime.UnixNano())
-		ctx = pcontext.AddToPropagateCtx(ctx, constants.RouteKey, route.String())
+		ctx = pcontext.AddListToPropagateCtx(ctx, constants.StartTimeKey, startTime.UnixNano(), constants.RouteKey, route.String())
 		defer func() {
 			typ := "rpc"
 			metrics.ReportTimingFromCtx(ctx, ns.metricsReporters, typ, err)

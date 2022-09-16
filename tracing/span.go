@@ -58,7 +58,7 @@ func ExtractSpan(ctx context.Context) (context.Context, trace.SpanContext) {
 func InjectSpan(ctx context.Context) context.Context {
 	carrier := CarrierFromPropagateCtx(ctx)
 	if carrier == nil {
-		carrier = &Hunter{Carrier: map[string]string{}}
+		carrier = make(Carrier)
 	}
 	otel.GetTextMapPropagator().Inject(ctx, carrier)
 	return pcontext.AddToPropagateCtx(ctx, constants.SpanPropagateCtxKey, carrier)
