@@ -366,6 +366,12 @@ func (s *Sys) Kick(ctx context.Context, msg *protos.KickMsg) (*protos.KickAnswer
 func (s *Sys) BindBackendSession(ctx context.Context, msg *protos.BindBackendMsg) (*protos.Response, error) {
 	sess := s.sessionPool.GetSessionByUID(msg.Uid)
 	if sess == nil {
+		// 网关必须已经绑定过该uid
+		if s.server.Frontend {
+			logger.Zap.Error(constants.ErrSessionNotFound.Error())
+			return nil, constants.ErrSessionNotFound
+		}
+		// 非网关可以从context中获取session
 		sess = s.getSessionFromCtx(ctx)
 		if sess == nil && sess.UID() != msg.Uid {
 			logger.Zap.Error(constants.ErrSessionNotFound.Error())
@@ -373,6 +379,7 @@ func (s *Sys) BindBackendSession(ctx context.Context, msg *protos.BindBackendMsg
 		}
 	}
 	if !s.server.Frontend {
+		// 当前服不是目标服 报错
 		if msg.Btype != s.server.Type || msg.Bid != s.server.ID {
 			logger.Zap.Error(constants.ErrIllegalBindBackendID.Error())
 			return nil, constants.ErrIllegalBindBackendID
@@ -394,6 +401,12 @@ func (s *Sys) BindBackendSession(ctx context.Context, msg *protos.BindBackendMsg
 func (s *Sys) KickBackend(ctx context.Context, msg *protos.BindBackendMsg) (*protos.Response, error) {
 	sess := s.sessionPool.GetSessionByUID(msg.Uid)
 	if sess == nil {
+		// 网关找不到session,说明已经断线,无须清理
+		if s.server.Frontend {
+			logger.Zap.Debug("session not found when sessionKickBackend", zap.String("uid", msg.Uid))
+			return &protos.Response{Data: []byte("ack")}, nil
+		}
+		// 非网关找不到session 无法解绑
 		return nil, constants.ErrSessionNotFound
 	}
 	if !s.server.Frontend {
