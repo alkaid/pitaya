@@ -124,7 +124,7 @@ func (sys *Sys) Init() {
 	sys.sessionPool.OnSessionClose(func(s session.Session, callback map[string]string, reason session.CloseReason) {
 		if !sys.server.Frontend {
 			// 这个分支逻辑永远都不应该走进来
-			logger.Zap.Error("developer logic fatal!!")
+			logger.Zap.Error("", zap.Error(constants.ErrDeveloperLogicFatal))
 			return
 		}
 		// 重绑定发起的kick不做处理
@@ -159,12 +159,11 @@ func (sys *Sys) Init() {
 		}
 		var err error
 		var r *route.Route
-		// 当前是网关,回调前已经设置了backendID,同步redis后直接返回
+		// 严禁网关调用
 		if sys.server.Frontend {
-			// 同步到redis
-			return s.Flush2Cluster()
+			return constants.ErrDeveloperLogicFatal
 		}
-		// 本服不是网关且目标服不是本服 转发给目标服
+		// 目标服不是本服 转发给目标服
 		if sys.server.ID != serverId {
 			r, err = route.Decode(serverType + "." + constants.SessionBindBackendRoute)
 			if err != nil {
@@ -188,16 +187,7 @@ func (sys *Sys) Init() {
 				break
 			}
 			// 通知网关同步数据
-			var frontendSv *cluster.Server
-			frontendSv, err = sys.serverDiscovery.GetAnyFrontend()
-			if err != nil {
-				return err
-			}
-			r, err = route.Decode(frontendSv.Type + "." + constants.SessionBindBackendRoute)
-			if err != nil {
-				return err
-			}
-			err = sys.remote.RPC(ctx, "", r, &protos.Response{}, msg, s)
+			err = s.PushToFront(ctx)
 			if err != nil {
 				break
 			}
@@ -235,13 +225,12 @@ func (sys *Sys) Init() {
 		}
 		var err error
 		var r *route.Route
-		// 当前是网关,回调前清除了backendID,同步redis直接返回
+		// 严禁网关调用
 		if sys.server.Frontend {
-			// 同步到redis
-			return s.Flush2Cluster()
+			return constants.ErrDeveloperLogicFatal
 		}
 		logW := logger.Zap.With(zap.Int64("sid", s.ID()), zap.String("uid", s.UID()), zap.Int("reason", reason), zap.String("sv", serverType), zap.String("svID", serverId))
-		// 本服不是网关且目标服不是本服 转发给目标服成功后再转发网关
+		// 目标服不是本服 转发给目标服成功后再转发网关
 		if sys.server.ID != serverId {
 			// 转发目标服
 			r, err = route.Decode(serverType + "." + constants.KickBackendRoute)
@@ -271,18 +260,16 @@ func (sys *Sys) Init() {
 				return nil
 			}
 			// 通知网关同步数据
-			var frontendSv *cluster.Server
-			frontendSv, err = sys.serverDiscovery.GetAnyFrontend()
+			err = s.PushToFront(ctx)
 			if err != nil {
-				break
-			}
-			r, err = route.Decode(frontendSv.Type + "." + constants.KickBackendRoute)
-			if err != nil {
-				break
-			}
-			err = sys.remote.RPC(ctx, "", r, &protos.Response{}, msg, s)
-			if err != nil {
-				break
+				// 网关报错session找不到,说明网关的session已经下线,忽略该错误并补偿redis清除步骤
+				if errors.Is(err, protos.ErrSessionNotFound()) {
+					logW.Debug("frontend return ErrSessionNotFound,the session must be closed. ignore the error then clean cluster's cache")
+					err = s.Flush2Cluster()
+				}
+				if err != nil {
+					break
+				}
 			}
 			// 通知所有服务器 notify也是rpc调用，会导致frontend的session被SetDataEncoded,数据被同步
 			r, err = route.Decode(constants.SessionKickedBackendRoute)
@@ -328,9 +315,14 @@ func (s *Sys) BindSession(ctx context.Context, bindMsg *protos.BindMsg) (*protos
 func (s *Sys) PushSession(ctx context.Context, sessionData *protos.Session) (*protos.Response, error) {
 	sess := s.sessionPool.GetSessionByID(sessionData.Id)
 	if sess == nil {
-		return nil, constants.ErrSessionNotFound
+		// return nil, constants.ErrSessionNotFound
+		return nil, protos.ErrSessionNotFound()
 	}
 	if err := sess.SetDataEncoded(sessionData.Data); err != nil {
+		return nil, err
+	}
+	err := sess.Flush2Cluster()
+	if err != nil {
 		return nil, err
 	}
 	return &protos.Response{Data: []byte("ack")}, nil
@@ -364,25 +356,21 @@ func (s *Sys) Kick(ctx context.Context, msg *protos.KickMsg) (*protos.KickAnswer
 //  @return *protos.Response
 //  @return error
 func (s *Sys) BindBackendSession(ctx context.Context, msg *protos.BindBackendMsg) (*protos.Response, error) {
+	// 不能是网关收到
+	if s.server.Frontend {
+		return nil, constants.ErrDeveloperLogicFatal
+	}
+	// 当前服不是目标服 报错
+	if msg.Btype != s.server.Type || msg.Bid != s.server.ID {
+		logger.Zap.Error(constants.ErrIllegalBindBackendID.Error())
+		return nil, constants.ErrIllegalBindBackendID
+	}
 	sess := s.sessionPool.GetSessionByUID(msg.Uid)
 	if sess == nil {
-		// 网关必须已经绑定过该uid
-		if s.server.Frontend {
-			logger.Zap.Error(constants.ErrSessionNotFound.Error())
-			return nil, constants.ErrSessionNotFound
-		}
-		// 非网关可以从context中获取session
 		sess = s.getSessionFromCtx(ctx)
-		if sess == nil && sess.UID() != msg.Uid {
+		if sess == nil || sess.UID() != msg.Uid {
 			logger.Zap.Error(constants.ErrSessionNotFound.Error())
 			return nil, constants.ErrSessionNotFound
-		}
-	}
-	if !s.server.Frontend {
-		// 当前服不是目标服 报错
-		if msg.Btype != s.server.Type || msg.Bid != s.server.ID {
-			logger.Zap.Error(constants.ErrIllegalBindBackendID.Error())
-			return nil, constants.ErrIllegalBindBackendID
 		}
 	}
 	if err := sess.BindBackend(ctx, msg.Btype, msg.Bid, msg.Metadata); err != nil {
@@ -399,27 +387,19 @@ func (s *Sys) BindBackendSession(ctx context.Context, msg *protos.BindBackendMsg
 //  @return *protos.Response
 //  @return error
 func (s *Sys) KickBackend(ctx context.Context, msg *protos.BindBackendMsg) (*protos.Response, error) {
+	// 不能是网关收到
+	if s.server.Frontend {
+		return nil, constants.ErrDeveloperLogicFatal
+	}
+	// 当前服不是目标服 报错
+	if msg.Btype != s.server.Type || msg.Bid != s.server.ID {
+		logger.Zap.Error(constants.ErrIllegalBindBackendID.Error())
+		return nil, constants.ErrIllegalBindBackendID
+	}
 	sess := s.sessionPool.GetSessionByUID(msg.Uid)
 	if sess == nil {
-		// 网关找不到session,说明已经断线,无须清理
-		if s.server.Frontend {
-			logger.Zap.Debug("session not found when sessionKickBackend", zap.String("uid", msg.Uid))
-			// 断线的session从context中获取session数据来进行后续回调里的云端缓存清理
-			sess = s.getSessionFromCtx(ctx)
-			if sess == nil && sess.UID() != msg.Uid {
-				logger.Zap.Error(constants.ErrSessionNotFound.Error())
-				return nil, constants.ErrSessionNotFound
-			}
-		}
-		// 非网关找不到session 无法解绑
+		// 找不到 没绑定过 无法解绑
 		return nil, constants.ErrSessionNotFound
-	}
-	if !s.server.Frontend {
-		// 当前服不是目标服 报错
-		if msg.Btype != s.server.Type || msg.Bid != s.server.ID {
-			logger.Zap.Error(constants.ErrIllegalBindBackendID.Error())
-			return nil, constants.ErrIllegalBindBackendID
-		}
 	}
 	err := sess.KickBackend(ctx, msg.Btype, msg.Metadata)
 	return &protos.Response{Data: []byte("ack")}, err

@@ -585,23 +585,6 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 		}
 		receiver = reflect.ValueOf(rec)
 	}
-	params := []reflect.Value{receiver, reflect.ValueOf(ctx)}
-	if remote.HasArgs {
-		arg, err = unmarshalRemoteArg(remote, req.GetMsg().GetData())
-		if err != nil {
-			response := &protos.Response{
-				Status: &apierrors.Status{
-					Code:    http.StatusNotFound,
-					Message: err.Error(),
-					Metadata: map[string]string{
-						"route": rt.Short(),
-					},
-				},
-			}
-			return response
-		}
-		params = append(params, reflect.ValueOf(arg))
-	}
 	var sess session.Session
 	if req.Session != nil {
 		a, err := agent.NewRemote(
@@ -628,6 +611,23 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 	if sess != nil {
 		ctx = context.WithValue(ctx, constants.SessionCtxKey, sess)
 		ctx = util.CtxWithDefaultLogger(ctx, rt.String(), sess.UID())
+	}
+	params := []reflect.Value{receiver, reflect.ValueOf(ctx)}
+	if remote.HasArgs {
+		arg, err = unmarshalRemoteArg(remote, req.GetMsg().GetData())
+		if err != nil {
+			response := &protos.Response{
+				Status: &apierrors.Status{
+					Code:    http.StatusNotFound,
+					Message: err.Error(),
+					Metadata: map[string]string{
+						"route": rt.Short(),
+					},
+				},
+			}
+			return response
+		}
+		params = append(params, reflect.ValueOf(arg))
 	}
 	// 和 handlerPool.ProcessHandlerMessage 一样加入hook处理
 	var arg2 any

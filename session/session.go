@@ -120,12 +120,13 @@ type SessionPool interface {
 	SetClusterCache(storage CacheInterface)
 	// ImperfectSessionFromCluster  框架内部使用,请勿调用
 	//  @private pitaya
-	//  @Description:从后端存储的session数据构造出一个不健全的session.需要注意该session仅仅持有数据而没有agent网络代理,若调用 Session.Push() 等网络方法将引发空指针异常
+	//  @Description:从后端存储的session数据构造出一个不健全的session.
+	//  "不健全"指session的agent仅有少数 networkentity.NetworkEntity 方法
 	//  @receiver pool
 	//  @param uid
 	//  @return Session
 	//  @return error
-	ImperfectSessionFromCluster(uid string) (Session, error)
+	ImperfectSessionFromCluster(uid string, entity networkentity.NetworkEntity) (Session, error)
 }
 
 // HandshakeClientData represents information about the client sent on the handshake.
@@ -256,7 +257,9 @@ type Session interface {
 	Float64(key string) float64
 	String(key string) string
 	Value(key string) interface{}
-	// Deprecated:由于 SetData 只允许框架内部调用,所以此同步方法也弃用.上层请自行封装玩家数据,勿使用 Session 内部data
+	// PushToFront
+	//  Deprecated:由于 SetData 只允许框架内部调用,所以此同步方法也弃用.上层请自行封装玩家数据,勿使用 Session 内部data
+	//  推送session数据给网关,网关会同步本地session数据并刷新云端缓存
 	PushToFront(ctx context.Context) error
 	Clear()
 	SetHandshakeData(data *HandshakeData)
@@ -500,12 +503,12 @@ func (pool *sessionPoolImpl) SetClusterCache(storage CacheInterface) {
 // ImperfectSessionFromCluster
 //  @implement SessionPool.ImperfectSessionFromCluster
 //  TODO 逻辑移到 agent.Cluster
-func (pool *sessionPoolImpl) ImperfectSessionFromCluster(uid string) (Session, error) {
+func (pool *sessionPoolImpl) ImperfectSessionFromCluster(uid string, entity networkentity.NetworkEntity) (Session, error) {
 	v, err := pool.storage.Get(pool.getSessionStorageKey(uid))
 	if err != nil {
 		return nil, err
 	}
-	s := pool.NewSession(nil, false, uid)
+	s := pool.NewSession(entity, false, uid)
 	err = s.SetDataEncoded([]byte(v))
 	if err != nil {
 		return nil, err
@@ -810,7 +813,11 @@ func (s *sessionImpl) Close(callback map[string]string, reason ...CloseReason) {
 	if oldSession != nil && oldSession.ID() == s.ID() {
 		s.pool.sessionsByUID.Delete(s.UID())
 	} else {
-		logger.Zap.Debug("stored session not equal current session,ignore delete stored session", zap.Int64("oldid", oldSession.ID()), zap.Int64("id", s.ID()), zap.String("uid", s.UID()))
+		var oldID int64
+		if oldSession != nil {
+			oldID = oldSession.ID()
+		}
+		logger.Zap.Debug("stored session not equal current session,ignore delete stored session", zap.Int64("oldid", oldID), zap.Int64("id", s.ID()), zap.String("uid", s.UID()))
 	}
 	// TODO: this logic should be moved to nats rpc server
 	if s.IsFrontend && s.Subscriptions != nil && len(s.Subscriptions) > 0 {

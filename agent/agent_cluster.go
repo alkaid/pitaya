@@ -4,6 +4,13 @@ import (
 	"context"
 	"net"
 
+	"github.com/topfreegames/pitaya/v2/route"
+	"github.com/topfreegames/pitaya/v2/util"
+
+	"github.com/topfreegames/pitaya/v2/cluster"
+	"github.com/topfreegames/pitaya/v2/conn/message"
+	"github.com/topfreegames/pitaya/v2/serialize"
+
 	"github.com/topfreegames/pitaya/v2/constants"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/protos"
@@ -14,16 +21,26 @@ import (
 // Cluster 云端session(redis)的low networkentity.NetworkEntity
 //  @implement networkentity.NetworkEntity
 type Cluster struct {
-	Session session.Session // session
+	Session          session.Session          // session
+	rpcClient        cluster.RPCClient        // rpc client
+	serializer       serialize.Serializer     // message serializer
+	serviceDiscovery cluster.ServiceDiscovery // service discovery
 }
 
 // NewCluster create new Cluster instance
 func NewCluster(
 	uid string,
 	sessionPool session.SessionPool,
+	rpcClient cluster.RPCClient,
+	serializer serialize.Serializer,
+	serviceDiscovery cluster.ServiceDiscovery,
 ) (*Cluster, error) {
-	a := &Cluster{}
-	s, err := sessionPool.ImperfectSessionFromCluster(uid)
+	a := &Cluster{
+		serializer:       serializer,
+		rpcClient:        rpcClient,
+		serviceDiscovery: serviceDiscovery,
+	}
+	s, err := sessionPool.ImperfectSessionFromCluster(uid, a)
 	if err != nil {
 		return nil, err
 	}
@@ -32,37 +49,52 @@ func NewCluster(
 }
 
 // Kick kicks the user
-func (c *Cluster) Kick(ctx context.Context, reason ...session.CloseReason) error {
+func (a *Cluster) Kick(ctx context.Context, reason ...session.CloseReason) error {
 	logger.Zap.Error("not support in cluster session!", zap.Error(constants.ErrNotImplemented))
 	return nil
 }
 
 // Push pushes the message to the user
-func (c *Cluster) Push(route string, v interface{}) error {
+func (a *Cluster) Push(route string, v interface{}) error {
 	logger.Zap.Error("not support in cluster session!", zap.Error(constants.ErrNotImplemented))
 	return nil
 }
 
 // ResponseMID reponds the message with mid to the user
-func (c *Cluster) ResponseMID(ctx context.Context, mid uint, v interface{}, isError ...bool) error {
+func (a *Cluster) ResponseMID(ctx context.Context, mid uint, v interface{}, isError ...bool) error {
 	logger.Zap.Error("not support in cluster session!", zap.Error(constants.ErrNotImplemented))
 	return nil
 }
 
 // Close closes the remote
-func (c *Cluster) Close(callback map[string]string, reason ...session.CloseReason) error {
+func (a *Cluster) Close(callback map[string]string, reason ...session.CloseReason) error {
 	logger.Zap.Error("not support in cluster session!", zap.Error(constants.ErrNotImplemented))
 	return nil
 }
 
 // RemoteAddr returns the remote address of the user
-func (c *Cluster) RemoteAddr() net.Addr {
+func (a *Cluster) RemoteAddr() net.Addr {
 	logger.Zap.Error("not support in cluster session!", zap.Error(constants.ErrNotImplemented))
 	return nil
 }
 
 // SendRequest sends a request to a server
-func (c *Cluster) SendRequest(ctx context.Context, serverID, reqRoute string, v interface{}) (*protos.Response, error) {
-	logger.Zap.Error("not support in cluster session!", zap.Error(constants.ErrNotImplemented))
-	return nil, constants.ErrNotImplemented
+func (a *Cluster) SendRequest(ctx context.Context, serverID, reqRoute string, v interface{}) (*protos.Response, error) {
+	r, err := route.Decode(reqRoute)
+	if err != nil {
+		return nil, err
+	}
+	payload, err := util.SerializeOrRaw(a.serializer, v)
+	if err != nil {
+		return nil, err
+	}
+	msg := &message.Message{
+		Route: reqRoute,
+		Data:  payload,
+	}
+	server, err := a.serviceDiscovery.GetServer(serverID)
+	if err != nil {
+		return nil, err
+	}
+	return a.rpcClient.Call(ctx, protos.RPCType_User, r, nil, msg, server)
 }

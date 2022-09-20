@@ -12,12 +12,15 @@ const _ = apierrors.SupportPackageIsVersion1
 
 var errUnknown *apierrors.Error
 var errForbiddenServerOfSession *apierrors.Error
+var errSessionNotFound *apierrors.Error
 
 func init() {
 	errUnknown = apierrors.New(500, "protos.ErrUnknown", "", PitayaError_ErrUnknown.String())
 	apierrors.Register(errUnknown)
-	errForbiddenServerOfSession = apierrors.New(403, "protos.ErrForbiddenServerOfSession", "", "禁止该session请求此服务器,session未绑定")
+	errForbiddenServerOfSession = apierrors.New(403, "protos.ErrForbiddenServerOfSession", "err_pitaya_forbidden_server_of_session", "forbidden this session request the server,because session unbound")
 	apierrors.Register(errForbiddenServerOfSession)
+	errSessionNotFound = apierrors.New(400, "protos.ErrSessionNotFound", "err_pitaya_session_not_found", "session not found")
+	apierrors.Register(errSessionNotFound)
 }
 
 func ErrUnknown() *apierrors.Error {
@@ -27,4 +30,8 @@ func ErrUnknown() *apierrors.Error {
 // ErrForbiddenServerOfSession  禁止该session请求此服务器(session未绑定)
 func ErrForbiddenServerOfSession() *apierrors.Error {
 	return errForbiddenServerOfSession
+}
+
+func ErrSessionNotFound() *apierrors.Error {
+	return errSessionNotFound
 }

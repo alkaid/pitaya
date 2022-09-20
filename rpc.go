@@ -180,9 +180,10 @@ func (app *App) doFork(ctx context.Context, routeStr string, arg proto.Message, 
 }
 
 // imperfectSessionForRPC 为rpc调用获取一个可能不健全的session
+//  "不健全"指session的agent仅有少数 networkentity.NetworkEntity 方法
 //  - 本地pool有session返回session(数据和cluster是同步的)
 //  - context里有session返回session(bind后的session数据是和cluster同步的,因为从网关转发时打包了数据)
-//  - 上述都不存在时从cluster获取缓存数据构建一个虚拟session
+//  - 上述都不存在时从cluster获取缓存数据构建一个不健全session
 //  @receiver app
 //  @param ctx
 //  @param uid
@@ -202,7 +203,7 @@ func (app *App) imperfectSessionForRPC(ctx context.Context, uid string) (session
 		logger.Zap.Debug("use session from context for rpc", zap.String("uid", uid))
 		return sess, nil
 	}
-	agent, err := agent2.NewCluster(uid, app.sessionPool)
+	agent, err := agent2.NewCluster(uid, app.sessionPool, app.rpcClient, app.serializer, app.serviceDiscovery)
 	if err != nil {
 		logger.Zap.Debug("use session from cacheCluster for rpc", zap.String("uid", uid))
 		return nil, err
