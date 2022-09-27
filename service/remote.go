@@ -71,6 +71,7 @@ type RemoteService struct {
 	remoteBindingListeners []cluster.RemoteBindingListener   // 绑定发生时的回调，内部使用，仅用于相同serverType间的广播
 	remoteSessionListeners []cluster.RemoteSessionListener   // session生命周期监听
 	interceptors           map[string]*component.Interceptor // 所有拦截分发器,优先级别高于 remotes
+	sysHandlerHooks        *pipeline.HandlerHooks            // 客户端api hook
 }
 
 // NewRemoteService creates and return a new RemoteService
@@ -85,6 +86,7 @@ func NewRemoteService(
 	server *cluster.Server,
 	sessionPool session.SessionPool,
 	handlerHooks *pipeline.HandlerHooks,
+	sysHandlerHooks *pipeline.HandlerHooks,
 	handlerPool *HandlerPool,
 ) *RemoteService {
 	remote := &RemoteService{
@@ -103,6 +105,7 @@ func NewRemoteService(
 		remoteBindingListeners: make([]cluster.RemoteBindingListener, 0),
 		remoteSessionListeners: make([]cluster.RemoteSessionListener, 0),
 		interceptors:           make(map[string]*component.Interceptor),
+		sysHandlerHooks:        sysHandlerHooks,
 	}
 
 	remote.handlerHooks = handlerHooks
@@ -161,7 +164,8 @@ func (r *RemoteService) GetRemoteBindingListener() []cluster.RemoteBindingListen
 }
 
 // Call processes a remote call
-//  @implement protos.PitayaServer
+//
+//	@implement protos.PitayaServer
 func (r *RemoteService) Call(ctx context.Context, req *protos.Request) (*protos.Response, error) {
 	c, err := util.GetContextFromRequest(req, r.server.ID)
 	rt, err := route.Decode(req.GetMsg().GetRoute())
@@ -192,11 +196,12 @@ func (r *RemoteService) Call(ctx context.Context, req *protos.Request) (*protos.
 }
 
 // Deprecated:Use remote.Sys .SessionBoundFork() instead 由于上层frontend之间的广播方式改走Fork()实现,这里不会再收到响应
-//  @implement protos.PitayaServer
-//  is called when a remote server binds a user session and want us to acknowledge it
-//  frontend收到其他frontend实例已经成功绑定session的消息广播时(该广播仅发给所有frontend)
-//  具体来说是收到 modules.UniqueSession .Init() 中调用u.rpcClient.BroadcastSessionBind()发送的广播
-//  与 remote.Sys .BindSession()不同,具体参见其注释
+//
+//	@implement protos.PitayaServer
+//	is called when a remote server binds a user session and want us to acknowledge it
+//	frontend收到其他frontend实例已经成功绑定session的消息广播时(该广播仅发给所有frontend)
+//	具体来说是收到 modules.UniqueSession .Init() 中调用u.rpcClient.BroadcastSessionBind()发送的广播
+//	与 remote.Sys .BindSession()不同,具体参见其注释
 func (r *RemoteService) SessionBindRemote(ctx context.Context, msg *protos.BindMsg) (*protos.Response, error) {
 	for _, r := range r.remoteBindingListeners {
 		r.OnUserBind(msg.Uid, msg.Fid)
@@ -207,9 +212,10 @@ func (r *RemoteService) SessionBindRemote(ctx context.Context, msg *protos.BindM
 }
 
 // PushToUser sends a push to user
-//  @implement protos.PitayaServer
+//
+//	@implement protos.PitayaServer
 func (r *RemoteService) PushToUser(ctx context.Context, push *protos.Push) (*protos.Response, error) {
-	logger.Log.Debugf("sending push to user %s: %v", push.GetUid(), string(push.Data))
+	logger.Zap.Debug("remote sending push to user", zap.String("uid", push.GetUid()), zap.String("data", string(push.Data)))
 	s := r.sessionPool.GetSessionByUID(push.GetUid())
 	if s != nil {
 		err := s.Push(push.Route, push.Data)
@@ -224,9 +230,10 @@ func (r *RemoteService) PushToUser(ctx context.Context, push *protos.Push) (*pro
 }
 
 // KickUser sends a kick to user
-//  @implement protos.PitayaServer
-//  收到其他服务调用 cluster.RPCClient .SendKick() 时,一般来说是在拿不到 session.Session 只有uid的情况下.
-//  与 remote.Sys .Kick()不同，后者用于session的调用
+//
+//	@implement protos.PitayaServer
+//	收到其他服务调用 cluster.RPCClient .SendKick() 时,一般来说是在拿不到 session.Session 只有uid的情况下.
+//	与 remote.Sys .Kick()不同，后者用于session的调用
 func (r *RemoteService) KickUser(ctx context.Context, kick *protos.KickMsg) (*protos.KickAnswer, error) {
 	logger.Log.Debugf("sending kick to user %s", kick.GetUserId())
 	s := r.sessionPool.GetSessionByUID(kick.GetUserId())
@@ -359,13 +366,14 @@ func (r *RemoteService) Notify(ctx context.Context, serverID string, ro *route.R
 }
 
 // NotifyAll 通知集群内所有服务,不包括自己
-//  @receiver r
-//  @param ctx
-//  @param ro
-//  @param self
-//  @param arg
-//  @param session
-//  @return error
+//
+//	@receiver r
+//	@param ctx
+//	@param ro
+//	@param self
+//	@param arg
+//	@param session
+//	@return error
 func (r *RemoteService) NotifyAll(ctx context.Context, ro *route.Route, self *cluster.Server, arg proto.Message, session session.Session) error {
 	var data []byte
 	var err error
@@ -439,9 +447,10 @@ func (r *RemoteService) Register(comp component.Component, opts []component.Opti
 }
 
 // RegisterInterceptor 注册拦截分发器,优先级别高于 component.Remote
-//  @receiver r
-//  @param serviceName
-//  @param interceptor
+//
+//	@receiver r
+//	@param serviceName
+//	@param interceptor
 func (r *RemoteService) RegisterInterceptor(serviceName string, interceptor *component.Interceptor) {
 	r.interceptors[serviceName] = interceptor
 }
@@ -728,7 +737,7 @@ func (r *RemoteService) handleRPCSys(ctx context.Context, req *protos.Request, r
 		return response
 	}
 
-	ret, err := r.handlerPool.ProcessHandlerMessage(ctx, rt, r.serializer, r.handlerHooks, a.Session, req.GetMsg().GetData(), req.GetMsg().GetType(), true)
+	ret, err := r.handlerPool.ProcessHandlerMessage(ctx, rt, r.serializer, r.sysHandlerHooks, a.Session, req.GetMsg().GetData(), req.GetMsg().GetType(), true)
 	if err != nil {
 		logger.Log.Warnf(err.Error())
 		response = &protos.Response{

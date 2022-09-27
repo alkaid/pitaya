@@ -47,13 +47,15 @@ func (app *App) RPCTo(ctx context.Context, serverID, routeStr string, reply prot
 }
 
 // Notify
-//  @implement Pitaya.Notify
+//
+//	@implement Pitaya.Notify
 func (app *App) Notify(ctx context.Context, routeStr string, arg proto.Message, uid string) error {
 	return app.doSendNotify(ctx, "", routeStr, arg, uid)
 }
 
 // NotifyAll
-//  @implement Pitaya.NotifyAll
+//
+//	@implement Pitaya.NotifyAll
 func (app *App) NotifyAll(ctx context.Context, routeStr string, arg proto.Message, uid string) error {
 	return app.doSendNotifyAll(ctx, routeStr, arg, uid)
 }
@@ -64,7 +66,8 @@ func (app *App) Fork(ctx context.Context, routeStr string, arg proto.Message, ui
 }
 
 // NotifyTo
-//  @implement Pitaya.NotifyTo
+//
+//	@implement Pitaya.NotifyTo
 func (app *App) NotifyTo(ctx context.Context, serverID, routeStr string, arg proto.Message) error {
 	return app.doSendNotify(ctx, serverID, routeStr, arg, "")
 }
@@ -180,32 +183,33 @@ func (app *App) doFork(ctx context.Context, routeStr string, arg proto.Message, 
 }
 
 // imperfectSessionForRPC 为rpc调用获取一个可能不健全的session
-//  "不健全"指session的agent仅有少数 networkentity.NetworkEntity 方法
-//  - 本地pool有session返回session(数据和cluster是同步的)
-//  - context里有session返回session(bind后的session数据是和cluster同步的,因为从网关转发时打包了数据)
-//  - 上述都不存在时从cluster获取缓存数据构建一个不健全session
-//  @receiver app
-//  @param ctx
-//  @param uid
-//  @return session.Session
-//  @return error
+//
+//	"不健全"指session的agent仅有少数 networkentity.NetworkEntity 方法
+//	- 本地pool有session返回session(数据和cluster是同步的)
+//	- context里有session返回session(bind后的session数据是和cluster同步的,因为从网关转发时打包了数据)
+//	- 上述都不存在时从cluster获取缓存数据构建一个不健全session
+//	@receiver app
+//	@param ctx
+//	@param uid
+//	@return session.Session
+//	@return error
 func (app *App) imperfectSessionForRPC(ctx context.Context, uid string) (session.Session, error) {
 	if uid == "" {
 		return nil, constants.ErrIllegalUID
 	}
 	sess := app.sessionPool.GetSessionByUID(uid)
 	if sess != nil {
-		logger.Zap.Debug("use session from sessionPool for rpc", zap.String("uid", uid))
+		logger.Zap.Debug("use session from sessionPool for rpc or getBoundData", zap.String("uid", uid))
 		return sess, nil
 	}
 	sess = app.GetSessionFromCtx(ctx)
 	if sess != nil && sess.UID() == uid {
-		logger.Zap.Debug("use session from context for rpc", zap.String("uid", uid))
+		logger.Zap.Debug("use session from context for rpc or getBoundData", zap.String("uid", uid))
 		return sess, nil
 	}
 	agent, err := agent2.NewCluster(uid, app.sessionPool, app.rpcClient, app.serializer, app.serviceDiscovery)
 	if err != nil {
-		logger.Zap.Debug("use session from cacheCluster for rpc", zap.String("uid", uid))
+		logger.Zap.Debug("use session from cacheCluster for rpc or getBoundData", zap.String("uid", uid))
 		return nil, err
 	}
 	return agent.Session, nil

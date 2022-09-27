@@ -271,6 +271,7 @@ func (builder *Builder) Build() Pitaya {
 			builder.Server,
 			builder.SessionPool,
 			builder.RemoteHooks,
+			builder.HandlerHooks,
 			handlerPool,
 		)
 
