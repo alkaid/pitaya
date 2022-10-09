@@ -50,5 +50,13 @@ type ServiceDiscovery interface {
 	//  @return string
 	//  @return error
 	GetConsistentHashNode(serverType string, sessionID string) (string, error)
+	// LeaderID 获取主节点ID 只有在配置 sd.etcd.election.enable 开启时有效
+	//
+	// @return string
+	LeaderID() string
+	// IsLeader 是否主节点 只有在配置 sd.etcd.election.enable 开启时有效
+	//
+	// @return bool
+	IsLeader() bool
 	interfaces.Module
 }

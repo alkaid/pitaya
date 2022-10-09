@@ -88,6 +88,14 @@ type Pitaya interface {
 	//  @return map[string]*Server 索引为serverType,元素为Server
 	GetServerTypes() map[string]*cluster.Server
 	GetServers() []*cluster.Server
+	// LeaderID 获取主节点ID 只有在配置 sd.etcd.election.enable 开启时有效
+	//
+	// @return string
+	LeaderID() string
+	// IsLeader 是否主节点 只有在配置 sd.etcd.election.enable 开启时有效
+	//
+	// @return bool
+	IsLeader() bool
 	// FlushServer2Cluster 将修改后的server数据保存到云端(etcd)
 	//  @param server
 	//  @return error
@@ -112,6 +120,13 @@ type Pitaya interface {
 	//  @param afterFunc
 	PushAfterRemoteHook(afterFunc pipeline.AfterHandlerTempl)
 	GetSessionFromCtx(ctx context.Context) session.Session
+	// GetSessionByUID 根据uid获取session,尝试顺序 sessionPool>context>cache cluster
+	//
+	// @param ctx
+	// @param uid
+	// @return session.Session
+	// @return error
+	GetSessionByUID(ctx context.Context, uid string) (session.Session, error)
 	// OnStarted 设置 Start 后的回调,内部会启一个goroutine执行
 	//  @param fun
 	OnStarted(fun func())
@@ -373,7 +388,8 @@ func (app *App) GetServersByType(t string) (map[string]*cluster.Server, error) {
 }
 
 // GetServerTypes
-//  @implement App.GetServerTypes
+//
+//	@implement App.GetServerTypes
 func (app *App) GetServerTypes() map[string]*cluster.Server {
 	return app.serviceDiscovery.GetServerTypes()
 }
@@ -383,27 +399,37 @@ func (app *App) GetServers() []*cluster.Server {
 	return app.serviceDiscovery.GetServers()
 }
 
+func (app *App) LeaderID() string {
+	return app.serviceDiscovery.LeaderID()
+}
+func (app *App) IsLeader() bool {
+	return app.serviceDiscovery.IsLeader()
+}
+
 // FlushServer2Cluster
-//  @implement Pitaya.FlushServer2Cluster
-//  @receiver app
-//  @param server
-//  @return error
+//
+//	@implement Pitaya.FlushServer2Cluster
+//	@receiver app
+//	@param server
+//	@return error
 func (app *App) FlushServer2Cluster(server *cluster.Server) error {
 	return app.serviceDiscovery.FlushServer2Cluster(server)
 }
 
 // AddServerDiscoveryListener
-//  @implement Pitaya.AddServerDiscoveryListener
-//  @receiver app
-//  @param listener
+//
+//	@implement Pitaya.AddServerDiscoveryListener
+//	@receiver app
+//	@param listener
 func (app *App) AddServerDiscoveryListener(listener cluster.SDListener) {
 	app.serviceDiscovery.AddListener(listener)
 }
 
 // AddConfLoader
-//  @implement Pitaya.AddConfLoader
-//  @receiver app
-//  @param loader
+//
+//	@implement Pitaya.AddConfLoader
+//	@receiver app
+//	@param loader
 func (app *App) AddConfLoader(loader config.ConfLoader) {
 	if app.conf == nil {
 		logger.Log.Error("app conf is nil!")
@@ -441,12 +467,13 @@ func (app *App) AddSessionListener(listener cluster.RemoteSessionListener) {
 }
 
 // BindBackend bind session in stateful backend 注意业务层若当前服务是frontend时请勿调用。frontend时仅框架内自己调用
-//  @param ctx
-//  @param uid
-//  @param targetServerType 要绑定的stateful backend服务
-//  @param targetServerID 要绑定的stateful backend id
-//  @param callback 回调数据,通知其他服务时透传
-//  @return error
+//
+//	@param ctx
+//	@param uid
+//	@param targetServerType 要绑定的stateful backend服务
+//	@param targetServerID 要绑定的stateful backend id
+//	@param callback 回调数据,通知其他服务时透传
+//	@return error
 func (app *App) BindBackend(ctx context.Context, uid string, targetServerType string, targetServerID string, callback map[string]string) error {
 	sess, err := app.imperfectSessionForRPC(ctx, uid)
 	if err != nil {
@@ -456,12 +483,13 @@ func (app *App) BindBackend(ctx context.Context, uid string, targetServerType st
 }
 
 // KickBackend 解绑backend
-//  @param ctx
-//  @param uid
-//  @param targetServerType 目标服
-//  @param callback 回调数据,通知其他服务时透传
-//  @param reason
-//  @return error
+//
+//	@param ctx
+//	@param uid
+//	@param targetServerType 目标服
+//	@param callback 回调数据,通知其他服务时透传
+//	@param reason
+//	@return error
 func (app *App) KickBackend(ctx context.Context, uid string, targetServerType string, callback map[string]string) error {
 	sess, err := app.imperfectSessionForRPC(ctx, uid)
 	if err != nil {
@@ -471,11 +499,12 @@ func (app *App) KickBackend(ctx context.Context, uid string, targetServerType st
 }
 
 // GetBoundData 获取uid对应session绑定的数据,仅在uid session bound到网关后才有效,因为bound后才会从cluster缓存同步数据给session
-//  @receiver app
-//  @param ctx
-//  @param uid
-//  @return *session.BoundData
-//  @return error
+//
+//	@receiver app
+//	@param ctx
+//	@param uid
+//	@return *session.BoundData
+//	@return error
 func (app *App) GetBoundData(ctx context.Context, uid string) (*session.BoundData, error) {
 	sess, err := app.imperfectSessionForRPC(ctx, uid)
 	if err != nil {
@@ -673,6 +702,10 @@ func (app *App) GetSessionFromCtx(ctx context.Context) session.Session {
 	return sessionVal.(session.Session)
 }
 
+func (app *App) GetSessionByUID(ctx context.Context, uid string) (session.Session, error) {
+	return app.imperfectSessionForRPC(ctx, uid)
+}
+
 // GetDefaultLoggerFromCtx returns the default logger from the given context
 func GetDefaultLoggerFromCtx(ctx context.Context) logging.Logger {
 	l := ctx.Value(constants.LoggerCtxKey)
@@ -742,17 +775,19 @@ func AddGRPCInfoToMetadata(
 }
 
 // Descriptor 根据 protoName 获取对应 protobuf 文件及其引用文件的 descriptor
-//  @param protoName
-//  @param protoDescs key为proto文件注册路径
-//  @return error
+//
+//	@param protoName
+//	@param protoDescs key为proto文件注册路径
+//	@return error
 func Descriptor(protoName string, protoDescs map[string]*descriptorpb.FileDescriptorProto) error {
 	return docgenerator.ProtoDescriptors(protoName, protoDescs)
 }
 
 // FileDescriptor 根据文件名获取对应 protobuf 文件及其引用文件的 descriptor
-//  @param protoName
-//  @param protoDescs key为proto文件注册路径
-//  @return error
+//
+//	@param protoName
+//	@param protoDescs key为proto文件注册路径
+//	@return error
 func FileDescriptor(protoName string, protoDescs map[string]*descriptorpb.FileDescriptorProto) error {
 	return docgenerator.ProtoFileDescriptors(protoName, protoDescs)
 }

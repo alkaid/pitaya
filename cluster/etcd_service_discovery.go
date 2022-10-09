@@ -28,6 +28,10 @@ import (
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
+
+	"go.etcd.io/etcd/client/v3/concurrency"
+
 	"github.com/pkg/errors"
 
 	"github.com/topfreegames/pitaya/v2/co"
@@ -71,6 +75,16 @@ type etcdServiceDiscovery struct {
 	syncServersParallelism int
 	syncServersRunning     chan bool
 	consistentHash         map[string]*hash.ConsistentHash
+
+	// 选主相关
+	electionEnable   bool   // 是否开启选举
+	electionName     string // 竞选名,不传的话默认为server.Type
+	resumeLeader     bool   // 若连上后发现自己是leader 是否使用原leader创建election. false的话会辞职
+	reconnectBackOff time.Duration
+	session          *concurrency.Session
+	election         *concurrency.Election
+	electionCancel   context.CancelFunc // 选举取消
+	leaderID         string
 }
 
 // NewEtcdServiceDiscovery ctor
@@ -95,6 +109,10 @@ func NewEtcdServiceDiscovery(
 		cli:                client,
 		syncServersRunning: make(chan bool),
 		consistentHash:     make(map[string]*hash.ConsistentHash),
+		resumeLeader:       true,
+		reconnectBackOff:   time.Second * 2,
+		electionName:       server.Type,
+		electionEnable:     false,
 	}
 	sd.configure(config)
 
@@ -102,8 +120,9 @@ func NewEtcdServiceDiscovery(
 }
 
 // GetSelfServer @implement ServiceDiscovery.GetSelfServer
-//  @receiver sd
-//  @return *Server
+//
+//	@receiver sd
+//	@return *Server
 func (sd etcdServiceDiscovery) GetSelfServer() *Server {
 	return sd.server
 }
@@ -124,6 +143,11 @@ func (sd *etcdServiceDiscovery) configure(config config.EtcdServiceDiscoveryConf
 	sd.shutdownDelay = config.Shutdown.Delay
 	sd.serverTypesBlacklist = config.ServerTypesBlacklist
 	sd.syncServersParallelism = config.SyncServers.Parallelism
+	sd.electionEnable = config.Election.Enable
+	if config.Election.Name != "" {
+		sd.electionName = config.Election.Name
+	}
+	sd.electionName = "election/" + sd.electionName
 }
 
 func (sd *etcdServiceDiscovery) watchLeaseChan(c <-chan *clientv3.LeaseKeepAliveResponse) {
@@ -218,10 +242,11 @@ func (sd *etcdServiceDiscovery) grantLease() error {
 }
 
 // FlushServer2Cluster
-//  @implement ServiceDiscovery.FlushServer2Cluster
-//  @receiver sd
-//  @param server
-//  @return error
+//
+//	@implement ServiceDiscovery.FlushServer2Cluster
+//	@receiver sd
+//	@param server
+//	@return error
 func (sd *etcdServiceDiscovery) FlushServer2Cluster(server *Server) error {
 	return sd.addServerIntoEtcd(server)
 }
@@ -335,7 +360,7 @@ func (sd *etcdServiceDiscovery) GetServersByType(serverType string) (map[string]
 func (sd *etcdServiceDiscovery) GetConsistentHashNode(serverType string, sessionID string) (string, error) {
 	ha := sd.consistentHash[serverType]
 	if ha == nil {
-		return "", constants.ErrServerNotFound
+		return "", errors.WithStack(fmt.Errorf("%w server=%s,sid=%s", constants.ErrServerNotFound, serverType, sessionID))
 	}
 	node, ok := sd.consistentHash[serverType].Get(sessionID)
 	if !ok {
@@ -371,7 +396,8 @@ func (sd *etcdServiceDiscovery) GetAnyFrontend() (*Server, error) {
 }
 
 // GetServerTypes
-//  @implement ServiceDiscovery.GetServerTypes
+//
+//	@implement ServiceDiscovery.GetServerTypes
 func (sd *etcdServiceDiscovery) GetServerTypes() map[string]*Server {
 	ret := make(map[string]*Server, len(sd.serverMapByType))
 	for t, m := range sd.serverMapByType {
@@ -386,6 +412,23 @@ func (sd *etcdServiceDiscovery) GetServerTypes() map[string]*Server {
 func (sd *etcdServiceDiscovery) bootstrap() error {
 	if err := sd.grantLease(); err != nil {
 		return err
+	}
+
+	// 选举
+	if sd.electionEnable {
+		var ctx context.Context
+		ctx, sd.electionCancel = context.WithCancel(context.Background())
+		leaderChan, err := sd.runElection(ctx)
+		if err != nil {
+			return err
+		}
+		co.Go(func() {
+			for leader := range leaderChan {
+				sd.leaderID = leader
+				// TODO 抛出监听给业务层
+			}
+		})
+
 	}
 
 	if err := sd.bootstrapServer(sd.server); err != nil {
@@ -659,6 +702,9 @@ func (sd *etcdServiceDiscovery) SyncServers(firstSync bool) error {
 // BeforeShutdown executes before shutting down and will remove the server from the list
 func (sd *etcdServiceDiscovery) BeforeShutdown() {
 	sd.revoke()
+	if sd.electionCancel != nil {
+		sd.electionCancel()
+	}
 	time.Sleep(sd.shutdownDelay) // Sleep for a short while to ensure shutdown has propagated
 }
 
@@ -788,4 +834,209 @@ func (sd *etcdServiceDiscovery) isServerTypeBlacklisted(svType string) bool {
 		}
 	}
 	return false
+}
+
+func (sd *etcdServiceDiscovery) runElection(ctx context.Context) (<-chan string, error) {
+	var observe <-chan clientv3.GetResponse
+	var node *clientv3.GetResponse
+	var errChan chan error
+	var leaderID string
+	var err error
+
+	var leaderChan chan string
+	setLeader := func(id string) {
+		// Only report changes in leadership
+		if leaderID == id {
+			return
+		}
+		leaderID = id
+		logger.Zap.Debug("etcd election leader change", zap.String("name", sd.electionName), zap.String("leaderID", leaderID))
+		leaderChan <- id
+	}
+
+	if err = sd.newSession(ctx, sd.leaseID); err != nil {
+		return nil, errors.Wrap(err, "while creating initial session")
+	}
+
+	leaderChan = make(chan string, 10)
+	go func() {
+		defer close(leaderChan)
+
+		for {
+			// Discover who if any, is leader of this election
+			if node, err = sd.election.Leader(ctx); err != nil {
+				if err != concurrency.ErrElectionNoLeader {
+					logger.Zap.Error("while determining election leader", zap.Error(err))
+					goto reconnect
+				}
+			} else {
+				// If we are resuming an election from which we previously had leadership we
+				// have 2 options
+				// 1. Resume the leadership if the lease has not expired. This is a race as the
+				//    lease could expire in between the `Leader()` call and when we resume
+				//    observing changes to the election. If this happens we should detect the
+				//    session has expired during the observation loop.
+				// 2. Resign the leadership immediately to allow a new leader to be chosen.
+				//    This option will almost always result in transfer of leadership.
+				if string(node.Kvs[0].Value) == sd.server.ID {
+					// If we want to resume leadership
+					if sd.resumeLeader {
+						// Recreate our session with the old lease id
+						if err = sd.newSession(ctx, clientv3.LeaseID(node.Kvs[0].Lease)); err != nil {
+							logger.Zap.Error("while re-establishing session with lease", zap.Error(err))
+							goto reconnect
+						}
+						sd.election = concurrency.ResumeElection(sd.session, sd.electionName,
+							string(node.Kvs[0].Key), node.Kvs[0].CreateRevision)
+
+						// Because Campaign() only returns if the election entry doesn't exist
+						// we must skip the campaign call and go directly to observe when resuming
+						goto observe
+					} else {
+						// If resign takes longer than our TTL then lease is expired and we are no
+						// longer leader anyway.
+						ctx, cancel := context.WithTimeout(ctx, sd.heartbeatTTL)
+						election := concurrency.ResumeElection(sd.session, sd.electionName,
+							string(node.Kvs[0].Key), node.Kvs[0].CreateRevision)
+						err = election.Resign(ctx)
+						cancel()
+						if err != nil {
+							logger.Zap.Error("while resigning leadership after reconnect", zap.Error(err))
+							goto reconnect
+						}
+					}
+				}
+			}
+			// Reset leadership if we had it previously
+			if err != nil {
+				// no leader
+				setLeader("")
+			} else {
+				setLeader(string(node.Kvs[0].Value))
+			}
+
+			// Attempt to become leader
+			errChan = make(chan error)
+			go func() {
+				// Make this a non blocking call so we can check for session close
+				errChan <- sd.election.Campaign(ctx, sd.server.ID)
+			}()
+
+			select {
+			case err = <-errChan:
+				if err != nil {
+					if errors.Cause(err) == context.Canceled {
+						return
+					}
+					// NOTE: Campaign currently does not return an error if session expires
+					logger.Zap.Error("while campaigning for leader", zap.Error(err))
+					sd.session.Close()
+					goto reconnect
+				}
+			case <-ctx.Done():
+				sd.session.Close()
+				return
+			case <-sd.session.Done():
+				goto reconnect
+			}
+
+		observe:
+			// If Campaign() returned without error, we are leader
+			setLeader(sd.server.ID)
+
+			// Observe changes to leadership
+			observe = sd.election.Observe(ctx)
+			for {
+				select {
+				case resp, ok := <-observe:
+					if !ok {
+						// NOTE: Observe will not close if the session expires, we must
+						// watch for session.Done()
+						sd.session.Close()
+						goto reconnect
+					}
+					if string(resp.Kvs[0].Value) == sd.server.ID {
+						setLeader(string(resp.Kvs[0].Value))
+					} else {
+						// We are not leader
+						setLeader(string(resp.Kvs[0].Value))
+						break
+					}
+				case <-ctx.Done():
+					if leaderID == sd.server.ID {
+						// If resign takes longer than our TTL then lease is expired and we are no
+						// longer leader anyway.
+						ctx, cancel := context.WithTimeout(context.Background(), sd.heartbeatTTL)
+						if err = sd.election.Resign(ctx); err != nil {
+							logger.Zap.Error("while resigning leadership during shutdown", zap.Error(err))
+						}
+						cancel()
+					}
+					sd.session.Close()
+					return
+				case <-sd.session.Done():
+					goto reconnect
+				}
+			}
+
+		reconnect:
+			logger.Zap.Debug("etcd election need reconnect")
+			// 出错重连 无主
+			setLeader("")
+			for {
+				if err = sd.newSession(ctx, 0); err != nil {
+					if errors.Cause(err) == context.Canceled {
+						return
+					}
+					logger.Zap.Error("while creating new session", zap.Error(err))
+					tick := time.NewTicker(sd.reconnectBackOff)
+					select {
+					case <-ctx.Done():
+						tick.Stop()
+						return
+					case <-tick.C:
+						tick.Stop()
+					}
+					continue
+				}
+				break
+			}
+		}
+	}()
+
+	// Wait until we have a leader before returning
+	for {
+		resp, err := sd.election.Leader(ctx)
+		if err != nil {
+			if err != concurrency.ErrElectionNoLeader {
+				return nil, err
+			}
+			time.Sleep(time.Millisecond * 300)
+			continue
+		}
+		// If we are not leader, notify the channel
+		if string(resp.Kvs[0].Value) != sd.server.ID {
+			leaderChan <- string(resp.Kvs[0].Value)
+		}
+		break
+	}
+	return leaderChan, nil
+}
+
+func (sd *etcdServiceDiscovery) newSession(ctx context.Context, id clientv3.LeaseID) error {
+	var err error
+	sd.session, err = concurrency.NewSession(sd.cli, concurrency.WithTTL(int(sd.heartbeatTTL.Seconds())),
+		concurrency.WithContext(ctx), concurrency.WithLease(id))
+	if err != nil {
+		return err
+	}
+	sd.election = concurrency.NewElection(sd.session, sd.electionName)
+	return nil
+}
+
+func (sd *etcdServiceDiscovery) LeaderID() string {
+	return sd.leaderID
+}
+func (sd *etcdServiceDiscovery) IsLeader() bool {
+	return sd.leaderID == sd.server.ID
 }

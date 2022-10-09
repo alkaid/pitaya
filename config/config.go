@@ -420,6 +420,11 @@ type EtcdServiceDiscoveryConfig struct {
 		Delay time.Duration
 	}
 	ServerTypesBlacklist []string
+	// 选举
+	Election struct {
+		Enable bool   // 是否开启
+		Name   string // 岗位名称
+	}
 }
 
 type RedisConfig struct {
@@ -586,6 +591,10 @@ func NewDefaultEtcdServiceDiscoveryConfig() *EtcdServiceDiscoveryConfig {
 			Delay: time.Duration(300 * time.Millisecond),
 		},
 		ServerTypesBlacklist: nil,
+		Election: struct {
+			Enable bool
+			Name   string
+		}{},
 	}
 }
 

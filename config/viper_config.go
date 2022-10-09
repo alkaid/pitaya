@@ -46,7 +46,8 @@ type ConfLoader interface {
 }
 
 // LoaderFactory ConfLoader 工厂,用于生成需要动态包装的 ConfLoader 实现
-//  @implement ConfLoader
+//
+//	@implement ConfLoader
 type LoaderFactory struct {
 	// ConfLoader.Reload 的包装函数
 	ReloadApply func(key string, confStruct interface{})
@@ -143,7 +144,8 @@ func (c *Config) fillDefaultValues() {
 		"pitaya.cluster.sd.etcd.syncservers.interval":           etcdSDConfig.SyncServers.Interval,
 		"pitaya.cluster.sd.etcd.syncserversparallelism":         etcdSDConfig.SyncServers.Parallelism,
 		"pitaya.cluster.sd.etcd.shutdown.delay":                 etcdSDConfig.Shutdown.Delay,
-		"pitaya.cluster.sd.etcd.servertypeblacklist":            etcdSDConfig.ServerTypesBlacklist,
+		"pitaya.cluster.sd.etcd.election.enable":                etcdSDConfig.Election.Enable,
+		"pitaya.cluster.sd.etcd.election.name":                  etcdSDConfig.Election.Name,
 		// the sum of this config among all the frontend servers should always be less than
 		// the sum of pitaya.buffer.cluster.rpc.server.nats.messages, for covering the worst case scenario
 		// a single backend server should have the config pitaya.buffer.cluster.rpc.server.nats.messages bigger
@@ -207,8 +209,9 @@ func (c *Config) fillDefaultValues() {
 }
 
 // PitayaAll 获取框架配置
-//  @receiver c
-//  @return PitayaAll
+//
+//	@receiver c
+//	@return PitayaAll
 func (c *Config) PitayaAll() PitayaAll {
 	return *c.pitayaAll
 }
@@ -249,7 +252,8 @@ func (c *Config) Provide() (key string, confStruct interface{}) {
 }
 
 // InitLoad 初始化加载本地或远程配置.业务层创建App前调用,仅允许一次
-//  @receiver c
+//
+//	@receiver c
 func (c *Config) InitLoad() error {
 	if c.inited {
 		return errors.New("config already inited")
@@ -283,8 +287,9 @@ func (c *Config) InitLoad() error {
 }
 
 // Watch 开启监控
-//  @receiver c
-//  @return error
+//
+//	@receiver c
+//	@return error
 func (c *Config) watch() error {
 	cnf := &ConfSource{}
 	err := c.UnmarshalKey("pitaya.confsource", cnf)
@@ -310,9 +315,10 @@ func (c *Config) watch() error {
 }
 
 // GetDuration returns a duration from the inner config
-//  @receiver c
-//  @param s finally call time.ParseDuration
-//  @return time.Duration
+//
+//	@receiver c
+//	@param s finally call time.ParseDuration
+//	@return time.Duration
 func (c *Config) GetDuration(s string) time.Duration {
 	return c.config.GetDuration(s)
 }

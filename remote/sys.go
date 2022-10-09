@@ -290,9 +290,10 @@ func (sys *Sys) Init() {
 }
 
 // BindSession binds the local session
-//  @see constants.SessionBindRoute
-//  frontend收到非frotend服务转发的 session.Session .Bind()请求时
-//  与 service.RemoteService .SessionBindRemote()不同,具体参见其注释
+//
+//	@see constants.SessionBindRoute
+//	frontend收到非frotend服务转发的 session.Session .Bind()请求时
+//	与 service.RemoteService .SessionBindRemote()不同,具体参见其注释
 func (s *Sys) BindSession(ctx context.Context, bindMsg *protos.BindMsg) (*protos.Response, error) {
 	// func (s *Sys) BindSession(ctx context.Context, sessionData *protos.Session) (*protos.Response, error) {
 	sess := s.sessionPool.GetSessionByID(bindMsg.Sid)
@@ -306,12 +307,13 @@ func (s *Sys) BindSession(ctx context.Context, bindMsg *protos.BindMsg) (*protos
 }
 
 // PushSession updates the local session
-//  @see constants.SessionPushRoute
-//  @receiver s
-//  @param ctx
-//  @param sessionData
-//  @return *protos.Response
-//  @return error
+//
+//	@see constants.SessionPushRoute
+//	@receiver s
+//	@param ctx
+//	@param sessionData
+//	@return *protos.Response
+//	@return error
 func (s *Sys) PushSession(ctx context.Context, sessionData *protos.Session) (*protos.Response, error) {
 	sess := s.sessionPool.GetSessionByID(sessionData.Id)
 	if sess == nil {
@@ -329,9 +331,10 @@ func (s *Sys) PushSession(ctx context.Context, sessionData *protos.Session) (*pr
 }
 
 // Kick kicks a local user
-//  @see constants.KickRoute
-//  frontend收到非frotend服务转发的 session.Session .Kick()请求时
-//  与 service.RemoteService .KickUser()不同, 后者用于拿不到 session.Session 只有uid的条件下用rpcClient发送的情况
+//
+//	@see constants.KickRoute
+//	frontend收到非frotend服务转发的 session.Session .Kick()请求时
+//	与 service.RemoteService .KickUser()不同, 后者用于拿不到 session.Session 只有uid的条件下用rpcClient发送的情况
 func (s *Sys) Kick(ctx context.Context, msg *protos.KickMsg) (*protos.KickAnswer, error) {
 	res := &protos.KickAnswer{
 		Kicked: false,
@@ -349,12 +352,13 @@ func (s *Sys) Kick(ctx context.Context, msg *protos.KickMsg) (*protos.KickAnswer
 }
 
 // BindBackendSession 收到转发来的绑定backend请求
-//  @see constants.SessionBindBackendRoute
-//  @receiver s
-//  @param ctx
-//  @param sessionData
-//  @return *protos.Response
-//  @return error
+//
+//	@see constants.SessionBindBackendRoute
+//	@receiver s
+//	@param ctx
+//	@param sessionData
+//	@return *protos.Response
+//	@return error
 func (s *Sys) BindBackendSession(ctx context.Context, msg *protos.BindBackendMsg) (*protos.Response, error) {
 	// 不能是网关收到
 	if s.server.Frontend {
@@ -380,12 +384,13 @@ func (s *Sys) BindBackendSession(ctx context.Context, msg *protos.BindBackendMsg
 }
 
 // KickBackend 收到转发来的 session.Session .KickBackend()请求
-//  @see constants.KickBackendRoute
-//  @receiver s
-//  @param ctx
-//  @param msg
-//  @return *protos.Response
-//  @return error
+//
+//	@see constants.KickBackendRoute
+//	@receiver s
+//	@param ctx
+//	@param msg
+//	@return *protos.Response
+//	@return error
 func (s *Sys) KickBackend(ctx context.Context, msg *protos.BindBackendMsg) (*protos.Response, error) {
 	// 不能是网关收到
 	if s.server.Frontend {
@@ -406,12 +411,13 @@ func (s *Sys) KickBackend(ctx context.Context, msg *protos.BindBackendMsg) (*pro
 }
 
 // SessionBoundFork 收到frontend的session绑定的fork通知
-//  @see constants.SessionBoundForkRoute
-//  @receiver s
-//  @param ctx
-//  @param msg
-//  @return *protos.Response
-//  @return error
+//
+//	@see constants.SessionBoundForkRoute
+//	@receiver s
+//	@param ctx
+//	@param msg
+//	@return *protos.Response
+//	@return error
 func (s *Sys) SessionBoundFork(ctx context.Context, msg *protos.BindMsg) (*protos.Response, error) {
 	for _, r := range s.remote.GetRemoteBindingListener() {
 		// 框架已注册的回调有 modules.UniqueSession
@@ -423,12 +429,13 @@ func (s *Sys) SessionBoundFork(ctx context.Context, msg *protos.BindMsg) (*proto
 }
 
 // SessionBound 收到frontend的session已绑定通知
-//  @see constants.SessionBoundRoute
-//  @receiver s
-//  @param ctx
-//  @param msg
-//  @return *protos.Response
-//  @return error
+//
+//	@see constants.SessionBoundRoute
+//	@receiver s
+//	@param ctx
+//	@param msg
+//	@return *protos.Response
+//	@return error
 func (s *Sys) SessionBound(ctx context.Context, msg *protos.BindMsg) (*protos.Response, error) {
 	// 修改session数据
 	sess := s.sessionPool.GetSessionByUID(msg.Uid)
