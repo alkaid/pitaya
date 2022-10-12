@@ -179,7 +179,25 @@ type Pitaya interface {
 	//  @param uid 若不为空会携带session数据
 	//  @return error
 	RPC(ctx context.Context, routeStr string, reply proto.Message, arg proto.Message, uid string) error
+	// RPCTo 根据route调用remote,会阻塞等待 reply
+	//
+	// @param ctx
+	// @param serverID
+	// @param routeStr
+	// @param reply
+	// @param arg
+	// @return error
 	RPCTo(ctx context.Context, serverID, routeStr string, reply proto.Message, arg proto.Message) error
+	// RpcRaw RPC 的[]byte形式调用
+	//
+	// @param ctx
+	// @param serverID
+	// @param routeStr
+	// @param arg
+	// @param uid
+	// @return []byte
+	// @return error
+	RpcRaw(ctx context.Context, serverID, routeStr string, arg []byte, uid string) ([]byte, error)
 	ReliableRPC(
 		routeStr string,
 		metadata map[string]interface{},

@@ -22,6 +22,7 @@ package pitaya
 
 import (
 	"context"
+	"github.com/alkaid/goerrors/apierrors"
 	"reflect"
 
 	"github.com/topfreegames/pitaya/v2/logger"
@@ -39,6 +40,10 @@ import (
 // RPC calls a method in a different server
 func (app *App) RPC(ctx context.Context, routeStr string, reply proto.Message, arg proto.Message, uid string) error {
 	return app.doSendRPC(ctx, "", routeStr, reply, arg, uid)
+}
+
+func (app *App) RpcRaw(ctx context.Context, serverID, routeStr string, arg []byte, uid string) ([]byte, error) {
+	return app.doSendRPCRaw(ctx, serverID, routeStr, arg, uid)
 }
 
 // RPCTo send a rpc to a specific server
@@ -119,6 +124,37 @@ func (app *App) doSendRPC(ctx context.Context, serverID, routeStr string, reply 
 		sess, err = app.imperfectSessionForRPC(ctx, uid)
 	}
 	return app.remoteService.RPC(ctx, serverID, r, reply, arg, sess)
+}
+
+func (app *App) doSendRPCRaw(ctx context.Context, serverID, routeStr string, arg []byte, uid string) ([]byte, error) {
+	if app.rpcServer == nil {
+		return nil, constants.ErrRPCServerNotInitialized
+	}
+
+	r, err := route.Decode(routeStr)
+	if err != nil {
+		return nil, err
+	}
+
+	if r.SvType == "" {
+		return nil, constants.ErrNoServerTypeChosenForRPC
+	}
+
+	if (r.SvType == app.server.Type && serverID == "") || serverID == app.server.ID {
+		return nil, constants.ErrNonsenseRPC
+	}
+	var sess session.Session = nil
+	if uid != "" {
+		sess, err = app.imperfectSessionForRPC(ctx, uid)
+	}
+	res, err := app.remoteService.DoRPC(ctx, serverID, r, arg, sess)
+	if err != nil {
+		return nil, err
+	}
+	if res.Status != nil {
+		return nil, apierrors.FromStatus(res.Status)
+	}
+	return res.Data, nil
 }
 
 func (app *App) doSendNotifyAll(ctx context.Context, routeStr string, arg proto.Message, uid string) error {
