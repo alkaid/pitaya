@@ -19,7 +19,7 @@ require (
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/client_golang v1.12.2
 	github.com/sirupsen/logrus v1.8.1
-	github.com/spf13/viper v1.12.0
+	github.com/spf13/viper v1.13.0
 	github.com/stretchr/testify v1.8.0
 	github.com/zeromicro/go-zero v1.3.5
 	go.etcd.io/etcd/api/v3 v3.6.0-alpha.0
@@ -140,6 +140,6 @@ replace github.com/panjf2000/ants/v2 v2.5.0 => github.com/alkaid/ants/v2 v2.5.10
 
 //replace github.com/panjf2000/ants/v2 => ../ants
 
-replace github.com/spf13/viper v1.12.0 => github.com/alkaid/viper v1.13.101
+replace github.com/spf13/viper v1.13.0 => github.com/alkaid/viper v1.13.102
 
 //replace github.com/spf13/viper => ../viper

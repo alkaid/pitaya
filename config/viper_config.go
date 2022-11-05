@@ -21,11 +21,10 @@
 package config
 
 import (
-	"errors"
 	"strings"
 	"time"
 
-	"go.uber.org/zap"
+	errors2 "github.com/alkaid/goerrors/errors"
 
 	"github.com/spf13/viper"
 	_ "github.com/spf13/viper/remote"
@@ -256,7 +255,7 @@ func (c *Config) Provide() (key string, confStruct interface{}) {
 //	@receiver c
 func (c *Config) InitLoad() error {
 	if c.inited {
-		return errors.New("config already inited")
+		return errors2.NewWithStack("config already inited")
 	}
 	c.inited = true
 	err := c.UnmarshalKey("pitaya", c.pitayaAll)
@@ -268,18 +267,24 @@ func (c *Config) InitLoad() error {
 		for _, fp := range cnf.FilePath {
 			c.config.AddConfigPath(fp)
 		}
-		c.config.ReadInConfig()
+		err := c.config.ReadInConfig()
+		if err != nil {
+			return errors2.WithStack(err)
+		}
 	}
 	if len(cnf.Etcd.Keys) > 0 && len(cnf.Etcd.Endpoints) > 0 {
 		if cnf.Formatter != "" {
 			c.config.SetConfigType(cnf.Formatter)
 		}
 		for _, key := range cnf.Etcd.Keys {
-			c.config.AddRemoteProviderCluster("etcd3", cnf.Etcd.Endpoints, key)
+			err := c.config.AddRemoteProviderCluster("etcd3", cnf.Etcd.Endpoints, key)
+			if err != nil {
+				return errors2.WithStack(err)
+			}
 		}
 		err = c.config.ReadRemoteConfig()
 		if err != nil {
-			logger.Zap.Fatal("read config from etcd error", zap.Error(err))
+			return errors2.WithStack(err)
 		}
 	}
 	c.reloadAll()
@@ -300,7 +305,7 @@ func (c *Config) watch() error {
 		c.config.WatchConfig()
 	}
 	if len(cnf.Etcd.Keys) > 0 && len(cnf.Etcd.Endpoints) > 0 {
-		err = c.config.WatchRemoteConfigWithChannel(c.onWatch)
+		_, err = c.config.WatchRemoteConfigWithChannel(c.onWatch)
 		if err != nil {
 			return err
 		}
