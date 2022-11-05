@@ -140,6 +140,6 @@ replace github.com/panjf2000/ants/v2 v2.5.0 => github.com/alkaid/ants/v2 v2.5.10
 
 //replace github.com/panjf2000/ants/v2 => ../ants
 
-replace github.com/spf13/viper v1.13.0 => github.com/alkaid/viper v1.13.102
+replace github.com/spf13/viper v1.13.0 => github.com/alkaid/viper v1.13.103
 
 //replace github.com/spf13/viper => ../viper

@@ -282,7 +282,7 @@ func (c *Config) InitLoad() error {
 				return errors2.WithStack(err)
 			}
 		}
-		err = c.config.ReadRemoteConfig()
+		err = c.config.ReadRemoteConfigWithMerged(true)
 		if err != nil {
 			return errors2.WithStack(err)
 		}
@@ -305,7 +305,7 @@ func (c *Config) watch() error {
 		c.config.WatchConfig()
 	}
 	if len(cnf.Etcd.Keys) > 0 && len(cnf.Etcd.Endpoints) > 0 {
-		_, err = c.config.WatchRemoteConfigWithChannel(c.onWatch)
+		_, err = c.config.WatchRemoteConfigWithChannel(c.onWatch, true)
 		if err != nil {
 			return err
 		}
