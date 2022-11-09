@@ -443,7 +443,7 @@ func (s *Sys) SessionBound(ctx context.Context, msg *protos.BindMsg) (*protos.Re
 		sess.SetFrontendData(msg.Fid, msg.Sid)
 	}
 	for _, r := range s.remote.GetRemoteSessionListener() {
-		sess.GoBySession(func() {
+		co.GoByUID(msg.Uid, func() {
 			r.OnUserBound(msg.Uid, msg.Fid, msg.Metadata)
 		})
 	}
