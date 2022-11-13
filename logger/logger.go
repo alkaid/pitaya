@@ -33,7 +33,8 @@ var Zap = Manager.Log
 var Sugar = Manager.Sugar
 
 // Log
-//  @Deprecated use Zap instead
+//
+//	@Deprecated use Zap instead
 var Log = newAdapter(Manager)
 
 // Logger 具体Log的持有类
@@ -66,8 +67,9 @@ func NewLogger(cfg zap.Config, opts ...Option) *Logger {
 }
 
 // SetLevel 动态改变打印级别
-//  @param level 支持的类型为 int,int8,zapcore.Level,string,zap.AtomicLevel. 建议使用string
-//  支持的string为 DEBUG|INFO|WARN|ERROR|DPANIC|PANIC|FATAL
+//
+//	@param level 支持的类型为 int,int8,zapcore.Level,string,zap.AtomicLevel. 建议使用string
+//	支持的string为 DEBUG|INFO|WARN|ERROR|DPANIC|PANIC|FATAL
 func (l *Logger) SetLevel(level any) {
 	var err error
 	switch val := level.(type) {
@@ -104,10 +106,11 @@ func (l *Logger) SetLevel(level any) {
 }
 
 // SetDevelopment 是否开启开发者模式 true为development mode 否则为production mode
-//  development mode: zap.NewDevelopmentConfig()模式
-//  production mode:zap.NewProductionConfig()模式
-//  @receiver l
-//  @param enable
+//
+//	development mode: zap.NewDevelopmentConfig()模式
+//	production mode:zap.NewProductionConfig()模式
+//	@receiver l
+//	@param enable
 func (l *Logger) SetDevelopment(enable bool) {
 	var cfg zap.Config
 	if enable {
@@ -116,7 +119,8 @@ func (l *Logger) SetDevelopment(enable bool) {
 		cfg = zap.NewProductionConfig()
 	}
 	cfg.Level = l.Level
-	log, err := cfg.Build()
+	// skip oldAdapter frame
+	log, err := cfg.Build(zap.AddCallerSkip(1))
 	if err != nil {
 		l.Sugar.Errorf("uber/zap build error: %w", err)
 		return
@@ -153,7 +157,8 @@ func (l *Logger) ReloadFactory(k string, onReloadeds ...func()) LoaderFactory {
 }
 
 // LoaderFactory ConfLoader 工厂,用于生成需要动态包装的 ConfLoader 实现
-//  @implement ConfLoader
+//
+//	@implement ConfLoader
 type LoaderFactory struct {
 	// ConfLoader.Reload 的包装函数
 	ReloadApply func(key string, confStruct interface{})

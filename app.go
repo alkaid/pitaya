@@ -144,6 +144,14 @@ type Pitaya interface {
 	// AddSessionListener 添加session状态监听
 	//  @param listener
 	AddSessionListener(listener cluster.RemoteSessionListener)
+	// RangeUsers 遍历所有已绑定用户
+	//
+	// @param f
+	RangeUsers(f func(uid string, sess session.Session) bool)
+	// RangeSessions 遍历所有session,包括未绑定
+	//
+	// @param f
+	RangeSessions(f func(sid int64, sess session.Session) bool)
 	// Notify 通知其他服务,无阻塞,无返回值。如果session绑定了backend,则会路由到持有session引用的backend
 	//  @param ctx
 	//  @param routeStr
@@ -166,6 +174,7 @@ type Pitaya interface {
 	//  @return error
 	NotifyAll(ctx context.Context, routeStr string, arg proto.Message, uid string) error
 	// Fork rpc调用同一类服务的所有实例,非阻塞.一般来说仅适用于目标服务为stateful类型时
+	//  若fork的服务类型和自己相同,则自己也会收到消息
 	//  @param ctx
 	//  @param routeStr
 	//  @param arg
@@ -482,6 +491,13 @@ func (app *App) SetSessionCache(cache session.CacheInterface) {
 
 func (app *App) AddSessionListener(listener cluster.RemoteSessionListener) {
 	app.remoteService.AddRemoteSessionListener(listener)
+}
+
+func (app *App) RangeUsers(f func(uid string, sess session.Session) bool) {
+	app.sessionPool.RangeUsers(f)
+}
+func (app *App) RangeSessions(f func(sid int64, sess session.Session) bool) {
+	app.sessionPool.RangeSessions(f)
 }
 
 // BindBackend bind session in stateful backend 注意业务层若当前服务是frontend时请勿调用。frontend时仅框架内自己调用

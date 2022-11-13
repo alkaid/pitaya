@@ -562,7 +562,8 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 	// 无拦截器情况下走常规remote
 	remote, ok := r.remotes[rt.Short()]
 	if !ok {
-		logger.Log.Warnf("pitaya/remote: %s not found", rt.Short())
+		// notify 情况下很多 route 都会找不到，警告太多
+		logger.Zap.Info("pitaya/remote: router not found", zap.String("route", rt.Short()))
 		response := &protos.Response{
 			Status: &apierrors.Status{
 				Code:    http.StatusNotFound,

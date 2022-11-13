@@ -127,6 +127,8 @@ type SessionPool interface {
 	//  @return Session
 	//  @return error
 	ImperfectSessionFromCluster(uid string, entity networkentity.NetworkEntity) (Session, error)
+	RangeUsers(f func(uid string, sess Session) bool)
+	RangeSessions(f func(sid int64, sess Session) bool)
 }
 
 // HandshakeClientData represents information about the client sent on the handshake.
@@ -304,7 +306,8 @@ func (c *sessionIDService) sessionID() int64 {
 }
 
 // NewSession
-//  @implement SessionPool.NewSession
+//
+//	@implement SessionPool.NewSession
 func (pool *sessionPoolImpl) NewSession(entity networkentity.NetworkEntity, frontend bool, UID ...string) Session {
 	// stateful类型的backend服务会绑定并缓存session 所以这里有缓存直接取缓存
 	if len(UID) > 0 {
@@ -465,9 +468,10 @@ func (pool *sessionPoolImpl) DecodeSessionData(encodedData []byte) (map[string]i
 
 // StoreSessionLocal
 // @implement SessionPool.StoreSessionLocal
-//  @receiver pool
-//  @param session
-//  @return error
+//
+//	@receiver pool
+//	@param session
+//	@return error
 func (pool *sessionPoolImpl) StoreSessionLocal(session Session) error {
 	if len(session.UID()) <= 0 {
 		return errors.WithStack(constants.ErrEmptyUID)
@@ -483,8 +487,9 @@ func (pool *sessionPoolImpl) StoreSessionLocal(session Session) error {
 
 // RemoveSessionLocal
 // @implement SessionPool.RemoveSessionLocal
-//  @receiver pool
-//  @param session
+//
+//	@receiver pool
+//	@param session
 func (pool *sessionPoolImpl) RemoveSessionLocal(session Session) {
 	if len(session.UID()) > 0 {
 		pool.sessionsByUID.Delete(session.UID())
@@ -501,8 +506,9 @@ func (pool *sessionPoolImpl) SetClusterCache(storage CacheInterface) {
 }
 
 // ImperfectSessionFromCluster
-//  @implement SessionPool.ImperfectSessionFromCluster
-//  TODO 逻辑移到 agent.Cluster
+//
+//	@implement SessionPool.ImperfectSessionFromCluster
+//	TODO 逻辑移到 agent.Cluster
 func (pool *sessionPoolImpl) ImperfectSessionFromCluster(uid string, entity networkentity.NetworkEntity) (Session, error) {
 	v, err := pool.storage.Get(pool.getSessionStorageKey(uid))
 	if err != nil {
@@ -514,6 +520,17 @@ func (pool *sessionPoolImpl) ImperfectSessionFromCluster(uid string, entity netw
 		return nil, err
 	}
 	return s, nil
+}
+
+func (pool *sessionPoolImpl) RangeUsers(f func(uid string, sess Session) bool) {
+	pool.sessionsByUID.Range(func(k, v any) bool {
+		return f(k.(string), v.(Session))
+	})
+}
+func (pool *sessionPoolImpl) RangeSessions(f func(id int64, sess Session) bool) {
+	pool.sessionsByID.Range(func(k, v any) bool {
+		return f(k.(int64), v.(Session))
+	})
 }
 
 func (pool *sessionPoolImpl) getSessionStorageKey(uid string) string {
@@ -713,12 +730,13 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, callback map[string]
 }
 
 // BindBackend
-//  @implement Session.BindBackend
-//  @receiver s
-//  @param ctx
-//  @param targetServerType
-//  @param targetServerID
-//  @return error
+//
+//	@implement Session.BindBackend
+//	@receiver s
+//	@param ctx
+//	@param targetServerType
+//	@param targetServerID
+//	@return error
 func (s *sessionImpl) BindBackend(ctx context.Context, targetServerType string, targetServerID string, callback map[string]string) error {
 	if s.UID() == "" {
 		return errors.WithStack(constants.ErrIllegalUID)
@@ -756,12 +774,13 @@ func (s *sessionImpl) Kick(ctx context.Context, callback map[string]string, reas
 }
 
 // KickBackend
-//  @implement Session.KickBackend
-//  @receiver s
-//  @param ctx
-//  @param targetServerType
-//  @param reason
-//  @return error
+//
+//	@implement Session.KickBackend
+//	@receiver s
+//	@param ctx
+//	@param targetServerType
+//	@param reason
+//	@return error
 func (s *sessionImpl) KickBackend(ctx context.Context, targetServerType string, callback map[string]string, reason ...CloseReason) error {
 	var err error = nil
 	if s.UID() == "" {
@@ -1101,10 +1120,11 @@ func (s *sessionImpl) String(key string) string {
 }
 
 // stringUnsafe
-//  @Description:非线程安全
-//  @receiver s
-//  @param key
-//  @return string
+//
+//	@Description:非线程安全
+//	@receiver s
+//	@param key
+//	@return string
 func (s *sessionImpl) stringUnsafe(key string) string {
 	v, ok := s.data[key]
 	if !ok {
@@ -1225,7 +1245,8 @@ func (s *sessionImpl) GetBoundData() *BoundData {
 }
 
 // GetBackendID
-//  @implement Session.GetBackendID
+//
+//	@implement Session.GetBackendID
 func (s *sessionImpl) GetBackendID(svrType string) string {
 	s.RLock()
 	defer s.RUnlock()
@@ -1270,9 +1291,10 @@ func (s *sessionImpl) getSessionStorageKey() string {
 }
 
 // Flush2Cluster
-//  @Description: 打包session数据到存储服务
-//  @receiver s
-//  @return error
+//
+//	@Description: 打包session数据到存储服务
+//	@receiver s
+//	@return error
 func (s *sessionImpl) Flush2Cluster() error {
 	if "" == s.uid {
 		return constants.ErrIllegalUID
@@ -1284,9 +1306,10 @@ func (s *sessionImpl) Flush2Cluster() error {
 }
 
 // ObtainFromCluster
-//  @Description:从存储服务获取并解包session数据
-//  @receiver s
-//  @return error
+//
+//	@Description:从存储服务获取并解包session数据
+//	@receiver s
+//	@return error
 func (s *sessionImpl) ObtainFromCluster() error {
 	v, err := s.pool.storage.Get(s.getSessionStorageKey())
 	if err != nil {
@@ -1300,7 +1323,8 @@ func (s *sessionImpl) ObtainFromCluster() error {
 }
 
 // GoBySession 根据session数据决策派发任务线程
-//  @param task
+//
+//	@param task
 func (s *sessionImpl) GoBySession(task func()) {
 	if s.UID() != "" {
 		co.GoByUID(s.UID(), task)
