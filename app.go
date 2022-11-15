@@ -296,6 +296,12 @@ type Pitaya interface {
 	//  @return *session.BoundData
 	//  @return error
 	GetBoundData(ctx context.Context, uid string) (*session.BoundData, error)
+	// GetLocalSessionByUid 获取本地已绑定的session,若没有返回空. 可用于判断uid是否绑定到了该服务器
+	//
+	// @param ctx
+	// @param uid
+	// @return session.Session
+	GetLocalSessionByUid(ctx context.Context, uid string) session.Session
 }
 
 // App is the base app struct
@@ -545,6 +551,16 @@ func (app *App) GetBoundData(ctx context.Context, uid string) (*session.BoundDat
 		return nil, err
 	}
 	return sess.GetBoundData(), nil
+}
+
+// GetLocalSessionByUid 获取本地已绑定的session,若没有返回空. 可用于判断uid是否绑定到了该服务器
+//
+// @receiver app
+// @param ctx
+// @param uid
+// @return session.Session
+func (app *App) GetLocalSessionByUid(ctx context.Context, uid string) session.Session {
+	return app.sessionPool.GetSessionByUID(uid)
 }
 
 func (app *App) initSysRemotes() {
