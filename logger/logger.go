@@ -120,7 +120,7 @@ func (l *Logger) SetDevelopment(enable bool) {
 	}
 	cfg.Level = l.Level
 	// skip oldAdapter frame
-	log, err := cfg.Build(zap.AddCallerSkip(1))
+	log, err := cfg.Build()
 	if err != nil {
 		l.Sugar.Errorf("uber/zap build error: %w", err)
 		return
