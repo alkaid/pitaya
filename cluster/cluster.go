@@ -86,20 +86,20 @@ type RemoteSessionListener interface {
 	// OnUserBound 用户成功绑定网关时
 	//  @param uid
 	//  @param fid 网关id
-	OnUserBound(uid, fid string, callback map[string]string)
+	OnUserBound(ctx context.Context, uid, fid string, callback map[string]string)
 	// OnUserDisconnected 用户断线时
 	//  @param uid
-	OnUserDisconnected(uid string, callback map[string]string)
+	OnUserDisconnected(ctx context.Context, uid string, callback map[string]string)
 	// OnUserBoundBackend 用户成功绑定backend服务器时
 	//  @param uid
 	//  @param serverType
 	//  @param serverId
-	OnUserBoundBackend(uid, serverType, serverId string, callback map[string]string)
+	OnUserBoundBackend(ctx context.Context, uid, serverType, serverId string, callback map[string]string)
 	// OnUserUnboundBackend 用户成功解绑backend服务器时
 	//  @param uid
 	//  @param serverType
 	//  @param serverId
-	OnUserUnboundBackend(uid, serverType, serverId string, callback map[string]string)
+	OnUserUnboundBackend(ctx context.Context, uid, serverType, serverId string, callback map[string]string)
 }
 
 // InfoRetriever gets cluster info
