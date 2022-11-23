@@ -303,6 +303,11 @@ type Pitaya interface {
 	// @param uid
 	// @return session.Session
 	GetLocalSessionByUid(ctx context.Context, uid string) session.Session
+	// OnLocalSessionCloseBefore 设置本地session关闭前的回调
+	//
+	// @receiver app
+	// @param f
+	OnLocalSessionCloseBefore(f session.OnSessionCloseFunc)
 }
 
 // App is the base app struct
@@ -562,6 +567,14 @@ func (app *App) GetBoundData(ctx context.Context, uid string) (*session.BoundDat
 // @return session.Session
 func (app *App) GetLocalSessionByUid(ctx context.Context, uid string) session.Session {
 	return app.sessionPool.GetSessionByUID(uid)
+}
+
+// OnLocalSessionCloseBefore 设置本地session关闭前的回调
+//
+// @receiver app
+// @param f
+func (app *App) OnLocalSessionCloseBefore(f session.OnSessionCloseFunc) {
+	app.sessionPool.OnSessionClose(f)
 }
 
 func (app *App) initSysRemotes() {
