@@ -23,6 +23,7 @@ package metrics
 import (
 	"fmt"
 	"github.com/topfreegames/pitaya/v2/logger"
+	"go.uber.org/zap"
 
 	"net/http"
 	"sync"
@@ -302,7 +303,7 @@ func getPrometheusReporter(
 		go (func() {
 			err := http.ListenAndServe(fmt.Sprintf(":%d", config.Prometheus.Port), nil)
 			if err != nil {
-				logger.Log.Error("prometheus reporter serve start failed, err: ", err)
+				logger.Zap.Error("prometheus reporter serve start failed", zap.Error(err))
 			}
 		})()
 	})

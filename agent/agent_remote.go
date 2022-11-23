@@ -25,6 +25,8 @@ import (
 	"net"
 	"reflect"
 
+	"go.uber.org/zap"
+
 	"github.com/topfreegames/pitaya/v2/cluster"
 	"github.com/topfreegames/pitaya/v2/conn/codec"
 	"github.com/topfreegames/pitaya/v2/conn/message"
@@ -120,11 +122,9 @@ func (a *Remote) Push(route string, v interface{}) error {
 	}
 	switch d := v.(type) {
 	case []byte:
-		logger.Log.Debugf("Type=Push, ID=%d, UID=%s, Route=%s, Data=%dbytes",
-			a.Session.ID(), a.Session.UID(), route, len(d))
+		logger.Zap.Debug("Type=Push", zap.Int64("ID", a.Session.ID()), zap.String("UID", a.Session.UID()), zap.String("Route", route), zap.Int("DataLen", len(d)))
 	default:
-		logger.Log.Debugf("Type=Push, ID=%d, UID=%s, Route=%s, Data=%+v",
-			a.Session.ID(), a.Session.UID(), route, v)
+		logger.Zap.Debug("Type=Push", zap.Int64("ID", a.Session.ID()), zap.String("UID", a.Session.UID()), zap.String("Route", route), zap.Any("Data", d))
 	}
 
 	sv, err := a.serviceDiscovery.GetServer(a.frontendID)
@@ -159,11 +159,9 @@ func (a *Remote) ResponseMID(ctx context.Context, mid uint, v interface{}, isErr
 
 	switch d := v.(type) {
 	case []byte:
-		logger.Log.Debugf("Type=Response, ID=%d, MID=%d, Data=%dbytes",
-			a.Session.ID(), mid, len(d))
+		logger.Zap.Debug("Type=Response", zap.Int64("ID", a.Session.ID()), zap.String("UID", a.Session.UID()), zap.Uint("MID", mid), zap.Int("DataLen", len(d)))
 	default:
-		logger.Log.Infof("Type=Response, ID=%d, MID=%d, Data=%+v",
-			a.Session.ID(), mid, v)
+		logger.Zap.Info("Type=Response", zap.Int64("ID", a.Session.ID()), zap.String("UID", a.Session.UID()), zap.Uint("MID", mid), zap.Any("Data", d))
 	}
 
 	return a.send(pendingMessage{ctx: ctx, typ: message.Response, mid: mid, payload: v, err: err}, a.reply)

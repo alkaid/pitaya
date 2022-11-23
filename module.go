@@ -87,17 +87,17 @@ func (app *App) alreadyRegistered(name string) error {
 
 // startModules starts all modules in order
 func (app *App) startModules() {
-	logger.Log.Debug("initializing all modules")
+	logger.Zap.Debug("initializing all modules")
 	for _, modWrapper := range app.modulesArr {
-		logger.Log.Debugf("initializing module: %s", modWrapper.name)
+		logger.Sugar.Debugf("initializing module: %s", modWrapper.name)
 		if err := modWrapper.module.Init(); err != nil {
-			logger.Log.Fatalf("error starting module %s, error: %s", modWrapper.name, err.Error())
+			logger.Sugar.Fatalf("error starting module %s, error: %s", modWrapper.name, err.Error())
 		}
 	}
 
 	for _, modWrapper := range app.modulesArr {
 		modWrapper.module.AfterInit()
-		logger.Log.Infof("module: %s successfully loaded", modWrapper.name)
+		logger.Sugar.Infof("module: %s successfully loaded", modWrapper.name)
 	}
 }
 
@@ -111,10 +111,10 @@ func (app *App) shutdownModules() {
 		name := app.modulesArr[i].name
 		mod := app.modulesArr[i].module
 
-		logger.Log.Debugf("stopping module: %s", name)
+		logger.Sugar.Debugf("stopping module: %s", name)
 		if err := mod.Shutdown(); err != nil {
-			logger.Log.Warnf("error stopping module: %s", name)
+			logger.Sugar.Warnf("error stopping module: %s", name)
 		}
-		logger.Log.Infof("module: %s stopped!", name)
+		logger.Sugar.Infof("module: %s stopped!", name)
 	}
 }

@@ -302,11 +302,9 @@ func (a *agentImpl) Push(route string, v interface{}) error {
 
 	switch d := v.(type) {
 	case []byte:
-		logger.Log.Debugf("Type=Push, ID=%d, UID=%s, Route=%s, Data=%dbytes",
-			a.Session.ID(), a.Session.UID(), route, len(d))
+		logger.Zap.Debug("Type=Push", zap.Int64("ID", a.Session.ID()), zap.String("UID", a.Session.UID()), zap.String("Route", route), zap.Int("DataLen", len(d)))
 	default:
-		logger.Log.Debugf("Type=Push, ID=%d, UID=%s, Route=%s, Data=%+v",
-			a.Session.ID(), a.Session.UID(), route, v)
+		logger.Zap.Debug("Type=Push", zap.Int64("ID", a.Session.ID()), zap.String("UID", a.Session.UID()), zap.String("Route", route), zap.Any("Data", d))
 	}
 	return a.send(pendingMessage{typ: message.Push, route: route, payload: v})
 }
@@ -341,11 +339,9 @@ func (a *agentImpl) ResponseMID(ctx context.Context, mid uint, v interface{}, is
 
 	switch d := v.(type) {
 	case []byte:
-		logger.Log.Debugf("Type=Response, ID=%d, UID=%s, MID=%d, Data=%dbytes",
-			a.Session.ID(), a.Session.UID(), mid, len(d))
+		logger.Zap.Debug("Type=Response", zap.Int64("ID", a.Session.ID()), zap.String("UID", a.Session.UID()), zap.Uint("MID", mid), zap.Int("DataLen", len(d)))
 	default:
-		logger.Log.Infof("Type=Response, ID=%d, UID=%s, MID=%d, Data=%+v",
-			a.Session.ID(), a.Session.UID(), mid, v)
+		logger.Zap.Info("Type=Response", zap.Int64("ID", a.Session.ID()), zap.String("UID", a.Session.UID()), zap.Uint("MID", mid), zap.Any("Data", d))
 	}
 
 	return a.send(pendingMessage{ctx: ctx, typ: message.Response, mid: mid, payload: v, err: err})
@@ -361,8 +357,8 @@ func (a *agentImpl) Close(callback map[string]string, reason ...session.CloseRea
 	}
 	a.SetStatus(constants.StatusClosed)
 
-	logger.Log.Debugf("Session closed, ID=%d, UID=%s, IP=%s",
-		a.Session.ID(), a.Session.UID(), a.conn.RemoteAddr())
+	logger.Zap.Debug("Session closed",
+		zap.Int64("ID", a.Session.ID()), zap.String("UID", a.Session.UID()), zap.Stringer("IP", a.conn.RemoteAddr()))
 
 	// prevent closing closed channel
 	select {
@@ -435,7 +431,7 @@ func (a *agentImpl) SetStatus(state int32) {
 func (a *agentImpl) Handle() {
 	defer func() {
 		a.Close(nil)
-		logger.Log.Debugf("Session handle goroutine exit, SessionID=%d, UID=%s", a.Session.ID(), a.Session.UID())
+		logger.Zap.Debug("Session handle goroutine exit", zap.Int64("ID", a.Session.ID()), zap.String("UID", a.Session.UID()))
 	}()
 
 	co.Go(func() { a.write() })
@@ -473,7 +469,7 @@ func (a *agentImpl) heartbeat() {
 		case <-ticker.C:
 			deadline := time.Now().Add(-2 * a.heartbeatTimeout).Unix()
 			if atomic.LoadInt64(&a.lastAt) < deadline {
-				logger.Log.Debugf("Session heartbeat timeout, LastTime=%d, Deadline=%d", atomic.LoadInt64(&a.lastAt), deadline)
+				logger.Zap.Debug("Session heartbeat timeout", zap.Int64("LastTime", atomic.LoadInt64(&a.lastAt)), zap.Int64("Deadline", deadline))
 				return
 			}
 			bs := make([]byte, 8)
@@ -501,7 +497,11 @@ func (a *agentImpl) heartbeat() {
 func (a *agentImpl) onSessionClosed(s session.Session, callback map[string]string, reason ...session.CloseReason) {
 	defer func() {
 		if err := recover(); err != nil {
-			logger.Log.Errorf("pitaya/onSessionClosed: %v", err)
+			if err_, ok := err.(error); ok {
+				logger.Zap.Error("pitaya/onSessionClosed", zap.Error(err_))
+			} else {
+				logger.Zap.Error("pitaya/onSessionClosed", zap.Any("recover", err))
+			}
 		}
 	}()
 
@@ -596,12 +596,12 @@ func (a *agentImpl) AnswerWithError(ctx context.Context, mid uint, err error) {
 	}
 	p, e := util.GetErrorPayload(a.serializer, err)
 	if e != nil {
-		logger.Log.Errorf("error answering the user with an error: %s", e.Error())
+		logger.Zap.Error("error answering the user with an error", zap.Error(err))
 		return
 	}
 	e = a.Session.ResponseMID(ctx, mid, p, true)
 	if e != nil {
-		logger.Log.Errorf("error answering the user with an error: %s", e.Error())
+		logger.Zap.Error("error answering the user with an error", zap.Error(err))
 	}
 }
 
@@ -648,11 +648,11 @@ func hbdEncode(heartbeatTimeout time.Duration, packetEncoder codec.PacketEncoder
 func (a *agentImpl) reportChannelSize() {
 	chSendCapacity := a.messagesBufferSize - len(a.chSend)
 	if chSendCapacity == 0 {
-		logger.Log.Warnf("chSend is at maximum capacity")
+		logger.Zap.Warn("chSend is at maximum capacity")
 	}
 	for _, mr := range a.metricsReporters {
 		if err := mr.ReportGauge(metrics.ChannelCapacity, map[string]string{"channel": "agent_chsend"}, float64(chSendCapacity)); err != nil {
-			logger.Log.Warnf("failed to report chSend channel capaacity: %s", err.Error())
+			logger.Zap.Warn("failed to report chSend channel capaacity", zap.Error(err))
 		}
 	}
 }

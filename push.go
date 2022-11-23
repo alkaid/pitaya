@@ -26,6 +26,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/protos"
 	"github.com/topfreegames/pitaya/v2/util"
+	"go.uber.org/zap"
 )
 
 // SendPushToUsers sends a message to the given list of users
@@ -41,14 +42,14 @@ func (app *App) SendPushToUsers(route string, v interface{}, uids []string, fron
 
 	var notPushedUids []string
 
-	logger.Log.Debugf("Type=PushToUsers Route=%s, Data=%+v, SvType=%s, #Users=%d", route, v, frontendType, len(uids))
+	logger.Zap.Debug("Type=PushToUsers", zap.String("route", route), zap.String("svType", frontendType), zap.Strings("users", uids), zap.Any("data", v))
 
 	for _, uid := range uids {
 		if s := app.sessionPool.GetSessionByUID(uid); s != nil && app.server.Type == frontendType {
 			if err := s.Push(route, data); err != nil {
 				notPushedUids = append(notPushedUids, uid)
-				logger.Log.Errorf("Session push message error, ID=%d, UID=%s, Error=%s",
-					s.ID(), s.UID(), err.Error())
+				logger.Zap.Error("Session push message error",
+					zap.Int64("ID", s.ID()), zap.String("UID", s.UID()), zap.Error(err))
 			}
 		} else if app.rpcClient != nil {
 			push := &protos.Push{
@@ -58,7 +59,7 @@ func (app *App) SendPushToUsers(route string, v interface{}, uids []string, fron
 			}
 			if err = app.rpcClient.SendPush(uid, &cluster.Server{Type: frontendType}, push); err != nil {
 				notPushedUids = append(notPushedUids, uid)
-				logger.Log.Errorf("RPCClient send message error, UID=%s, SvType=%s, Error=%s", uid, frontendType, err.Error())
+				logger.Zap.Error("RPCClient send message error", zap.String("UID", uid), zap.String("svType", frontendType), zap.Error(err))
 			}
 		} else {
 			notPushedUids = append(notPushedUids, uid)

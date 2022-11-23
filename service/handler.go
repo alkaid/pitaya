@@ -164,9 +164,10 @@ func (h *HandlerService) Register(comp component.Component, opts []component.Opt
 }
 
 // RegisterInterceptor 注册拦截分发器,优先级别高于 component.Remote
-//  @receiver h
-//  @param serviceName
-//  @param interceptor
+//
+//	@receiver h
+//	@param serviceName
+//	@param interceptor
 func (h *HandlerService) RegisterInterceptor(serviceName string, interceptor *component.Interceptor) {
 	h.handlerPool.RegisterInterceptor(serviceName, interceptor)
 }
@@ -192,7 +193,7 @@ func (h *HandlerService) Handle(conn acceptor.PlayerConn) {
 
 		if err != nil {
 			if err != constants.ErrConnectionClosed {
-				logger.Log.Warnf("Error reading next available message: %s", err.Error())
+				logger.Zap.Warn("Error reading next available message", zap.Error(err))
 			}
 
 			return
@@ -200,19 +201,19 @@ func (h *HandlerService) Handle(conn acceptor.PlayerConn) {
 
 		packets, err := h.decoder.Decode(msg)
 		if err != nil {
-			logger.Log.Errorf("Failed to decode message: %s", err.Error())
+			logger.Zap.Error("Failed to decode message", zap.Error(err))
 			return
 		}
 
 		if len(packets) < 1 {
-			logger.Log.Warnf("Read no packets, data: %v", msg)
+			logger.Zap.Warn("Read no packets, data", zap.Error(err))
 			continue
 		}
 
 		// process all packet
 		for i := range packets {
 			if err := h.processPacket(a, packets[i]); err != nil {
-				logger.Log.Errorf("Failed to process packet: %s", err.Error())
+				logger.Zap.Error("Failed to process packet", zap.Error(err))
 				return
 			}
 		}
@@ -224,7 +225,7 @@ func (h *HandlerService) processPacket(a agent.Agent, p *packet.Packet) error {
 	case packet.Handshake:
 		logger.Log.Debug("Received handshake packet")
 		if err := a.SendHandshakeResponse(); err != nil {
-			logger.Log.Errorf("Error sending handshake response: %s", err.Error())
+			logger.Zap.Error("Error sending handshake response", zap.Error(err))
 			return err
 		}
 		logger.Log.Debugf("Session handshake Id=%d, Remote=%s", a.GetSession().ID(), a.RemoteAddr())
@@ -269,7 +270,7 @@ func (h *HandlerService) processPacket(a agent.Agent, p *packet.Packet) error {
 			rawUnixMillTime = int64(binary.BigEndian.Uint64(p.Data))
 		}
 		if err := a.SendHeartbeatResponse(rawUnixMillTime); err != nil {
-			logger.Log.Errorf("Error sending handshake response: %s", err.Error())
+			logger.Zap.Error("Error sending handshake response", zap.Error(err))
 			return err
 		}
 
@@ -299,7 +300,7 @@ func (h *HandlerService) processMessage(a agent.Agent, msg *message.Message) {
 
 	r, err := route.Decode(msg.Route)
 	if err != nil {
-		logger.Log.Errorf("Failed to decode route: %s", err.Error())
+		logger.Zap.Error("Failed to decode route", zap.Error(err))
 		a.AnswerWithError(ctx, msg.ID, apierrors.BadRequest("", "Failed to decode route", "").WithCause(err))
 		return
 	}
@@ -351,7 +352,7 @@ func (h *HandlerService) localProcess(ctx context.Context, a agent.Agent, route 
 		ret, err := h.handlerPool.ProcessHandlerMessage(ctx, route, h.serializer, h.handlerHooks, a.GetSession(), msg.Data, msg.Type, false)
 		if msg.Type != message.Notify {
 			if err != nil {
-				logger.Log.Errorf("Failed to process handler message: %s", err.Error())
+				logger.Zap.Error("Failed to process handler message", zap.Error(err))
 				a.AnswerWithError(ctx, mid, err)
 			} else {
 				err := a.GetSession().ResponseMID(ctx, mid, ret)
@@ -362,7 +363,7 @@ func (h *HandlerService) localProcess(ctx context.Context, a agent.Agent, route 
 			}
 		} else {
 			if err != nil {
-				logger.Log.Errorf("Failed to process handler message: %s", err.Error())
+				logger.Zap.Error("Failed to process handler message", zap.Error(err))
 				a.AnswerWithError(ctx, mid, err)
 			}
 			metrics.ReportTimingFromCtx(ctx, h.metricsReporters, handlerType, nil)

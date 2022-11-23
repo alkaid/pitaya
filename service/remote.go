@@ -740,7 +740,7 @@ func (r *RemoteService) handleRPCSys(ctx context.Context, req *protos.Request, r
 
 	ret, err := r.handlerPool.ProcessHandlerMessage(ctx, rt, r.serializer, r.sysHandlerHooks, a.Session, req.GetMsg().GetData(), req.GetMsg().GetType(), true)
 	if err != nil {
-		logger.Log.Warnf(err.Error())
+		logger.Zap.Warn("", zap.Error(err))
 		response = &protos.Response{
 			Status: &apierrors.FromError(err).Status,
 		}
@@ -772,7 +772,7 @@ func (r *RemoteService) remoteCall(
 
 	res, err := r.rpcClient.Call(ctx, rpcType, route, session, msg, target)
 	if err != nil {
-		logger.Log.Errorf("error making call to target with id %s, route %s and host %s: %w", target.ID, route.String(), target.Hostname, err)
+		logger.Zap.Error("error making call to target", zap.String("id", target.ID), zap.Stringer("route", route), zap.String("host", target.Hostname), zap.Error(err))
 		return nil, err
 	}
 	return res, err

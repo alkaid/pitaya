@@ -6,13 +6,14 @@ import (
 	"reflect"
 	"sync"
 
+	"go.uber.org/zap"
+
 	"github.com/alkaid/goerrors/apierrors"
 
 	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/component"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
-	"github.com/topfreegames/pitaya/v2/logger/interfaces"
 	"github.com/topfreegames/pitaya/v2/pipeline"
 	"github.com/topfreegames/pitaya/v2/route"
 	"github.com/topfreegames/pitaya/v2/serialize"
@@ -40,9 +41,10 @@ func (h *HandlerPool) Register(serviceName string, name string, handler *compone
 }
 
 // RegisterInterceptor 注册拦截分发器,优先级别高于 component.Handler
-//  @receiver h
-//  @param serviceName
-//  @param interceptor
+//
+//	@receiver h
+//	@param serviceName
+//	@param interceptor
 func (h *HandlerPool) RegisterInterceptor(serviceName string, interceptor *component.Interceptor) {
 	h.interceptors[serviceName] = interceptor
 }
@@ -76,8 +78,8 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		if err != nil {
 			return nil, apierrors.FromError(err)
 		}
-		logger := ctx.Value(constants.LoggerCtxKey).(interfaces.Logger)
-		logger.Debugf("SID=%d, Data=%s", session.ID(), data)
+		// logger := ctx.Value(constants.LoggerCtxKey).(*zap.Logger)
+		// logger.Debug("SID=%d, Data=%s", session.ID(), data)
 		var resp any
 		// 若启用了单线程反应堆模型,则派发到全局Looper单例
 		if interceptor.EnableReactor {
@@ -115,12 +117,12 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		return nil, apierrors.FromError(err)
 	}
 
-	logger := ctx.Value(constants.LoggerCtxKey).(interfaces.Logger)
+	logger := ctx.Value(constants.LoggerCtxKey).(*zap.Logger)
 	exit, err := handler.ValidateMessageType(msgType)
 	if err != nil && exit {
 		return nil, apierrors.BadRequest("", "process handle message error", "").WithCause(err)
 	} else if err != nil {
-		logger.Warnf("invalid message type, error: %s", err.Error())
+		logger.Warn("invalid message type", zap.Error(err))
 	}
 
 	// First unmarshal the handler arg that will be passed to
@@ -142,12 +144,12 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		return nil, err
 	}
 
-	logger.Debugf("SID=%d, Data=%s", session.ID(), data)
+	logger.Debug("process handle message", zap.Int64("SID", session.ID()), zap.ByteString("Data", data))
 	receiver := handler.Receiver
 	if handler.Options.ReceiverProvider != nil {
 		rec := handler.Options.ReceiverProvider(ctx)
 		if rec == nil {
-			logger.Warnf("pitaya/handle: %s not found,the ReceiverProvider return nil", rt.Short())
+			logger.Warn("pitaya/handle: route not found,the ReceiverProvider return nil", zap.String("route", rt.Short()))
 			return nil, apierrors.NotFound("", "process handle message error", "").WithCause(err)
 		}
 		receiver = reflect.ValueOf(rec)

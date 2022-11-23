@@ -22,6 +22,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/service"
 	"github.com/topfreegames/pitaya/v2/session"
 	"github.com/topfreegames/pitaya/v2/worker"
+	"go.uber.org/zap"
 )
 
 // Builder holds dependency instances for a pitaya App
@@ -77,6 +78,7 @@ func NewBuilderWithConfigs(
 	conf.AddLoader(logger.Manager.ReloadFactory("pitaya.log", func() {
 		logger.Zap = logger.Manager.Log
 		logger.Sugar = logger.Manager.Sugar
+		logger.Log = logger.Sugar
 	}))
 	b := NewBuilder(
 		isFrontend,
@@ -188,23 +190,23 @@ func NewBuilder(isFrontend bool,
 		var err error
 		serviceDiscovery, err = cluster.NewEtcdServiceDiscovery(etcdSDConfig, server, dieChan)
 		if err != nil {
-			logger.Log.Fatalf("error creating default cluster service discovery component: %s", err.Error())
+			logger.Zap.Fatal("error creating default cluster service discovery component", zap.Error(err))
 		}
 
 		rpcServer, err = cluster.NewNatsRPCServer(natsRPCServerConfig, server, metricsReporters, dieChan, sessionPool)
 		if err != nil {
-			logger.Log.Fatalf("error setting default cluster rpc server component: %s", err.Error())
+			logger.Zap.Fatal("error setting default cluster rpc server component", zap.Error(err))
 		}
 
 		rpcClient, err = cluster.NewNatsRPCClient(natsRPCClientConfig, server, metricsReporters, dieChan)
 		if err != nil {
-			logger.Log.Fatalf("error setting default cluster rpc client component: %s", err.Error())
+			logger.Zap.Fatal("error setting default cluster rpc client component", zap.Error(err))
 		}
 	}
 
 	worker, err := worker.NewWorker(workerConfig, enqueueOpts)
 	if err != nil {
-		logger.Log.Fatalf("error creating default worker: %s", err.Error())
+		logger.Zap.Fatal("error creating default worker", zap.Error(err))
 	}
 
 	gsi := groups.NewMemoryGroupService(groupServiceConfig)
@@ -239,7 +241,7 @@ func NewBuilder(isFrontend bool,
 // AddAcceptor adds a new acceptor to app
 func (builder *Builder) AddAcceptor(ac acceptor.Acceptor) {
 	if !builder.Server.Frontend {
-		logger.Log.Error("tried to add an acceptor to a backend server, skipping")
+		logger.Zap.Error("tried to add an acceptor to a backend server, skipping")
 		return
 	}
 	builder.acceptors = append(builder.acceptors, ac)
@@ -337,7 +339,7 @@ func configureDefaultPipelines(handlerHooks *pipeline.HandlerHooks) {
 func addDefaultPrometheus(config config.PrometheusConfig, customMetrics models.CustomMetricsSpec, reporters []metrics.Reporter, serverType string) []metrics.Reporter {
 	prometheus, err := CreatePrometheusReporter(serverType, config, customMetrics)
 	if err != nil {
-		logger.Log.Errorf("failed to start prometheus metrics reporter, skipping %v", err)
+		logger.Zap.Error("failed to start prometheus metrics reporter, skipping", zap.Error(err))
 	} else {
 		reporters = append(reporters, prometheus)
 	}
@@ -347,7 +349,7 @@ func addDefaultPrometheus(config config.PrometheusConfig, customMetrics models.C
 func addDefaultStatsd(config config.StatsdConfig, reporters []metrics.Reporter, serverType string) []metrics.Reporter {
 	statsd, err := CreateStatsdReporter(serverType, config)
 	if err != nil {
-		logger.Log.Errorf("failed to start statsd metrics reporter, skipping %v", err)
+		logger.Zap.Error("failed to start statsd metrics reporter, skipping", zap.Error(err))
 	} else {
 		reporters = append(reporters, statsd)
 	}

@@ -23,6 +23,8 @@ package pitaya
 import (
 	"context"
 
+	"go.uber.org/zap"
+
 	"github.com/topfreegames/pitaya/v2/constants"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/protos"
@@ -40,13 +42,13 @@ func (app *App) SendKickToUsers(uids []string, frontendType string, callback map
 		if s := app.sessionPool.GetSessionByUID(uid); s != nil {
 			if err := s.Kick(context.Background(), callback); err != nil {
 				notKickedUids = append(notKickedUids, uid)
-				logger.Log.Errorf("Session kick error, ID=%d, UID=%s, ERROR=%s", s.ID(), s.UID(), err.Error())
+				logger.Zap.Error("Session kick error", zap.Int64("ID", s.ID()), zap.String("UID", s.UID()), zap.Error(err))
 			}
 		} else if app.rpcClient != nil {
 			kick := &protos.KickMsg{UserId: uid, Metadata: callback}
 			if err := app.rpcClient.SendKick(uid, frontendType, kick); err != nil {
 				notKickedUids = append(notKickedUids, uid)
-				logger.Log.Errorf("RPCClient send kick error, UID=%s, SvType=%s, Error=%s", uid, frontendType, err.Error())
+				logger.Zap.Error("RPCClient send kick error", zap.String("UID", uid), zap.String("svType", frontendType), zap.Error(err))
 			}
 		} else {
 			notKickedUids = append(notKickedUids, uid)

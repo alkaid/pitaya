@@ -25,6 +25,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/topfreegames/pitaya/v2/logger"
 )
 
@@ -77,8 +79,9 @@ type (
 )
 
 // CreateAt 创建时间 纳秒
-//  @receiver t
-//  @return int64
+//
+//	@receiver t
+//	@return int64
 func (t *Timer) CreateAt() int64 {
 	return t.createAt
 }
@@ -141,7 +144,11 @@ func (t *Timer) Stop() {
 func pexec(id int64, fn Func) {
 	defer func() {
 		if err := recover(); err != nil {
-			logger.Log.Errorf("Call timer function error, TimerID=%d, Error=%v", id, err)
+			if err_, ok := err.(error); ok {
+				logger.Zap.Error("Call timer function error, TimerID=%d, Error=%v", zap.Int64("TimerID", id), zap.Error(err_))
+			} else {
+				logger.Zap.Error("Call timer function error, TimerID=%d, Error=%v", zap.Int64("TimerID", id), zap.Any("recover", err))
+			}
 		}
 	}()
 

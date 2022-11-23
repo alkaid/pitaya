@@ -160,7 +160,7 @@ func (sd *etcdServiceDiscovery) watchLeaseChan(c <-chan *clientv3.LeaseKeepAlive
 			return
 		case leaseKeepAliveResponse, ok := <-c:
 			if !ok {
-				logger.Log.Error("ETCD lease KeepAlive died, retrying in 10 seconds")
+				logger.Zap.Error("ETCD lease KeepAlive died, retrying in 10 seconds")
 				time.Sleep(10000 * time.Millisecond)
 			}
 			if leaseKeepAliveResponse != nil {
@@ -204,7 +204,7 @@ func (sd *etcdServiceDiscovery) renewLease() error {
 	c := make(chan error)
 	co.Go(func() {
 		defer close(c)
-		logger.Log.Infof("waiting for etcd lease")
+		logger.Zap.Info("waiting for etcd lease")
 		err := sd.grantLease()
 		if err != nil {
 			c <- err
@@ -228,7 +228,7 @@ func (sd *etcdServiceDiscovery) grantLease() error {
 		return err
 	}
 	sd.leaseID = l.ID
-	logger.Log.Debugf("sd: got leaseID: %x", l.ID)
+	logger.Zap.Debug("sd: got leaseID", zap.Int64("leaseID", int64(l.ID)))
 	// this will keep alive forever, when channel c is closed
 	// it means we probably have to rebootstrap the lease
 	c, err := sd.cli.KeepAlive(context.TODO(), sd.leaseID)
@@ -317,7 +317,7 @@ func (sd *etcdServiceDiscovery) deleteLocalInvalidServers(actualServers []string
 	sd.serverMapByID.Range(func(key interface{}, value interface{}) bool {
 		k := key.(string)
 		if !util.SliceContainsString(actualServers, k) {
-			logger.Log.Warnf("deleting invalid local server %s", k)
+			logger.Sugar.Warnf("deleting invalid local server %s", k)
 			sd.deleteServer(k)
 		}
 		return true
@@ -447,7 +447,7 @@ func (sd *etcdServiceDiscovery) GetServer(id string) (*Server, error) {
 }
 
 func (sd *etcdServiceDiscovery) InitETCDClient() error {
-	logger.Log.Infof("Initializing ETCD client")
+	logger.Zap.Info("Initializing ETCD client")
 	var cli *clientv3.Client
 	var err error
 	config := clientv3.Config{
@@ -460,7 +460,7 @@ func (sd *etcdServiceDiscovery) InitETCDClient() error {
 	}
 	cli, err = clientv3.New(config)
 	if err != nil {
-		logger.Log.Errorf("error initializing etcd client: %s", err.Error())
+		logger.Zap.Error("error initializing etcd client", zap.Error(err))
 		return err
 	}
 	sd.cli = cli
@@ -501,7 +501,7 @@ func (sd *etcdServiceDiscovery) Init() error {
 			case <-syncServersTicker.C:
 				err := sd.SyncServers(false)
 				if err != nil {
-					logger.Log.Errorf("error resyncing servers: %s", err.Error())
+					logger.Zap.Error("error resyncing servers", zap.Error(err))
 				}
 			case <-sd.stopChan:
 				return
@@ -526,7 +526,7 @@ func parseServer(value []byte) (*Server, error) {
 	var sv *Server
 	err := json.Unmarshal(value, &sv)
 	if err != nil {
-		logger.Log.Warnf("failed to load server %s, error: %s", sv, err.Error())
+		logger.Zap.Warn("failed to load server", zap.Any("server", sv), zap.Error(err))
 		return nil, err
 	}
 	return sv, nil
@@ -536,7 +536,7 @@ func (sd *etcdServiceDiscovery) printServers() {
 	sd.mapByTypeLock.RLock()
 	defer sd.mapByTypeLock.RUnlock()
 	for k, v := range sd.serverMapByType {
-		logger.Log.Debugf("type: %s, servers: %+v", k, v)
+		logger.Sugar.Debugf("type: %s, servers: %+v", k, v)
 	}
 }
 
@@ -576,7 +576,7 @@ func (p *parallelGetter) start() {
 	for i := 0; i < p.numWorkers; i++ {
 		co.Go(func() {
 			for work := range p.workChan {
-				logger.Log.Debugf("loading info from missing server: %s/%s", work.serverType, work.serverID)
+				logger.Zap.Debug("loading info from missing server", zap.String("svType", work.serverType), zap.String("svID", work.serverID))
 				var sv *Server
 				var err error
 				if work.payload == nil {
@@ -585,7 +585,7 @@ func (p *parallelGetter) start() {
 					sv, err = parseServer(work.payload)
 				}
 				if err != nil {
-					logger.Log.Errorf("Error parsing server from etcd: %s, error: %s", work.serverID, err.Error())
+					logger.Zap.Error("Error parsing server from etcd", zap.String("svType", work.serverType), zap.String("svID", work.serverID), zap.Error(err))
 					p.wg.Done()
 					continue
 				}
@@ -647,7 +647,7 @@ func (sd *etcdServiceDiscovery) SyncServers(firstSync bool) error {
 		)
 	}
 	if err != nil {
-		logger.Log.Errorf("Error querying etcd server: %s", err.Error())
+		logger.Zap.Error("Error querying etcd server", zap.Error(err))
 		return err
 	}
 
@@ -660,13 +660,13 @@ func (sd *etcdServiceDiscovery) SyncServers(firstSync bool) error {
 	for _, kv := range kvs.Kvs {
 		svType, svID, err := parseEtcdKey(string(kv.Key))
 		if err != nil {
-			logger.Log.Warnf("failed to parse etcd key %s, error: %s", kv.Key, err.Error())
+			logger.Zap.Warn("failed to parse etcd", zap.ByteString("key", kv.Key), zap.Error(err))
 			continue
 		}
 
 		// Check whether the server type is blacklisted or not
 		if sd.isServerTypeBlacklisted(svType) && svID != sd.server.ID {
-			logger.Log.Debug("ignoring blacklisted server type '%s'", svType)
+			logger.Zap.Debug("ignoring blacklisted server type", zap.String("svType", svType))
 			continue
 		}
 
@@ -686,7 +686,7 @@ func (sd *etcdServiceDiscovery) SyncServers(firstSync bool) error {
 	servers := parallelGetter.waitAndGetResult()
 
 	for _, server := range servers {
-		logger.Log.Debugf("adding server %s", server)
+		logger.Zap.Debug("adding server", zap.Any("server", server))
 		sd.addServer(server)
 	}
 
@@ -695,7 +695,7 @@ func (sd *etcdServiceDiscovery) SyncServers(firstSync bool) error {
 	sd.printServers()
 	sd.lastSyncTime = time.Now()
 	elapsed := time.Since(start)
-	logger.Log.Infof("SyncServers took : %s to run", elapsed)
+	logger.Zap.Info("SyncServers took", zap.Duration("elapsed", elapsed))
 	return nil
 }
 
@@ -721,16 +721,16 @@ func (sd *etcdServiceDiscovery) revoke() error {
 	c := make(chan error)
 	defer close(c)
 	co.Go(func() {
-		logger.Log.Debug("waiting for etcd revoke")
+		logger.Zap.Debug("waiting for etcd revoke")
 		_, err := sd.cli.Revoke(context.TODO(), sd.leaseID)
 		c <- err
-		logger.Log.Debug("finished waiting for etcd revoke")
+		logger.Zap.Debug("finished waiting for etcd revoke")
 	})
 	select {
 	case err := <-c:
 		return err // completed normally
 	case <-time.After(sd.revokeTimeout):
-		logger.Log.Warn("timed out waiting for etcd revoke")
+		logger.Zap.Warn("timed out waiting for etcd revoke")
 		return nil // timed out
 	}
 }
@@ -772,11 +772,11 @@ func (sd *etcdServiceDiscovery) watchEtcdChanges() {
 				}
 			case wResp, ok := <-chn:
 				if wResp.Err() != nil {
-					logger.Log.Warnf("etcd watcher response error: %s", wResp.Err())
+					logger.Zap.Warn("etcd watcher response error", zap.Error(wResp.Err()))
 					time.Sleep(100 * time.Millisecond)
 				}
 				if !ok {
-					logger.Log.Error("etcd watcher died, retrying to watch in 1 second")
+					logger.Zap.Error("etcd watcher died, retrying to watch in 1 second")
 					failedWatchAttempts++
 					time.Sleep(1000 * time.Millisecond)
 					if failedWatchAttempts > 10 {
@@ -806,7 +806,7 @@ func (sd *etcdServiceDiscovery) watchEtcdChanges() {
 						var sv *Server
 						var err error
 						if sv, err = parseServer(ev.Kv.Value); err != nil {
-							logger.Log.Errorf("Failed to parse server from etcd: %v", err)
+							logger.Zap.Error("Failed to parse server from etcd", zap.Error(err))
 							continue
 						}
 

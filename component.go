@@ -23,6 +23,7 @@ package pitaya
 import (
 	"github.com/topfreegames/pitaya/v2/component"
 	"github.com/topfreegames/pitaya/v2/logger"
+	"go.uber.org/zap"
 )
 
 type regComp struct {
@@ -42,12 +43,12 @@ func (app *App) RegisterRemote(c component.Component, options ...component.Optio
 
 func (app *App) LazyRegister(c component.Component, options ...component.Option) {
 	if err := app.handlerService.Register(c, options); err != nil {
-		logger.Log.Errorf("Failed to lazy register handler: %s", err.Error())
+		logger.Zap.Error("Failed to lazy register handler", zap.Error(err))
 	}
 }
 func (app *App) LazyRegisterRemote(c component.Component, options ...component.Option) {
 	if err := app.remoteService.Register(c, options); err != nil {
-		logger.Log.Errorf("Failed to lazy register remote: %s", err.Error())
+		logger.Zap.Error("Failed to lazy register remote", zap.Error(err))
 	}
 }
 func (app *App) RegisterInterceptor(serviceName string, interceptor *component.Interceptor) {
@@ -81,17 +82,17 @@ func (app *App) startupComponents() {
 	// register all components
 	for _, c := range app.handlerComp {
 		if err := app.handlerService.Register(c.comp, c.opts); err != nil {
-			logger.Log.Errorf("Failed to register handler: %s", err.Error())
+			logger.Zap.Error("Failed to register handler", zap.Error(err))
 		}
 	}
 
 	// register all remote components
 	for _, c := range app.remoteComp {
 		if app.remoteService == nil {
-			logger.Log.Warn("registered a remote component but remoteService is not running! skipping...")
+			logger.Zap.Warn("registered a remote component but remoteService is not running! skipping...")
 		} else {
 			if err := app.remoteService.Register(c.comp, c.opts); err != nil {
-				logger.Log.Errorf("Failed to register remote: %s", err.Error())
+				logger.Zap.Warn("Failed to register remote", zap.Error(err))
 			}
 		}
 	}

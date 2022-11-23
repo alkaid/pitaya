@@ -23,6 +23,7 @@ package modules
 import (
 	"context"
 	"fmt"
+	"go.uber.org/zap"
 	"time"
 
 	"github.com/topfreegames/pitaya/v2/cluster"
@@ -97,7 +98,7 @@ func (b *ETCDBindingStorage) setupOnSessionCloseCB() {
 		if s.UID() != "" && reason != session.CloseReasonKickRebind {
 			err := b.removeBinding(s.UID())
 			if err != nil {
-				logger.Log.Errorf("error removing binding info from storage: %v", err)
+				logger.Zap.Error("error removing binding info from storage", zap.Error(err))
 			}
 		}
 	})

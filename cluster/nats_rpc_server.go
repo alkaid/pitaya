@@ -179,7 +179,7 @@ func (ns *NatsRPCServer) subscribeToUserKickChannel(uid string, svType string) (
 		kick := &protos.KickMsg{}
 		err := proto.Unmarshal(msg.Data, kick)
 		if err != nil {
-			logger.Log.Error("error unrmarshalling push: ", err.Error())
+			logger.Zap.Error("error unrmarshalling push", zap.Error(err))
 		}
 		ns.userKickCh <- kick
 	})
@@ -191,7 +191,7 @@ func (ns *NatsRPCServer) subscribeToUserMessages(uid string, svType string) (*na
 		push := &protos.Push{}
 		err := proto.Unmarshal(msg.Data, push)
 		if err != nil {
-			logger.Log.Error("error unmarshalling push:", err.Error())
+			logger.Zap.Error("error unmarshalling push", zap.Error(err))
 		}
 		ns.userPushCh <- push
 	})
@@ -215,13 +215,13 @@ func (ns *NatsRPCServer) handleMessages() {
 			ns.reportMetrics()
 			dropped, err := ns.sub.Dropped()
 			if err != nil {
-				logger.Log.Errorf("error getting number of dropped messages: %s", err.Error())
+				logger.Zap.Error("error getting number of dropped messages", zap.Error(err))
 			}
 			// 添加广播订阅的消息丢失日志和统计
 			for i := 0; i < len(ns.broadcastSubs); i++ {
 				tmpDropped, err := ns.broadcastSubs[i].Dropped()
 				if err != nil {
-					logger.Log.Errorf("error getting number of dropped messages: %s", err.Error())
+					logger.Zap.Error("error getting number of dropped messages", zap.Error(err))
 				}
 				dropped += tmpDropped
 			}
@@ -237,7 +237,7 @@ func (ns *NatsRPCServer) handleMessages() {
 			err = proto.Unmarshal(msg.Data, req)
 			if err != nil {
 				// should answer rpc with an error
-				logger.Log.Error("error unmarshalling rpc message:", err.Error())
+				logger.Zap.Error("error unmarshalling rpc message", zap.Error(err))
 				continue
 			}
 			req.Msg.Reply = msg.Reply
@@ -334,7 +334,7 @@ func (ns *NatsRPCServer) processSessionBindings() {
 		b := &protos.BindMsg{}
 		err := proto.Unmarshal(bind.Data, b)
 		if err != nil {
-			logger.Log.Errorf("error processing binding msg: %v", err)
+			logger.Zap.Error("error processing binding msg", zap.Error(err))
 			continue
 		}
 		ns.pitayaServer.SessionBindRemote(context.Background(), b)
@@ -355,7 +355,7 @@ func (ns *NatsRPCServer) processKick() {
 		logger.Log.Debugf("Sending kick to user %s: %v", kick.GetUserId())
 		_, err := ns.pitayaServer.KickUser(context.Background(), kick)
 		if err != nil {
-			logger.Log.Errorf("error sending kick to user: %v", err)
+			logger.Zap.Error("error sending kick to user", zap.Error(err))
 		}
 	}
 }
@@ -452,7 +452,7 @@ func (ns *NatsRPCServer) reportMetrics() {
 	if ns.metricsReporters != nil {
 		for _, mr := range ns.metricsReporters {
 			if err := mr.ReportGauge(metrics.DroppedMessages, map[string]string{}, float64(ns.dropped)); err != nil {
-				logger.Log.Warnf("failed to report dropped message: %s", err.Error())
+				logger.Zap.Warn("failed to report dropped message", zap.Error(err))
 			}
 
 			// subchan
@@ -461,7 +461,7 @@ func (ns *NatsRPCServer) reportMetrics() {
 				logger.Log.Warn("subChan is at maximum capacity")
 			}
 			if err := mr.ReportGauge(metrics.ChannelCapacity, map[string]string{"channel": "rpc_server_subchan"}, float64(subChanCapacity)); err != nil {
-				logger.Log.Warnf("failed to report subChan queue capacity: %s", err.Error())
+				logger.Zap.Warn("failed to report subChan queue capacity", zap.Error(err))
 			}
 
 			// bindingschan
@@ -470,7 +470,7 @@ func (ns *NatsRPCServer) reportMetrics() {
 				logger.Log.Warn("bindingsChan is at maximum capacity")
 			}
 			if err := mr.ReportGauge(metrics.ChannelCapacity, map[string]string{"channel": "rpc_server_bindingschan"}, float64(bindingsChanCapacity)); err != nil {
-				logger.Log.Warnf("failed to report bindingsChan capacity: %s", err.Error())
+				logger.Zap.Warn("failed to report bindingsChan capacity", zap.Error(err))
 			}
 
 			// userpushch
@@ -479,7 +479,7 @@ func (ns *NatsRPCServer) reportMetrics() {
 				logger.Log.Warn("userPushChan is at maximum capacity")
 			}
 			if err := mr.ReportGauge(metrics.ChannelCapacity, map[string]string{"channel": "rpc_server_userpushchan"}, float64(userPushChanCapacity)); err != nil {
-				logger.Log.Warnf("failed to report userPushCh capacity: %s", err.Error())
+				logger.Zap.Warn("failed to report userPushCh capacity", zap.Error(err))
 			}
 		}
 	}

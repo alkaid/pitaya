@@ -22,6 +22,7 @@ package acceptorwrapper
 
 import (
 	"container/list"
+	"go.uber.org/zap"
 	"time"
 
 	"github.com/topfreegames/pitaya/v2/acceptor"
@@ -83,7 +84,7 @@ func (r *RateLimiter) GetNextMessage() (msg []byte, err error) {
 
 		now := time.Now()
 		if r.shouldRateLimit(now) {
-			logger.Log.Errorf("Data=%s, Error=%s", msg, constants.ErrRateLimitExceeded)
+			logger.Zap.Error("rate limiter", zap.ByteString("data", msg), zap.Error(constants.ErrRateLimitExceeded))
 			metrics.ReportExceededRateLimiting(r.reporters)
 			continue
 		}

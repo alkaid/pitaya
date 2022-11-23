@@ -25,6 +25,8 @@ import (
 	"encoding/json"
 	"os"
 
+	"go.uber.org/zap"
+
 	workers "github.com/alkaid/go-workers"
 	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/config"
@@ -126,14 +128,14 @@ func (w *Worker) parsedRPCJob(rpcJob RPCJob) func(*workers.Msg) {
 		logger.Log.Debug("executing rpc job")
 		bts, rpcRoute, err := w.unmarshalRouteMetadata(jobArg)
 		if err != nil {
-			logger.Log.Errorf("failed to get job arg: %q", err)
+			logger.Zap.Error("failed to get job arg", zap.Error(err))
 			panic(err)
 		}
 
 		logger.Log.Debug("getting route arg and reply")
 		arg, reply, err := rpcJob.GetArgReply(rpcRoute.Route)
 		if err != nil {
-			logger.Log.Errorf("failed to get methods arg and reply: %q", err)
+			logger.Zap.Error("failed to get methods arg and reply", zap.Error(err))
 			panic(err)
 		}
 		rpcInfo := &rpcInfo{
@@ -144,14 +146,14 @@ func (w *Worker) parsedRPCJob(rpcJob RPCJob) func(*workers.Msg) {
 		logger.Log.Debug("unmarshalling rpc info")
 		err = json.Unmarshal(bts, rpcInfo)
 		if err != nil {
-			logger.Log.Errorf("failed to unmarshal rpc info: %q", err)
+			logger.Zap.Error("failed to unmarshal rpc info", zap.Error(err))
 			panic(err)
 		}
 
 		logger.Log.Debug("choosing server to make rpc")
 		serverID, err := rpcJob.ServerDiscovery(rpcInfo.Route, rpcInfo.Metadata)
 		if err != nil {
-			logger.Log.Errorf("failed get server: %q", err)
+			logger.Zap.Error("failed get server", zap.Error(err))
 			panic(err)
 		}
 
@@ -160,7 +162,7 @@ func (w *Worker) parsedRPCJob(rpcJob RPCJob) func(*workers.Msg) {
 		logger.Log.Debugf("executing rpc func to %s", rpcInfo.Route)
 		err = rpcJob.RPC(ctx, serverID, rpcInfo.Route, reply, arg)
 		if err != nil {
-			logger.Log.Errorf("failed make rpc: %q", err)
+			logger.Zap.Error("failed make rpc", zap.Error(err))
 			panic(err)
 		}
 

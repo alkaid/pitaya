@@ -23,6 +23,8 @@ package cluster
 import (
 	"fmt"
 
+	"go.uber.org/zap"
+
 	nats "github.com/nats-io/nats.go"
 	"github.com/topfreegames/pitaya/v2/logger"
 )
@@ -35,7 +37,7 @@ func setupNatsConn(connectString string, appDieChan chan bool, options ...nats.O
 	natsOptions := append(
 		options,
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
-			logger.Log.Warn("disconnected from nats! reason: %q", err.Error())
+			logger.Zap.Warn("disconnected from nats!", zap.Error(err))
 		}),
 		nats.ReconnectHandler(func(nc *nats.Conn) {
 			logger.Log.Warnf("reconnected to nats server %s with address %s in cluster %s!", nc.ConnectedServerName(), nc.ConnectedAddr(), nc.ConnectedClusterName())
@@ -47,7 +49,7 @@ func setupNatsConn(connectString string, appDieChan chan bool, options ...nats.O
 				return
 			}
 
-			logger.Log.Errorf("nats connection closed. reason: %q", nc.LastError())
+			logger.Zap.Error("nats connection closed", zap.Error(err))
 			if appDieChan != nil {
 				appDieChan <- true
 			}

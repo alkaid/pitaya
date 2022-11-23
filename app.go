@@ -28,6 +28,8 @@ import (
 	"strings"
 	"syscall"
 
+	"go.uber.org/zap"
+
 	"go.opentelemetry.io/otel/trace"
 
 	"google.golang.org/protobuf/types/descriptorpb"
@@ -49,7 +51,6 @@ import (
 	"github.com/topfreegames/pitaya/v2/groups"
 	"github.com/topfreegames/pitaya/v2/interfaces"
 	"github.com/topfreegames/pitaya/v2/logger"
-	logging "github.com/topfreegames/pitaya/v2/logger/interfaces"
 	"github.com/topfreegames/pitaya/v2/metrics"
 	mods "github.com/topfreegames/pitaya/v2/modules"
 	"github.com/topfreegames/pitaya/v2/remote"
@@ -465,7 +466,7 @@ func (app *App) AddServerDiscoveryListener(listener cluster.SDListener) {
 //	@param loader
 func (app *App) AddConfLoader(loader config.ConfLoader) {
 	if app.conf == nil {
-		logger.Log.Error("app conf is nil!")
+		logger.Zap.Error("app conf is nil!")
 		return
 	}
 	app.conf.AddLoader(loader)
@@ -591,11 +592,11 @@ func (app *App) OnStarted(fun func()) {
 // Start starts the app
 func (app *App) Start() {
 	if !app.server.Frontend && len(app.acceptors) > 0 {
-		logger.Log.Fatal("acceptors are not allowed on backend servers")
+		logger.Zap.Fatal("acceptors are not allowed on backend servers")
 	}
 
 	if app.server.Frontend && len(app.acceptors) == 0 {
-		logger.Log.Fatal("frontend servers should have at least one configured acceptor")
+		logger.Zap.Fatal("frontend servers should have at least one configured acceptor")
 	}
 
 	if app.serverMode == Cluster {
@@ -604,16 +605,16 @@ func (app *App) Start() {
 		}
 
 		if err := app.RegisterModuleBefore(app.rpcServer, "rpcServer"); err != nil {
-			logger.Log.Fatal("failed to register rpc server module: %s", err.Error())
+			logger.Zap.Fatal("failed to register rpc server module", zap.Error(err))
 		}
 		if err := app.RegisterModuleBefore(app.rpcClient, "rpcClient"); err != nil {
-			logger.Log.Fatal("failed to register rpc client module: %s", err.Error())
+			logger.Zap.Fatal("failed to register rpc client module: %s", zap.Error(err))
 		}
 		// set the service discovery as the last module to be started to ensure
 		// all modules have been properly initialized before the server starts
 		// receiving requests from other pitaya servers
 		if err := app.RegisterModuleAfter(app.serviceDiscovery, "serviceDiscovery"); err != nil {
-			logger.Log.Fatal("failed to register service discovery module: %s", err.Error())
+			logger.Zap.Fatal("failed to register service discovery module: %s", zap.Error(err))
 		}
 	}
 
@@ -639,13 +640,13 @@ func (app *App) Start() {
 	// stop server
 	select {
 	case <-app.dieChan:
-		logger.Log.Warn("the app will shutdown in a few seconds")
+		logger.Zap.Warn("the app will shutdown in a few seconds")
 	case s := <-sg:
-		logger.Log.Warn("got signal: ", s, ", shutting down...")
+		logger.Sugar.Warn("got signal: ", s, ", shutting down...")
 		close(app.dieChan)
 	}
 
-	logger.Log.Warn("server is stopping...")
+	logger.Zap.Warn("server is stopping...")
 
 	app.sessionPool.CloseAll()
 	app.shutdownModules()
@@ -658,7 +659,7 @@ func (app *App) listen() {
 	// by SetTimerPrecision
 	timer.GlobalTicker = time.NewTicker(timer.Precision)
 
-	logger.Log.Infof("starting server %s:%s", app.server.Type, app.server.ID)
+	logger.Sugar.Infof("starting server %s:%s", app.server.Type, app.server.ID)
 	for i := 0; i < app.config.Concurrency.Handler.Dispatch; i++ {
 		threadID := i // 避免闭包值拷贝问题
 		co.Go(func() { app.handlerService.Dispatch(threadID) })
@@ -677,7 +678,7 @@ func (app *App) listen() {
 			a.ListenAndServe()
 		})
 
-		logger.Log.Infof("listening with acceptor %s on addr %s", reflect.TypeOf(a), a.GetAddr())
+		logger.Sugar.Infof("listening with acceptor %s on addr %s", reflect.TypeOf(a), a.GetAddr())
 	}
 
 	// 改为强制唯一session
@@ -698,7 +699,7 @@ func (app *App) listen() {
 
 	app.startModules()
 
-	logger.Log.Info("all modules started!")
+	logger.Zap.Info("all modules started!")
 
 	app.running = true
 }
@@ -746,7 +747,7 @@ func (app *App) Shutdown() {
 func (app *App) GetSessionFromCtx(ctx context.Context) session.Session {
 	sessionVal := ctx.Value(constants.SessionCtxKey)
 	if sessionVal == nil {
-		logger.Log.Debug("ctx doesn't contain a session, are you calling GetSessionFromCtx from inside a remote?")
+		logger.Zap.Debug("ctx doesn't contain a session, are you calling GetSessionFromCtx from inside a remote?")
 		return nil
 	}
 	return sessionVal.(session.Session)
@@ -757,13 +758,13 @@ func (app *App) GetSessionByUID(ctx context.Context, uid string) (session.Sessio
 }
 
 // GetDefaultLoggerFromCtx returns the default logger from the given context
-func GetDefaultLoggerFromCtx(ctx context.Context) logging.Logger {
+func GetDefaultLoggerFromCtx(ctx context.Context) *zap.Logger {
 	l := ctx.Value(constants.LoggerCtxKey)
 	if l == nil {
-		return logger.Log
+		return logger.Zap
 	}
 
-	return l.(logging.Logger)
+	return l.(*zap.Logger)
 }
 
 // AddMetricTagsToPropagateCtx adds a key and metric tags that will

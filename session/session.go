@@ -714,7 +714,7 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, callback map[string]
 		// is not the frontend server that received the user request
 		err = s.bindInFront(ctx, callback)
 		if err != nil {
-			logger.Log.Error("error while trying to push session to front: ", err)
+			logger.Zap.Error("error while trying to push session to front", zap.Error(err))
 			s.uid = ""
 			return errors.WithStack(err)
 		}
@@ -803,7 +803,7 @@ func (s *sessionImpl) KickBackend(ctx context.Context, targetServerType string, 
 		}
 	}
 	if err != nil {
-		logger.Log.Error("error while trying to bind backend: " + err.Error())
+		logger.Zap.Error("error while trying to bind backend", zap.Error(err))
 		// 回滚
 		s.SetBackendID(targetServerType, backendID)
 		return err
@@ -844,7 +844,7 @@ func (s *sessionImpl) Close(callback map[string]string, reason ...CloseReason) {
 		for _, sub := range s.Subscriptions {
 			err := sub.Unsubscribe()
 			if err != nil {
-				logger.Log.Errorf("error unsubscribing to user's messages channel: %s, this can cause performance and leak issues", err.Error())
+				logger.Zap.Error("error unsubscribing to user's messages channel: , this can cause performance and leak issues", zap.Error(err))
 			} else {
 				logger.Log.Debugf("successfully unsubscribed to user's %s messages channel", s.UID())
 			}

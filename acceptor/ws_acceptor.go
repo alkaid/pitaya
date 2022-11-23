@@ -27,6 +27,8 @@ import (
 	"net/http"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/gorilla/websocket"
 	"github.com/topfreegames/pitaya/v2/conn/codec"
 	"github.com/topfreegames/pitaya/v2/conn/packet"
@@ -84,13 +86,13 @@ type connHandler struct {
 func (h *connHandler) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	conn, err := h.upgrader.Upgrade(rw, r, nil)
 	if err != nil {
-		logger.Log.Errorf("Upgrade failure, URI=%s, Error=%s", r.RequestURI, err.Error())
+		logger.Zap.Error("Upgrade failure", zap.String("URI", r.RequestURI), zap.Error(err))
 		return
 	}
 
 	c, err := NewWSConn(conn)
 	if err != nil {
-		logger.Log.Errorf("Failed to create new ws connection: %s", err.Error())
+		logger.Zap.Error("Failed to create new ws connection", zap.Error(err))
 		return
 	}
 	h.connChan <- c
@@ -117,7 +119,7 @@ func (w *WSAcceptor) ListenAndServe() {
 
 	listener, err := net.Listen("tcp", w.addr)
 	if err != nil {
-		logger.Log.Fatalf("Failed to listen: %s", err.Error())
+		logger.Zap.Fatal("Failed to listen", zap.Error(err))
 	}
 	w.listener = listener
 
@@ -133,13 +135,13 @@ func (w *WSAcceptor) ListenAndServeTLS(cert, key string) {
 
 	crt, err := tls.LoadX509KeyPair(cert, key)
 	if err != nil {
-		logger.Log.Fatalf("Failed to load x509: %s", err.Error())
+		logger.Zap.Fatal("Failed to load x509", zap.Error(err))
 	}
 
 	tlsCfg := &tls.Config{Certificates: []tls.Certificate{crt}}
 	listener, err := tls.Listen("tcp", w.addr, tlsCfg)
 	if err != nil {
-		logger.Log.Fatalf("Failed to listen: %s", err.Error())
+		logger.Zap.Fatal("Failed to listen", zap.Error(err))
 	}
 	w.listener = listener
 	w.serve(&upgrader)
@@ -158,7 +160,7 @@ func (w *WSAcceptor) serve(upgrader *websocket.Upgrader) {
 func (w *WSAcceptor) Stop() {
 	err := w.listener.Close()
 	if err != nil {
-		logger.Log.Errorf("Failed to stop: %s", err.Error())
+		logger.Zap.Error("Failed to stop", zap.Error(err))
 	}
 }
 

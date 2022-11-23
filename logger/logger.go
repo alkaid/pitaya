@@ -35,7 +35,7 @@ var Sugar = Manager.Sugar
 // Log
 //
 //	@Deprecated use Zap instead
-var Log = newAdapter(Manager)
+var Log = Manager.Sugar
 
 // Logger 具体Log的持有类
 type Logger struct {

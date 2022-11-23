@@ -25,6 +25,7 @@ import (
 	"time"
 
 	errors2 "github.com/alkaid/goerrors/errors"
+	"go.uber.org/zap"
 
 	"github.com/spf13/viper"
 	_ "github.com/spf13/viper/remote"
@@ -236,7 +237,7 @@ func (c *Config) reloadAll() {
 			err = c.Unmarshal(confStruct)
 		}
 		if err != nil {
-			logger.Log.Errorf("pitaya:reload config unmarshal error:%v", err)
+			logger.Zap.Error("pitaya:reload config unmarshal error", zap.Error(err))
 			continue
 		}
 		loader.Reload(key, confStruct)

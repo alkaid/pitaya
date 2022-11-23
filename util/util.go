@@ -41,14 +41,13 @@ import (
 	"github.com/topfreegames/pitaya/v2/constants"
 	pcontext "github.com/topfreegames/pitaya/v2/context"
 	"github.com/topfreegames/pitaya/v2/logger"
-	"github.com/topfreegames/pitaya/v2/logger/interfaces"
 	"github.com/topfreegames/pitaya/v2/protos"
 	"github.com/topfreegames/pitaya/v2/serialize"
 	"github.com/topfreegames/pitaya/v2/serialize/json"
 	"github.com/topfreegames/pitaya/v2/serialize/protobuf"
 )
 
-func getLoggerFromArgs(args []reflect.Value) interfaces.Logger {
+func getLoggerFromArgs(args []reflect.Value) *zap.Logger {
 	for _, a := range args {
 		if !a.IsValid() {
 			continue
@@ -56,12 +55,12 @@ func getLoggerFromArgs(args []reflect.Value) interfaces.Logger {
 		if ctx, ok := a.Interface().(context.Context); ok {
 			logVal := ctx.Value(constants.LoggerCtxKey)
 			if logVal != nil {
-				log := logVal.(interfaces.Logger)
+				log := logVal.(*zap.Logger)
 				return log
 			}
 		}
 	}
-	return logger.Log
+	return logger.Zap
 }
 
 // Pcall calls a method that returns an interface and an error and recovers in case of panic
@@ -72,7 +71,7 @@ func Pcall(method reflect.Method, args []reflect.Value) (rets interface{}, err e
 			stackTrace := debug.Stack()
 			stackTraceAsRawStringLiteral := strconv.Quote(string(stackTrace))
 			log := getLoggerFromArgs(args)
-			log.Errorf("panic - pitaya/dispatch: methodName=%s panicData=%v stackTrace=%s", method.Name, rec, stackTraceAsRawStringLiteral)
+			log.Error("panic - pitaya/dispatch", zap.String("methodName", method.Name), zap.Any("panicData", rec), zap.String("stack", stackTraceAsRawStringLiteral))
 
 			if s, ok := rec.(string); ok {
 				err = errors.New(s)
@@ -143,7 +142,8 @@ var customErrorToProto ErrorToProto                      // 自定义error转pro
 type ErrorToProto func(err error) (proto.Message, error) // 自定义error转proto
 
 // SetErrorToProtoConvertor 设置自定义error转byte函数
-//  @param errorToProto
+//
+//	@param errorToProto
 func SetErrorToProtoConvertor(errorToProto ErrorToProto) {
 	customErrorToProto = errorToProto
 }
@@ -185,13 +185,7 @@ func CtxWithDefaultLogger(ctx context.Context, route, userID string) context.Con
 	} else {
 		requestID = nuid.New()
 	}
-	defaultLogger := logger.Log.WithFields(
-		map[string]interface{}{
-			"route":     route,
-			"requestId": requestID,
-			"userId":    userID,
-		},
-	)
+	defaultLogger := logger.Zap.With(zap.String("route", route), zap.Any("reqId", requestID), zap.String("userId", userID))
 
 	return context.WithValue(ctx, constants.LoggerCtxKey, defaultLogger)
 }

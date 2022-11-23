@@ -23,6 +23,8 @@ package metrics
 import (
 	"fmt"
 
+	"go.uber.org/zap"
+
 	"github.com/DataDog/datadog-go/statsd"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/logger"
@@ -101,7 +103,7 @@ func (s *StatsdReporter) ReportCount(metric string, tagsMap map[string]string, c
 
 	err := s.client.Count(metric, int64(count), fullTags, s.rate)
 	if err != nil {
-		logger.Log.Errorf("failed to report count: %q", err)
+		logger.Zap.Error("failed to report count", zap.Error(err))
 	}
 
 	return err
@@ -117,7 +119,7 @@ func (s *StatsdReporter) ReportGauge(metric string, tagsMap map[string]string, v
 
 	err := s.client.Gauge(metric, value, fullTags, s.rate)
 	if err != nil {
-		logger.Log.Errorf("failed to report gauge: %q", err)
+		logger.Zap.Error("failed to report gauge", zap.Error(err))
 	}
 
 	return err
@@ -133,7 +135,7 @@ func (s *StatsdReporter) ReportSummary(metric string, tagsMap map[string]string,
 
 	err := s.client.TimeInMilliseconds(metric, float64(value), fullTags, s.rate)
 	if err != nil {
-		logger.Log.Errorf("failed to report summary: %q", err)
+		logger.Zap.Error("failed to report summary", zap.Error(err))
 	}
 
 	return err

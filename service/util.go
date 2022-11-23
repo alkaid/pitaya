@@ -25,13 +25,14 @@ import (
 	"errors"
 	"reflect"
 
+	"go.uber.org/zap"
+
 	"github.com/alkaid/goerrors/apierrors"
 
 	"github.com/topfreegames/pitaya/v2/component"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
 	"github.com/topfreegames/pitaya/v2/logger"
-	"github.com/topfreegames/pitaya/v2/logger/interfaces"
 	"github.com/topfreegames/pitaya/v2/pipeline"
 	"github.com/topfreegames/pitaya/v2/protos"
 	"github.com/topfreegames/pitaya/v2/route"
@@ -90,10 +91,10 @@ func getMsgType(msgTypeIface interface{}) (message.Type, error) {
 func serializeReturn(ser serialize.Serializer, ret interface{}) ([]byte, error) {
 	res, err := util.SerializeOrRaw(ser, ret)
 	if err != nil {
-		logger.Log.Errorf("Failed to serialize return: %s", err.Error())
+		logger.Zap.Error("Failed to serialize return", zap.Error(err))
 		res, err = util.GetErrorPayload(ser, err)
 		if err != nil {
-			logger.Log.Error("cannot serialize message and respond to the client ", err.Error())
+			logger.Zap.Error("cannot serialize message and respond to the client", zap.Error(err))
 			return nil, err
 		}
 	}
@@ -122,12 +123,12 @@ func processHandlerMessage(
 		return nil, apierrors.FromError(err)
 	}
 
-	logger := ctx.Value(constants.LoggerCtxKey).(interfaces.Logger)
+	logger := ctx.Value(constants.LoggerCtxKey).(*zap.Logger)
 	exit, err := handler.ValidateMessageType(msgType)
 	if err != nil && exit {
 		return nil, apierrors.BadRequest("", err.Error(), "").WithCause(err)
 	} else if err != nil {
-		logger.Warnf("invalid message type, error: %s", err.Error())
+		logger.Warn("invalid message type", zap.Error(err))
 	}
 
 	// First unmarshal the handler arg that will be passed to
@@ -142,7 +143,7 @@ func processHandlerMessage(
 		return nil, err
 	}
 
-	logger.Debugf("SID=%d, Data=%s", session.ID(), data)
+	logger.Debug("process handle message", zap.Int64("SID", session.ID()), zap.ByteString("Data", data))
 	args := []reflect.Value{handler.Receiver, reflect.ValueOf(ctx)}
 	if arg != nil {
 		args = append(args, reflect.ValueOf(arg))

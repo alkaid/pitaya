@@ -25,6 +25,7 @@ import (
 	"os"
 
 	"github.com/topfreegames/pitaya/v2/logger"
+	"go.uber.org/zap"
 )
 
 // Server struct
@@ -34,7 +35,7 @@ type Server struct {
 	Metadata          map[string]string `json:"metadata"`
 	Frontend          bool              `json:"frontend"`
 	Hostname          string            `json:"hostname"`
-	SessionStickiness bool              `json:"stickiness"` //是否可以绑定session，绑定后将保持session粘连
+	SessionStickiness bool              `json:"stickiness"` // 是否可以绑定session，绑定后将保持session粘连
 }
 
 // NewServer ctor
@@ -42,7 +43,7 @@ func NewServer(id, serverType string, frontend bool, metadata ...map[string]stri
 	d := make(map[string]string)
 	h, err := os.Hostname()
 	if err != nil {
-		logger.Log.Errorf("failed to get hostname: %s", err.Error())
+		logger.Zap.Error("failed to get hostname", zap.Error(err))
 	}
 	if len(metadata) > 0 {
 		d = metadata[0]
@@ -60,7 +61,7 @@ func NewServer(id, serverType string, frontend bool, metadata ...map[string]stri
 func (s *Server) AsJSONString() string {
 	str, err := json.Marshal(s)
 	if err != nil {
-		logger.Log.Errorf("error getting server as json: %s", err.Error())
+		logger.Zap.Error("error getting server as json", zap.Error(err))
 		return ""
 	}
 	return string(str)
