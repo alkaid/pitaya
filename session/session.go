@@ -687,7 +687,7 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, callback map[string]
 	}
 	var err error
 	if s.UID() != "" && s.UID() != uid {
-		return errors.WithStack(constants.ErrSessionAlreadyBound)
+		return errors.WithStack(fmt.Errorf("%w,uid=%s", constants.ErrSessionAlreadyBound, uid))
 	}
 
 	s.uid = uid
@@ -741,8 +741,9 @@ func (s *sessionImpl) BindBackend(ctx context.Context, targetServerType string, 
 	if s.UID() == "" {
 		return errors.WithStack(constants.ErrIllegalUID)
 	}
-	if s.GetBackendID(targetServerType) != "" {
-		return errors.WithStack(constants.ErrSessionAlreadyBound)
+	backendID := s.GetBackendID(targetServerType)
+	if backendID != "" {
+		return errors.WithStack(fmt.Errorf("%w,uid=%s,bound=%s,target=%s", constants.ErrSessionAlreadyBound, s.UID(), backendID, targetServerID))
 	}
 	s.SetBackendID(targetServerType, targetServerID)
 	var err error
@@ -1211,7 +1212,7 @@ func (s *sessionImpl) sendRequestToFront(ctx context.Context, route string, incl
 	}
 	b, err := proto.Marshal(sessionData)
 	if err != nil {
-		return err
+		return errors.WithStack(err)
 	}
 	res, err := s.entity.SendRequest(ctx, s.frontendID, route, b)
 	if err != nil {
@@ -1335,4 +1336,11 @@ func (s *sessionImpl) GoBySession(task func()) {
 		goID = int(s.ID())
 	}
 	co.GoByID(goID, task)
+}
+
+// PitayaPrivateSession 框架内部使用的session接口
+type PitayaPrivateSession interface {
+	Session
+	SetBackendID(svrType string, id string) error
+	RemoveBackendID(svrType string) error
 }

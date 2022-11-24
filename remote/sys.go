@@ -22,6 +22,7 @@ package remote
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/pkg/errors"
 
@@ -114,6 +115,7 @@ func (sys *Sys) Init() {
 			// 回滚
 			// TODO 这里回滚的处理过于粗暴,后期考虑标志出上面的逻辑进行到哪一步了,根据不同的进度做不同的回滚策略,比如如果已经同步到redis，那就要回滚redis
 			s.SetDataEncoded(olddata)
+			s.Flush2Cluster()
 			logW := logger.Zap.With(zap.Int64("sid", s.ID()), zap.String("uid", s.UID()))
 			logW.Error("session binding error", zap.Error(err))
 			return err
@@ -161,7 +163,7 @@ func (sys *Sys) Init() {
 		var r *route.Route
 		// 严禁网关调用
 		if sys.server.Frontend {
-			return constants.ErrDeveloperLogicFatal
+			return errors.WithStack(constants.ErrDeveloperLogicFatal)
 		}
 		// 目标服不是本服 转发给目标服
 		if sys.server.ID != serverId {
@@ -174,45 +176,59 @@ func (sys *Sys) Init() {
 				return err
 			}
 		}
-		for i := 0; i < 1; i++ {
-			// session要绑定的就是本服,开始处理
-			// 已经绑定过 报错
-			if sys.sessionPool.GetSessionByUID(s.UID()) != nil {
-				err = errors.WithStack(constants.ErrSessionAlreadyBound)
-				break
-			}
-			// 本地存储
-			err = sys.sessionPool.StoreSessionLocal(s)
-			if err != nil {
-				break
-			}
-			// 通知网关同步数据
-			err = s.PushToFront(ctx)
-			if err != nil {
-				break
-			}
-			// 通知所有服务器
-			// fork本类型服所有实例 然后通知所有其他类型服
-			r, err = route.Decode(serverType + "." + constants.SessionBoundBackendForkRoute)
-			if err != nil {
-				break
-			}
-			err = sys.remote.Fork(ctx, r, msg, s)
-			if err != nil {
-				break
-			}
-			r, err = route.Decode(constants.SessionBoundBackendRoute)
-			if err != nil {
-				break
-			}
-			err = sys.remote.NotifyAll(ctx, r, sys.server, msg, s)
+		// session要绑定的就是本服,开始处理
+		logErr := func(err error) {
+			logger.Zap.Error("session binding backend error", zap.Int64("sid", s.ID()), zap.String("uid", s.UID()), zap.Error(err), zap.Error(err), zap.String("svType", serverType), zap.String("svID", serverId))
 		}
+		rollback := func(err error) {
+			// 回滚 清理本地缓存 清理redis
+			s.(session.PitayaPrivateSession).RemoveBackendID(serverType)
+			sys.sessionPool.RemoveSessionLocal(s)
+			s.Flush2Cluster()
+			logErr(err)
+		}
+		// 已经绑定过 警告 或略错误
+		existsSession := sys.sessionPool.GetSessionByUID(s.UID())
+		if existsSession != nil {
+			err = errors.WithStack(fmt.Errorf("%w:found in pool,uid=%s,bound=%s,target=%s", constants.ErrSessionAlreadyBound, s.UID(), existsSession.GetBackendID(serverType), serverId))
+			logger.Zap.Error("", zap.Error(err))
+			return nil
+		}
+		// 本地存储
+		err = sys.sessionPool.StoreSessionLocal(s)
 		if err != nil {
-			// 回滚
-			// TODO 后期考虑标志出上面的逻辑进行到哪一步了,根据不同的进度做不同的回滚策略,比如如果已经同步到redis，那就要回滚redis
-			logW := logger.Zap.With(zap.Int64("sid", s.ID()), zap.String("uid", s.UID()))
-			logW.Error("session binding backend error", zap.Error(err))
+			rollback(err)
 			return err
+		}
+		// 通知网关同步数据
+		err = s.PushToFront(ctx)
+		if err != nil {
+			// 同步失败(网关狗带或session已经下线) 回滚
+			rollback(err)
+			return err
+		}
+		// 后续流程都可忽略错误
+		// 通知所有服务器
+		// fork本类型服所有实例 然后通知所有其他类型服
+		r, err = route.Decode(serverType + "." + constants.SessionBoundBackendForkRoute)
+		if err != nil {
+			logErr(err)
+			return nil
+		}
+		err = sys.remote.Fork(ctx, r, msg, s)
+		if err != nil {
+			logErr(err)
+			return nil
+		}
+		r, err = route.Decode(constants.SessionBoundBackendRoute)
+		if err != nil {
+			logErr(err)
+			return nil
+		}
+		err = sys.remote.NotifyAll(ctx, r, sys.server, msg, s)
+		if err != nil {
+			logErr(err)
+			return nil
 		}
 		return nil
 	})
@@ -241,49 +257,45 @@ func (sys *Sys) Init() {
 			if err == nil {
 				return nil
 			}
-			// 若目标服已经挂掉,不报错,继续后续的数据清理以及通知网关
+			// 若目标服已经挂掉,不报错,代替目标服继续后续的数据清理以及通知网关
 			if errors.Is(err, constants.ErrServerNotFound) {
 				logW.Info("backend target down,ignore error", zap.Error(err))
 			} else {
 				return err
 			}
 		}
-		// 本服就是目标服或者目标服已经狗带，处理绑定状态并通知网关
-		for i := 0; i < 1; i++ {
-			// session要绑定的就是本服,开始处理
-			// 本地存储
-			if sys.server.ID == serverId {
-				sys.sessionPool.RemoveSessionLocal(s)
-			}
-			// 重绑定发起的kick不继续处理
-			if reason == session.CloseReasonKickRebind {
-				return nil
-			}
-			// 通知网关同步数据
-			err = s.PushToFront(ctx)
-			if err != nil {
-				// 网关报错session找不到,说明网关的session已经下线,忽略该错误并补偿redis清除步骤
-				if errors.Is(err, protos.ErrSessionNotFound()) {
-					logW.Debug("frontend return ErrSessionNotFound,the session must be closed. ignore the error then clean cluster's cache")
-					err = s.Flush2Cluster()
-				}
-				if err != nil {
-					break
-				}
-			}
-			// 通知所有服务器 notify也是rpc调用，会导致frontend的session被SetDataEncoded,数据被同步
-			r, err = route.Decode(constants.SessionKickedBackendRoute)
-			if err != nil {
-				break
-			}
-			err = sys.remote.NotifyAll(ctx, r, sys.server, msg, s)
+		// 本服就是目标服或者目标服已经狗带(代替目标服)，处理绑定状态并通知网关
+		// session要绑定的就是本服,开始处理
+		// 本地存储
+		if sys.server.ID == serverId {
+			sys.sessionPool.RemoveSessionLocal(s)
 		}
+		// 重绑定发起的kick不继续处理
+		if reason == session.CloseReasonKickRebind {
+			return nil
+		}
+		// 通知网关同步数据
+		err = s.PushToFront(ctx)
 		if err != nil {
-			// 回滚
-			// TODO 后期考虑标志出上面的逻辑进行到哪一步了,根据不同的进度做不同的回滚策略,比如如果已经同步到redis，那就要回滚redis
-
-			logW.Error("session kick backend error", zap.Error(err))
-			return err
+			// 报错session找不到,说明网关的session已经下线,不管是session找不到还是网关狗带等其他错误都应该忽略该错误并代替网关执行redis清除步骤
+			// if  errors.Is(err, protos.ErrSessionNotFound()) {
+			logW.Warn("the session may be closed or frontend is down. ignore the error then clean cluster's cache")
+			err = s.Flush2Cluster()
+			if err != nil {
+				return err
+			}
+			// }
+		}
+		// 后续流程都可以忽略错误
+		// 通知所有服务器
+		r, err = route.Decode(constants.SessionKickedBackendRoute)
+		if err != nil {
+			logW.Error("session kick backend error,ignore", zap.Error(err))
+			return nil
+		}
+		err = sys.remote.NotifyAll(ctx, r, sys.server, msg, s)
+		if err != nil {
+			logW.Error("session kick backend error,ignore", zap.Error(err))
 		}
 		return nil
 	})
