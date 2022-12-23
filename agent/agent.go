@@ -26,6 +26,7 @@ import (
 	gojson "encoding/json"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,6 +54,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/tracing"
 	"github.com/topfreegames/pitaya/v2/util"
 	"github.com/topfreegames/pitaya/v2/util/compression"
+	netutil "github.com/topfreegames/pitaya/v2/util/net"
 )
 
 var (
@@ -388,6 +390,13 @@ func (a *agentImpl) Close(callback map[string]string, reason ...session.CloseRea
 // returns the remote network address.
 func (a *agentImpl) RemoteAddr() net.Addr {
 	return a.conn.RemoteAddr()
+}
+
+func (a *agentImpl) RemoteIP() netip.Addr {
+	if wsConn, ok := a.conn.(*acceptor.WSConn); ok && wsConn.InnerReq() != nil {
+		return netutil.GetClientIP(wsConn.InnerReq())
+	}
+	return netip.Addr{}
 }
 
 // String, implementation for Stringer interface

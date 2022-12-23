@@ -443,7 +443,7 @@ func (sd *etcdServiceDiscovery) GetServer(id string) (*Server, error) {
 	if sv, ok := sd.serverMapByID.Load(id); ok {
 		return sv.(*Server), nil
 	}
-	return nil, constants.ErrNoServerWithID
+	return nil, fmt.Errorf("%w:%s", constants.ErrNoServerWithID, id)
 }
 
 func (sd *etcdServiceDiscovery) InitETCDClient() error {

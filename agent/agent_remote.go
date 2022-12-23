@@ -23,6 +23,7 @@ package agent
 import (
 	"context"
 	"net"
+	"net/netip"
 	"reflect"
 
 	"go.uber.org/zap"
@@ -172,6 +173,10 @@ func (a *Remote) Close(callback map[string]string, reason ...session.CloseReason
 
 // RemoteAddr returns the remote address of the user
 func (a *Remote) RemoteAddr() net.Addr { return nil }
+
+func (a *Remote) RemoteIP() netip.Addr {
+	return netip.Addr{}
+}
 
 func (a *Remote) serialize(m pendingMessage) ([]byte, error) {
 	payload, err := util.SerializeOrRaw(a.serializer, m.payload)

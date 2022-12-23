@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"net"
+	"net/netip"
 
 	"github.com/topfreegames/pitaya/v2/route"
 	"github.com/topfreegames/pitaya/v2/util"
@@ -19,7 +20,8 @@ import (
 )
 
 // Cluster 云端session(redis)的low networkentity.NetworkEntity
-//  @implement networkentity.NetworkEntity
+//
+//	@implement networkentity.NetworkEntity
 type Cluster struct {
 	Session          session.Session          // session
 	rpcClient        cluster.RPCClient        // rpc client
@@ -76,6 +78,10 @@ func (a *Cluster) Close(callback map[string]string, reason ...session.CloseReaso
 func (a *Cluster) RemoteAddr() net.Addr {
 	logger.Zap.Error("not support in cluster session!", zap.Error(constants.ErrNotImplemented))
 	return nil
+}
+
+func (a *Cluster) RemoteIP() netip.Addr {
+	return netip.Addr{}
 }
 
 // SendRequest sends a request to a server

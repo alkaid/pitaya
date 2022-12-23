@@ -90,7 +90,7 @@ func (h *connHandler) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c, err := NewWSConn(conn)
+	c, err := NewWSConn(conn, r)
 	if err != nil {
 		logger.Zap.Error("Failed to create new ws connection", zap.Error(err))
 		return
@@ -170,17 +170,24 @@ type WSConn struct {
 	conn   *websocket.Conn
 	typ    int // message type
 	reader io.Reader
+	req    *http.Request
 }
 
 // NewWSConn return an initialized *WSConn
-func NewWSConn(conn *websocket.Conn) (*WSConn, error) {
+func NewWSConn(conn *websocket.Conn, r ...*http.Request) (*WSConn, error) {
 	c := &WSConn{conn: conn}
-
+	if len(r) > 0 {
+		c.req = r[0]
+	}
 	return c, nil
 }
 
 func (c *WSConn) InnerConn() *websocket.Conn {
 	return c.conn
+}
+
+func (c *WSConn) InnerReq() *http.Request {
+	return c.req
 }
 
 // GetNextMessage reads the next message available in the stream

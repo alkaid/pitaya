@@ -3,6 +3,7 @@ package networkentity
 import (
 	"context"
 	"net"
+	"net/netip"
 
 	"github.com/topfreegames/pitaya/v2/protos"
 )
@@ -14,5 +15,6 @@ type NetworkEntity interface {
 	Close(callback map[string]string, reason ...int) error
 	Kick(ctx context.Context, reason ...int) error
 	RemoteAddr() net.Addr
+	RemoteIP() netip.Addr
 	SendRequest(ctx context.Context, serverID, route string, v interface{}) (*protos.Response, error)
 }

@@ -178,13 +178,16 @@ func (sys *Sys) Init() {
 		}
 		// session要绑定的就是本服,开始处理
 		logErr := func(err error) {
-			logger.Zap.Error("session binding backend error", zap.Int64("sid", s.ID()), zap.String("uid", s.UID()), zap.Error(err), zap.Error(err), zap.String("svType", serverType), zap.String("svID", serverId))
+			logger.Zap.Error("session binding backend error", zap.Error(err), zap.Int64("sid", s.ID()), zap.String("uid", s.UID()), zap.String("svType", serverType), zap.String("svID", serverId))
 		}
 		rollback := func(err error) {
 			// 回滚 清理本地缓存 清理redis
-			s.(session.PitayaPrivateSession).RemoveBackendID(serverType)
+			err2 := s.(session.PitayaPrivateSession).RemoveBackendID(serverType)
 			sys.sessionPool.RemoveSessionLocal(s)
-			s.Flush2Cluster()
+			err2 = s.Flush2Cluster()
+			if err2 != nil {
+				logErr(err2)
+			}
 			logErr(err)
 		}
 		// 已经绑定过 警告 或略错误

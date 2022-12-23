@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/netip"
 	"reflect"
 	"strconv"
 	"sync"
@@ -241,6 +242,7 @@ type Session interface {
 	//  @param reason
 	Close(callback map[string]string, reason ...CloseReason)
 	RemoteAddr() net.Addr
+	RemoteIP() netip.Addr
 	Remove(key string) error
 	Set(key string, value interface{}) error
 	HasKey(key string) bool
@@ -858,6 +860,10 @@ func (s *sessionImpl) Close(callback map[string]string, reason ...CloseReason) {
 // RemoteAddr returns the remote network address.
 func (s *sessionImpl) RemoteAddr() net.Addr {
 	return s.entity.RemoteAddr()
+}
+
+func (s *sessionImpl) RemoteIP() netip.Addr {
+	return s.entity.RemoteIP()
 }
 
 // Remove delete data associated with the key from session storage
