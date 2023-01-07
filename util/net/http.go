@@ -38,7 +38,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/alkaid/pitaya/v2/logger"
+	"github.com/topfreegames/pitaya/v2/logger"
 	"go.uber.org/zap"
 
 	"golang.org/x/net/http2"
