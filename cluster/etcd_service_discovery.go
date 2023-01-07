@@ -364,7 +364,7 @@ func (sd *etcdServiceDiscovery) GetConsistentHashNode(serverType string, session
 	}
 	node, ok := sd.consistentHash[serverType].Get(sessionID)
 	if !ok {
-		return "", constants.ErrServerNotFound
+		return "", errors.WithStack(fmt.Errorf("%w server=%s,sid=%s", constants.ErrServerNotFound, serverType, sessionID))
 	}
 	return node.(string), nil
 }

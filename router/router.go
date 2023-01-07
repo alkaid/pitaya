@@ -71,6 +71,7 @@ func (r *Router) SetServiceDiscovery(sd cluster.ServiceDiscovery) {
 //
 // -目标服是stateless : 随机
 // -目标服是stateful:
+//
 //	-payload with session: 路由到session绑定的backend
 //	-payload without session: 随机
 func (r *Router) defaultRoute(
@@ -115,15 +116,17 @@ func (r *Router) defaultRoute(
 		if svId != "" {
 			sv, ok := servers[svId]
 			if !ok {
-				logW.Info("router server not found", zap.String("svID", svId))
-				err = errors.WithStack(constants.ErrServerNotFound)
+				logW.Info("router server not found", zap.String("svType", svType), zap.String("svID", svId))
+				err = errors.WithStack(fmt.Errorf("%w uid=%s,svType=%s,svID=%s", constants.ErrServerNotFound, session.UID(), svType, svId))
 			}
 			return sv, err
 		}
 		// return nil,constants.ErrNoServersAvailableOfType
 		// 需要路由到绑定session的服务,但是找不到，报错
 		return nil, protos.ErrForbiddenServerOfSession().WithMetadata(map[string]string{
-			"server": server.Type,
+			"svType": server.Type,
+			"svID":   server.ID,
+			"uid":    session.UID(),
 		}).WithStack()
 	}
 	logger.Zap.Debug("session is nil,route random", zap.String("svType", svType))
@@ -134,6 +137,7 @@ func (r *Router) defaultRoute(
 //
 // -目标服是stateless : 随机
 // -目标服是stateful:
+//
 //	-payload with session: 路由到session绑定的backend
 //	-payload without session: 随机
 func (r *Router) Route(

@@ -772,7 +772,16 @@ func (r *RemoteService) remoteCall(
 
 	res, err := r.rpcClient.Call(ctx, rpcType, route, session, msg, target)
 	if err != nil {
-		logger.Zap.Error("error making call to target", zap.String("id", target.ID), zap.Stringer("route", route), zap.String("host", target.Hostname), zap.Error(err))
+		logw := logger.Zap
+		if session != nil {
+			logw = logw.With(zap.String("uid", session.UID()))
+		}
+		code := apierrors.Code(err)
+		if code >= http.StatusInternalServerError {
+			logw.Error("error making call to target", zap.Stringer("route", route), zap.String("host", target.Hostname), zap.String("svID", target.ID), zap.Error(err))
+		} else {
+			logw.Warn("error making call to target", zap.Stringer("route", route), zap.String("host", target.Hostname), zap.String("svID", target.ID), zap.Error(err))
+		}
 		return nil, err
 	}
 	return res, err

@@ -24,6 +24,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -192,7 +193,7 @@ func (h *HandlerService) Handle(conn acceptor.PlayerConn) {
 		msg, err := conn.GetNextMessage()
 
 		if err != nil {
-			if err != constants.ErrConnectionClosed {
+			if !errors.Is(err, constants.ErrConnectionClosed) {
 				logger.Zap.Warn("Error reading next available message", zap.Error(err))
 			}
 

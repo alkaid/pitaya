@@ -183,6 +183,9 @@ func (sys *Sys) Init() {
 		rollback := func(err error) {
 			// 回滚 清理本地缓存 清理redis
 			err2 := s.(session.PitayaPrivateSession).RemoveBackendID(serverType)
+			if err2 != nil {
+				logErr(err2)
+			}
 			sys.sessionPool.RemoveSessionLocal(s)
 			err2 = s.Flush2Cluster()
 			if err2 != nil {
@@ -282,7 +285,7 @@ func (sys *Sys) Init() {
 		if err != nil {
 			// 报错session找不到,说明网关的session已经下线,不管是session找不到还是网关狗带等其他错误都应该忽略该错误并代替网关执行redis清除步骤
 			// if  errors.Is(err, protos.ErrSessionNotFound()) {
-			logW.Warn("the session may be closed or frontend is down. ignore the error then clean cluster's cache")
+			logW.Warn("the session may be closed or frontend is down. ignore the error then clean cluster's cache", zap.Error(err))
 			err = s.Flush2Cluster()
 			if err != nil {
 				return err
@@ -387,9 +390,16 @@ func (s *Sys) BindBackendSession(ctx context.Context, msg *protos.BindBackendMsg
 	sess := s.sessionPool.GetSessionByUID(msg.Uid)
 	if sess == nil {
 		sess = s.getSessionFromCtx(ctx)
-		if sess == nil || sess.UID() != msg.Uid {
-			logger.Zap.Error(constants.ErrSessionNotFound.Error())
-			return nil, constants.ErrSessionNotFound
+		var err error
+		if sess == nil {
+			err = fmt.Errorf("%w,session is nil", constants.ErrSessionNotFound)
+		} else if sess.UID() != msg.Uid {
+			err = fmt.Errorf("%w,session uid not equl target uid,sessUid=%s,msgUid=%s", constants.ErrSessionNotFound, sess.UID(), msg.Uid)
+		}
+		if err != nil {
+			logger.Zap.Error("", zap.Error(err))
+			return nil, err
+
 		}
 	}
 	if err := sess.BindBackend(ctx, msg.Btype, msg.Bid, msg.Metadata); err != nil {
@@ -466,9 +476,15 @@ func (s *Sys) SessionBound(ctx context.Context, msg *protos.BindMsg) (*protos.Re
 }
 func (s *Sys) SessionClosed(ctx context.Context, msg *protos.KickMsg) (*protos.Response, error) {
 	for _, r := range s.remote.GetRemoteSessionListener() {
-		co.GoByUID(msg.UserId, func() {
-			r.OnUserDisconnected(ctx, msg.UserId, msg.Metadata)
-		})
+		if msg.UserId != "" {
+			co.GoByUID(msg.UserId, func() {
+				r.OnUserDisconnected(ctx, msg.UserId, msg.Metadata)
+			})
+		} else {
+			co.Go(func() {
+				r.OnUserDisconnected(ctx, msg.UserId, msg.Metadata)
+			})
+		}
 	}
 	return &protos.Response{Data: []byte("ack")}, nil
 }

@@ -91,9 +91,7 @@ var (
 
 	ErrDeveloperLogicFatal     = errors.New("developer logic fatal!!") // 不应该发生的致命错误,一定是开发者逻辑有误
 	ErrRPCTimeout              = errors.New("RPC timeout")
-	ErrSessionCantBindBackend  = errors.New("can't bind backend")
 	ErrIllegalBindBackendID    = errors.New("illegal backend id when bind in remote")
-	ErrSessionCantKickBackend  = errors.New("can't kick backend")
 	ErrSessionNotBoundBackend  = errors.New("session have not bound to backend")
 	ErrNotifyAllSvTypeNotEmpty = errors.New("NotifyAll must be to an empty server type")
 	ErrLooperAsyncInCoroutine  = errors.New("don't call Async() inside coroutine")
