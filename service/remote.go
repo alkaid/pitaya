@@ -125,7 +125,6 @@ func (r *RemoteService) remoteProcess(
 	switch msg.Type {
 	case message.Request:
 		if err != nil {
-			logW.Error("Failed to process remote server", zap.Error(err))
 			a.AnswerWithError(ctx, msg.ID, err)
 			return
 		}
@@ -137,7 +136,6 @@ func (r *RemoteService) remoteProcess(
 	case message.Notify:
 		defer tracing.FinishSpan(ctx, err)
 		if err != nil {
-			logW.Error("Failed to process remote server", zap.Error(err))
 			a.AnswerWithError(ctx, msg.ID, err)
 			return
 		}
@@ -279,10 +277,7 @@ func (r *RemoteService) DoNotify(ctx context.Context, serverID string, route *ro
 		}
 
 		if serverID == "" {
-			_, err := r.remoteCall(ctx, nil, protos.RPCType_User, route, session, msg)
-			if err != nil {
-				logger.Zap.Error("notify error", zap.String("route", route.String()), zap.Error(err))
-			}
+			r.remoteCall(ctx, nil, protos.RPCType_User, route, session, msg)
 			return
 		}
 
@@ -295,7 +290,6 @@ func (r *RemoteService) DoNotify(ctx context.Context, serverID string, route *ro
 
 		_, err := r.remoteCall(ctx, target, protos.RPCType_User, route, session, msg)
 		if err != nil {
-			logger.Zap.Error("notify error", zap.String("route", route.String()), zap.Error(err))
 			return
 		}
 	})
