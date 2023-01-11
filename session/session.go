@@ -87,6 +87,7 @@ type sessionPoolImpl struct {
 	sessionIDSvc          *sessionIDService
 	// SessionCount keeps the current number of sessions
 	SessionCount         int64
+	UserCount            int64
 	storage              CacheInterface
 	bindBackendCallbacks []OnSessionBindBackendFunc
 	kickBackendCallbacks []OnSessionKickBackendFunc
@@ -98,6 +99,7 @@ type SessionPool interface {
 	// a networkentity.NetworkEntity is a low-level network instance
 	NewSession(entity networkentity.NetworkEntity, frontend bool, UID ...string) Session
 	GetSessionCount() int64
+	GetUserCount() int64
 	GetSessionCloseCallbacks() []OnSessionCloseFunc
 	GetSessionByUID(uid string) Session
 	GetSessionByID(id int64) Session
@@ -357,6 +359,9 @@ func NewSessionPool() SessionPool {
 func (pool *sessionPoolImpl) GetSessionCount() int64 {
 	return pool.SessionCount
 }
+func (pool *sessionPoolImpl) GetUserCount() int64 {
+	return pool.UserCount
+}
 
 func (pool *sessionPoolImpl) GetSessionCloseCallbacks() []OnSessionCloseFunc {
 	return pool.SessionCloseCallbacks
@@ -479,6 +484,7 @@ func (pool *sessionPoolImpl) StoreSessionLocal(session Session) error {
 		return errors.WithStack(constants.ErrEmptyUID)
 	}
 	pool.sessionsByUID.Store(session.UID(), session)
+	atomic.AddInt64(&pool.UserCount, 1)
 	if _, ok := pool.sessionsByID.Load(session.ID()); ok {
 		return nil
 	}
@@ -495,6 +501,7 @@ func (pool *sessionPoolImpl) StoreSessionLocal(session Session) error {
 func (pool *sessionPoolImpl) RemoveSessionLocal(session Session) {
 	if len(session.UID()) > 0 {
 		pool.sessionsByUID.Delete(session.UID())
+		atomic.AddInt64(&pool.UserCount, -1)
 	}
 	if _, ok := pool.sessionsByID.Load(session.ID()); ok {
 		return
@@ -711,6 +718,7 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, callback map[string]
 	// if code running on frontend server
 	if s.IsFrontend {
 		s.pool.sessionsByUID.Store(uid, s)
+		atomic.AddInt64(&s.pool.UserCount, 1)
 	} else {
 		// If frontentID is set this means it is a remote call and the current server
 		// is not the frontend server that received the user request
@@ -834,6 +842,7 @@ func (s *sessionImpl) Close(callback map[string]string, reason ...CloseReason) {
 	oldSession := s.pool.GetSessionByUID(s.UID())
 	if oldSession != nil && oldSession.ID() == s.ID() {
 		s.pool.sessionsByUID.Delete(s.UID())
+		atomic.AddInt64(&s.pool.UserCount, -1)
 	} else {
 		var oldID int64
 		if oldSession != nil {

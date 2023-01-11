@@ -153,6 +153,16 @@ type Pitaya interface {
 	//
 	// @param f
 	RangeSessions(f func(sid int64, sess session.Session) bool)
+	// SessionCount
+	//  仅 frontend 和 sessionStickness backend 有效
+	//
+	// @return int64
+	SessionCount() int64
+	// UserCount Bound user's count
+	//  仅 frontend 和 sessionStickness backend 有效
+	//
+	// @return int64
+	UserCount() int64
 	// Notify 通知其他服务,无阻塞,无返回值。如果session绑定了backend,则会路由到持有session引用的backend
 	//  @param ctx
 	//  @param routeStr
@@ -510,6 +520,12 @@ func (app *App) RangeUsers(f func(uid string, sess session.Session) bool) {
 }
 func (app *App) RangeSessions(f func(sid int64, sess session.Session) bool) {
 	app.sessionPool.RangeSessions(f)
+}
+func (app *App) SessionCount() int64 {
+	return app.sessionPool.GetSessionCount()
+}
+func (app *App) UserCount() int64 {
+	return app.sessionPool.GetUserCount()
 }
 
 // BindBackend bind session in stateful backend 注意业务层若当前服务是frontend时请勿调用。frontend时仅框架内自己调用
