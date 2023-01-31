@@ -24,6 +24,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/topfreegames/pitaya/v2/util"
+
 	errors2 "github.com/alkaid/goerrors/errors"
 	"go.uber.org/zap"
 
@@ -314,7 +316,9 @@ func (c *Config) watch() error {
 	co.Go(func() {
 		for {
 			<-c.onWatch
-			c.reloadAll()
+			util.SafeCall(nil, func() {
+				c.reloadAll()
+			})
 		}
 	})
 	return nil

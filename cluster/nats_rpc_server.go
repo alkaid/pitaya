@@ -193,6 +193,7 @@ func (ns *NatsRPCServer) subscribeToUserMessages(uid string, svType string) (*na
 		if err != nil {
 			logger.Zap.Error("error unmarshalling push", zap.Error(err))
 		}
+		logger.Zap.Debug("receive user's push", zap.String("uid", uid), zap.Int("remain", len(ns.userPushCh)))
 		ns.userPushCh <- push
 	})
 	if err != nil {

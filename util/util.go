@@ -63,6 +63,26 @@ func getLoggerFromArgs(args []reflect.Value) *zap.Logger {
 	return logger.Zap
 }
 
+// SafeCall 安全调用方法,会 recover() 并打印 runtime error
+//
+// @param onRecovered panic恢复后的回调
+// @param method 要调用的方法
+func SafeCall(onRecovered func(rec any), method func()) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			// Try to use logger from context here to help trace error cause
+			stackTrace := debug.Stack()
+			stackTraceAsRawStringLiteral := strconv.Quote(string(stackTrace))
+			logger.Zap.Error("panic - pitaya method", zap.Any("panicData", rec), zap.String("stack", stackTraceAsRawStringLiteral))
+			if onRecovered == nil {
+				return
+			}
+			onRecovered(rec)
+		}
+	}()
+	method()
+}
+
 // Pcall calls a method that returns an interface and an error and recovers in case of panic
 func Pcall(method reflect.Method, args []reflect.Value) (rets interface{}, err error) {
 	defer func() {

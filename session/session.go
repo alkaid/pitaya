@@ -858,7 +858,7 @@ func (s *sessionImpl) Close(callback map[string]string, reason ...CloseReason) {
 			if err != nil {
 				logger.Zap.Error("error unsubscribing to user's messages channel: , this can cause performance and leak issues", zap.Error(err))
 			} else {
-				logger.Log.Debugf("successfully unsubscribed to user's %s messages channel", s.UID())
+				logger.Zap.Debug("successfully unsubscribed to user's messages channel", zap.String("uid", s.UID()), zap.String("subject", sub.Subject))
 			}
 		}
 	}
