@@ -195,7 +195,11 @@ func (ns *NatsRPCClient) Call(
 	if err != nil {
 		// 针对超时封装一层error便于上层判断
 		if err == nats.ErrTimeout {
-			logger.Zap.Error("rpc timeout", zap.Error(err))
+			logg := logger.Zap
+			if session != nil {
+				logg = logg.With(zap.String("uid", session.UID()))
+			}
+			logg.Error("rpc timeout", zap.String("route", route.String()), zap.String("svID", server.ID), zap.Error(err))
 			err = constants.ErrRPCTimeout
 		}
 		return nil, errors.WithStack(err)

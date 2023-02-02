@@ -399,6 +399,8 @@ func (sd *etcdServiceDiscovery) GetAnyFrontend() (*Server, error) {
 //
 //	@implement ServiceDiscovery.GetServerTypes
 func (sd *etcdServiceDiscovery) GetServerTypes() map[string]*Server {
+	sd.mapByTypeLock.RLock()
+	defer sd.mapByTypeLock.RUnlock()
 	ret := make(map[string]*Server, len(sd.serverMapByType))
 	for t, m := range sd.serverMapByType {
 		for _, server := range m {

@@ -126,11 +126,27 @@ func (h *HandlerService) Dispatch(thread int) {
 		select {
 		case lm := <-h.chLocalProcess:
 			metrics.ReportMessageProcessDelayFromCtx(lm.ctx, h.metricsReporters, "local")
-			h.localProcess(lm.ctx, lm.agent, lm.route, lm.msg)
+			// 派发给session独立线程避免互相影响
+			if lm.agent != nil && lm.agent.GetSession() != nil {
+				lmCp := lm
+				lm.agent.GetSession().GoBySession(func() {
+					h.localProcess(lmCp.ctx, lmCp.agent, lmCp.route, lmCp.msg)
+				})
+			} else {
+				h.localProcess(lm.ctx, lm.agent, lm.route, lm.msg)
+			}
 
 		case rm := <-h.chRemoteProcess:
 			metrics.ReportMessageProcessDelayFromCtx(rm.ctx, h.metricsReporters, "remote")
-			h.remoteService.remoteProcess(rm.ctx, nil, rm.agent, rm.route, rm.msg)
+			// 派发给session独立线程避免互相影响
+			if rm.agent != nil && rm.agent.GetSession() != nil {
+				rmCp := rm
+				rm.agent.GetSession().GoBySession(func() {
+					h.remoteService.remoteProcess(rmCp.ctx, nil, rmCp.agent, rmCp.route, rmCp.msg)
+				})
+			} else {
+				h.remoteService.remoteProcess(rm.ctx, nil, rm.agent, rm.route, rm.msg)
+			}
 
 		case <-timer.GlobalTicker.C: // execute cron task
 			timer.Cron()
@@ -346,31 +362,26 @@ func (h *HandlerService) localProcess(ctx context.Context, a agent.Agent, route 
 	case message.Notify:
 		mid = 0
 	}
-	// 根据session数据决策派发线程id
-	sess := a.GetSession()
-	// 派发给session绑定的线程
-	sess.GoBySession(func() {
-		ret, err := h.handlerPool.ProcessHandlerMessage(ctx, route, h.serializer, h.handlerHooks, a.GetSession(), msg.Data, msg.Type, false)
-		if msg.Type != message.Notify {
-			if err != nil {
-				logger.Zap.Error("Failed to process handler message", zap.Error(err))
-				a.AnswerWithError(ctx, mid, err)
-			} else {
-				err := a.GetSession().ResponseMID(ctx, mid, ret)
-				if err != nil {
-					tracing.FinishSpan(ctx, err)
-					metrics.ReportTimingFromCtx(ctx, h.metricsReporters, handlerType, err)
-				}
-			}
+	ret, err := h.handlerPool.ProcessHandlerMessage(ctx, route, h.serializer, h.handlerHooks, a.GetSession(), msg.Data, msg.Type, false)
+	if msg.Type != message.Notify {
+		if err != nil {
+			logger.Zap.Error("Failed to process handler message", zap.Error(err))
+			a.AnswerWithError(ctx, mid, err)
 		} else {
+			err := a.GetSession().ResponseMID(ctx, mid, ret)
 			if err != nil {
-				logger.Zap.Error("Failed to process handler message", zap.Error(err))
-				a.AnswerWithError(ctx, mid, err)
+				tracing.FinishSpan(ctx, err)
+				metrics.ReportTimingFromCtx(ctx, h.metricsReporters, handlerType, err)
 			}
-			metrics.ReportTimingFromCtx(ctx, h.metricsReporters, handlerType, nil)
-			tracing.FinishSpan(ctx, err)
 		}
-	})
+	} else {
+		if err != nil {
+			logger.Zap.Error("Failed to process handler message", zap.Error(err))
+			a.AnswerWithError(ctx, mid, err)
+		}
+		metrics.ReportTimingFromCtx(ctx, h.metricsReporters, handlerType, nil)
+		tracing.FinishSpan(ctx, err)
+	}
 }
 
 // DumpServices outputs all registered services
