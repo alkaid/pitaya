@@ -33,6 +33,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/topfreegames/pitaya/v2/util"
+
 	"github.com/alkaid/goerrors/apierrors"
 	"go.uber.org/zap"
 
@@ -331,7 +333,10 @@ func (c *Client) sendHeartbeats(interval int) {
 func (c *Client) Disconnect(reason CloseReason) {
 	if c.Connected {
 		c.Connected = false
-		close(c.closeChan)
+		// TODO 测试时发现有概率 panic: close of closed channel。 原因未知,有时间再看
+		util.SafeCall(nil, func() {
+			close(c.closeChan)
+		})
 		c.conn.Close()
 		if c.onDisconnected != nil {
 			c.onDisconnected(reason)
