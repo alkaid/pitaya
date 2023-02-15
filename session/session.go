@@ -52,6 +52,7 @@ const (
 	fieldKeyFrontendSessID = "s"         // frontend session id
 	fieldKeyBackends       = "bs"        // backends id list
 	fieldKeyUID            = "u"         // uid
+	fieldKeyIP             = "ip"        // uid
 )
 
 type CloseReason = int // 关闭原因
@@ -164,8 +165,10 @@ type sessionImpl struct {
 	IsFrontend        bool                        // if session is a frontend session
 	frontendID        string                      // the id of the frontend that owns the session
 	frontendSessionID int64                       // the id of the session on the frontend server
-	Subscriptions     []*nats.Subscription        // subscription created on bind when using nats rpc server
-	pool              *sessionPoolImpl
+	remoteIPText      string                      // 远程客户端ip地址
+
+	Subscriptions []*nats.Subscription // subscription created on bind when using nats rpc server
+	pool          *sessionPoolImpl
 }
 
 // Session represents a client session, which can store data during the connection.
@@ -245,6 +248,7 @@ type Session interface {
 	Close(callback map[string]string, reason ...CloseReason)
 	RemoteAddr() net.Addr
 	RemoteIP() netip.Addr
+	RemoteIPText() string
 	Remove(key string) error
 	Set(key string, value interface{}) error
 	HasKey(key string) bool
@@ -647,6 +651,7 @@ func (s *sessionImpl) SetData(data map[string]interface{}) error {
 		logger.Zap.Warn("", zap.Error(err))
 	}
 	s.frontendSessionID = int64(tmpId)
+	s.remoteIPText = s.stringUnsafe(fieldKeyIP)
 	return s.updateEncodedData()
 }
 
@@ -674,6 +679,17 @@ func (s *sessionImpl) SetDataEncoded(encodedData []byte) error {
 	return s.SetData(data)
 }
 
+func (s *sessionImpl) ipFromEntity() string {
+	if s.remoteIPText == "" {
+		ip, err := s.entity.RemoteIP().MarshalText()
+		if err != nil {
+			logger.Zap.Error("marshal ip error", zap.Error(err))
+		}
+		s.remoteIPText = string(ip)
+	}
+	return s.remoteIPText
+}
+
 // SetFrontendData sets frontend id and session id
 func (s *sessionImpl) SetFrontendData(frontendID string, frontendSessionID int64) {
 	s.Lock()
@@ -683,6 +699,7 @@ func (s *sessionImpl) SetFrontendData(frontendID string, frontendSessionID int64
 
 	s.data[fieldKeyFrontendID] = frontendID
 	s.data[fieldKeyFrontendSessID] = strconv.Itoa(int(s.frontendSessionID))
+	s.data[fieldKeyIP] = s.ipFromEntity()
 	err := s.updateEncodedData()
 	if err != nil {
 		logger.Zap.Error("set frontend data error", zap.Error(err))
@@ -872,7 +889,15 @@ func (s *sessionImpl) RemoteAddr() net.Addr {
 }
 
 func (s *sessionImpl) RemoteIP() netip.Addr {
-	return s.entity.RemoteIP()
+	ip := netip.Addr{}
+	err := ip.UnmarshalText([]byte(s.remoteIPText))
+	if err != nil {
+		logger.Zap.Error("unmarsha ip error", zap.Error(err))
+	}
+	return ip
+}
+func (s *sessionImpl) RemoteIPText() string {
+	return s.remoteIPText
 }
 
 // Remove delete data associated with the key from session storage

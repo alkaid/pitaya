@@ -358,9 +358,12 @@ func (a *agentImpl) Close(callback map[string]string, reason ...session.CloseRea
 		return constants.ErrCloseClosedSession
 	}
 	a.SetStatus(constants.StatusClosed)
-
+	closeReason := session.CloseReasonNormal
+	if len(reason) > 0 {
+		closeReason = reason[0]
+	}
 	logger.Zap.Debug("Session closed",
-		zap.Int64("ID", a.Session.ID()), zap.String("UID", a.Session.UID()), zap.Stringer("IP", a.conn.RemoteAddr()))
+		zap.Int64("ID", a.Session.ID()), zap.String("UID", a.Session.UID()), zap.Int("reason", closeReason), zap.Stringer("IP", a.conn.RemoteAddr()))
 
 	// prevent closing closed channel
 	select {
@@ -374,10 +377,6 @@ func (a *agentImpl) Close(callback map[string]string, reason ...session.CloseRea
 	}
 
 	metrics.ReportNumberOfConnectedClients(a.metricsReporters, a.sessionPool.GetSessionCount())
-	closeReason := session.CloseReasonNormal
-	if len(reason) > 0 {
-		closeReason = reason[0]
-	}
 	// 若是websocket 且是被踢的 返回自定义reason
 	if wsConn, ok := a.conn.(*acceptor.WSConn); ok && closeReason > session.CloseReasonKickMin {
 		err := wsConn.InnerConn().WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, strconv.Itoa(closeReason)), time.Time{})
