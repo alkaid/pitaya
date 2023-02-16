@@ -83,6 +83,7 @@ type Client struct {
 	messageEncoder      message.Encoder
 	clientHandshakeData *session.HandshakeData
 	onDisconnected      func(reason CloseReason)
+	writeMutex          sync.Mutex
 }
 
 // MsgChannel return the incoming message channel
@@ -318,7 +319,7 @@ func (c *Client) sendHeartbeats(interval int) {
 		select {
 		case <-t.C:
 			p, _ := c.packetEncoder.Encode(packet.Heartbeat, []byte{})
-			_, err := c.conn.Write(p)
+			_, err := c.SafeWrite(p)
 			if err != nil {
 				Log.Error("error sending heartbeat to server", zap.Error(err))
 				return
@@ -463,6 +464,12 @@ func (c *Client) sendMsg(msgType message.Type, route string, data []byte) (uint,
 	if err != nil {
 		return m.ID, err
 	}
-	_, err = c.conn.Write(p)
+	_, err = c.SafeWrite(p)
 	return m.ID, err
+}
+
+func (c *Client) SafeWrite(b []byte) (n int, err error) {
+	c.writeMutex.Lock()
+	defer c.writeMutex.Unlock()
+	return c.conn.Write(b)
 }
