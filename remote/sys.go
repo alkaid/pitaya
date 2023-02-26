@@ -75,7 +75,7 @@ func (sys *Sys) Init() {
 		olddata := s.GetDataEncoded()
 		for i := 0; i < 1; i++ {
 			// 从redis同步backend bind数据到本地
-			err = s.ObtainFromCluster()
+			err = s.InitialFromCluster()
 			if err != nil {
 				break
 			}
@@ -182,7 +182,7 @@ func (sys *Sys) Init() {
 		}
 		rollback := func(err error) {
 			// 回滚 清理本地缓存 清理redis
-			err2 := s.(session.PitayaPrivateSession).RemoveBackendID(serverType)
+			err2 := s.RemoveBackendID(serverType)
 			if err2 != nil {
 				logErr(err2)
 			}

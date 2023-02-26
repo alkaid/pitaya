@@ -30,8 +30,10 @@ require (
 	go.opentelemetry.io/otel/sdk v1.8.0
 	go.opentelemetry.io/otel/trace v1.8.0
 	go.uber.org/zap v1.23.0
+	golang.org/x/net v0.0.0-20220909164309-bea034e7d591
 	google.golang.org/grpc v1.49.0
 	google.golang.org/protobuf v1.28.0
+	k8s.io/klog/v2 v2.40.1
 )
 
 require (
@@ -119,7 +121,6 @@ require (
 	go.uber.org/automaxprocs v1.5.1 // indirect
 	go.uber.org/multierr v1.8.0 // indirect
 	golang.org/x/crypto v0.0.0-20220622213112-05595931fe9d // indirect
-	golang.org/x/net v0.0.0-20220909164309-bea034e7d591 // indirect
 	golang.org/x/oauth2 v0.0.0-20220822191816-0ebed06d0094 // indirect
 	golang.org/x/sys v0.0.0-20220728004956-3c1f35247d10 // indirect
 	golang.org/x/text v0.3.7 // indirect

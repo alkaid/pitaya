@@ -120,14 +120,14 @@ type Pitaya interface {
 	// PushAfterRemoteHook 添加remote执行后的hook
 	//  @param afterFunc
 	PushAfterRemoteHook(afterFunc pipeline.AfterHandlerTempl)
-	GetSessionFromCtx(ctx context.Context) session.Session
+	GetSessionFromCtx(ctx context.Context) session.SessPublic
 	// GetSessionByUID 根据uid获取session,尝试顺序 sessionPool>context>cache cluster
 	//
 	// @param ctx
 	// @param uid
-	// @return session.Session
+	// @return session.SessPublic
 	// @return error
-	GetSessionByUID(ctx context.Context, uid string) (session.Session, error)
+	GetSessionByUID(ctx context.Context, uid string) (session.SessPublic, error)
 	// OnStarted 设置 Start 后的回调,内部会启一个goroutine执行
 	//  @param fun
 	OnStarted(fun func())
@@ -148,11 +148,11 @@ type Pitaya interface {
 	// RangeUsers 遍历所有已绑定用户
 	//
 	// @param f
-	RangeUsers(f func(uid string, sess session.Session) bool)
+	RangeUsers(f func(uid string, sess session.SessPublic) bool)
 	// RangeSessions 遍历所有session,包括未绑定
 	//
 	// @param f
-	RangeSessions(f func(sid int64, sess session.Session) bool)
+	RangeSessions(f func(sid int64, sess session.SessPublic) bool)
 	// SessionCount
 	//  仅 frontend 和 sessionStickness backend 有效
 	//
@@ -311,8 +311,8 @@ type Pitaya interface {
 	//
 	// @param ctx
 	// @param uid
-	// @return session.Session
-	GetLocalSessionByUid(ctx context.Context, uid string) session.Session
+	// @return session.SessPublic
+	GetLocalSessionByUid(ctx context.Context, uid string) session.SessPublic
 	// OnLocalSessionCloseBefore 设置本地session关闭前的回调
 	//
 	// @receiver app
@@ -515,10 +515,10 @@ func (app *App) AddSessionListener(listener cluster.RemoteSessionListener) {
 	app.remoteService.AddRemoteSessionListener(listener)
 }
 
-func (app *App) RangeUsers(f func(uid string, sess session.Session) bool) {
+func (app *App) RangeUsers(f func(uid string, sess session.SessPublic) bool) {
 	app.sessionPool.RangeUsers(f)
 }
-func (app *App) RangeSessions(f func(sid int64, sess session.Session) bool) {
+func (app *App) RangeSessions(f func(sid int64, sess session.SessPublic) bool) {
 	app.sessionPool.RangeSessions(f)
 }
 func (app *App) SessionCount() int64 {
@@ -580,8 +580,8 @@ func (app *App) GetBoundData(ctx context.Context, uid string) (*session.BoundDat
 // @receiver app
 // @param ctx
 // @param uid
-// @return session.Session
-func (app *App) GetLocalSessionByUid(ctx context.Context, uid string) session.Session {
+// @return session.SessPublic
+func (app *App) GetLocalSessionByUid(ctx context.Context, uid string) session.SessPublic {
 	return app.sessionPool.GetSessionByUID(uid)
 }
 
@@ -773,16 +773,16 @@ func (app *App) Shutdown() {
 // }
 
 // GetSessionFromCtx retrieves a session from a given context
-func (app *App) GetSessionFromCtx(ctx context.Context) session.Session {
+func (app *App) GetSessionFromCtx(ctx context.Context) session.SessPublic {
 	sessionVal := ctx.Value(constants.SessionCtxKey)
 	if sessionVal == nil {
 		logger.Zap.Debug("ctx doesn't contain a session, are you calling GetSessionFromCtx from inside a remote?")
 		return nil
 	}
-	return sessionVal.(session.Session)
+	return sessionVal.(session.SessPublic)
 }
 
-func (app *App) GetSessionByUID(ctx context.Context, uid string) (session.Session, error) {
+func (app *App) GetSessionByUID(ctx context.Context, uid string) (session.SessPublic, error) {
 	return app.imperfectSessionForRPC(ctx, uid)
 }
 

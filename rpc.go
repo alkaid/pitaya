@@ -22,8 +22,9 @@ package pitaya
 
 import (
 	"context"
-	"github.com/alkaid/goerrors/apierrors"
 	"reflect"
+
+	"github.com/alkaid/goerrors/apierrors"
 
 	"github.com/topfreegames/pitaya/v2/logger"
 	"go.uber.org/zap"
@@ -238,7 +239,7 @@ func (app *App) imperfectSessionForRPC(ctx context.Context, uid string) (session
 		logger.Zap.Debug("use session from sessionPool for rpc or getBoundData", zap.String("uid", uid))
 		return sess, nil
 	}
-	sess = app.GetSessionFromCtx(ctx)
+	sess = app.GetSessionFromCtx(ctx).(session.Session)
 	if sess != nil && sess.UID() == uid {
 		logger.Zap.Debug("use session from context for rpc or getBoundData", zap.String("uid", uid))
 		return sess, nil

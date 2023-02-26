@@ -131,8 +131,8 @@ type SessionPool interface {
 	//  @return Session
 	//  @return error
 	ImperfectSessionFromCluster(uid string, entity networkentity.NetworkEntity) (Session, error)
-	RangeUsers(f func(uid string, sess Session) bool)
-	RangeSessions(f func(sid int64, sess Session) bool)
+	RangeUsers(f func(uid string, sess SessPublic) bool)
+	RangeSessions(f func(sid int64, sess SessPublic) bool)
 }
 
 // HandshakeClientData represents information about the client sent on the handshake.
@@ -171,48 +171,14 @@ type sessionImpl struct {
 	pool          *sessionPoolImpl
 }
 
-// Session represents a client session, which can store data during the connection.
-// All data is released when the low-level connection is broken.
-// Session instance related to the client will be passed to Handler method in the
-// context parameter.
-type Session interface {
-	// Deprecated: 用不到,除非定制frontend
-	//  只有在frontend调用才有用
-	GetOnCloseCallbacks() []func()
+// SessPublic 供业务层使用的 Session
+type SessPublic interface {
 	GetIsFrontend() bool
 	GetFrontendID() string
 	GetFrontendSessionID() int64
-	GetSubscriptions() []*nats.Subscription
-	// Deprecated: 用不到,除非定制frontend
-	//  只有在frontend调用才有用
-	//  @param callbacks
-	SetOnCloseCallbacks(callbacks []func())
-	SetIsFrontend(isFrontend bool)
-	SetSubscriptions(subscriptions []*nats.Subscription)
-
 	Push(route string, v interface{}) error
-	ResponseMID(ctx context.Context, mid uint, v interface{}, err ...bool) error
 	ID() int64
 	UID() string
-	// Deprecated: 内部方法请勿调用.上层请自行封装玩家数据,勿使用 Session 内部data.内部data的功能已改用于cluster session(redis)
-	// GetData() map[string]interface{}
-	// Deprecated: 内部方法请勿调用.上层请自行封装玩家数据,勿使用 Session 内部data.内部data的功能已改用于cluster session(redis)
-	// SetData(data map[string]interface{}) error
-
-	// GetDataEncoded 框架内部使用,请勿调用
-	//  @private pitaya
-	//  @return []byte
-	GetDataEncoded() []byte
-	// SetDataEncoded  框架内部使用,请勿调用
-	//  @private pitaya
-	//  @param encodedData
-	//  @return error
-	SetDataEncoded(encodedData []byte) error
-	// SetFrontendData  框架内部使用,请勿调用
-	//  @private pitaya
-	//  @param frontendID
-	//  @param frontendSessionID
-	SetFrontendData(frontendID string, frontendSessionID int64)
 	// Bind 绑定session到他当前所在的frontend
 	//  @param ctx
 	//  @param uid
@@ -241,12 +207,12 @@ type Session interface {
 	//  @return error
 	KickBackend(ctx context.Context, targetServerType string, callback map[string]string, reason ...CloseReason) error
 	OnClose(c func()) error
-	// Close  框架内部使用,请勿调用.Use Kick instead
-	//  @private pitaya
-	//  @param callback 回调数据,通知其他服务时透传
-	//  @param reason
-	Close(callback map[string]string, reason ...CloseReason)
 	RemoteAddr() net.Addr
+	// RemoteIPWithoutCache 实时获取客户端ip,而非缓存.非特殊业务场景请使用 RemoteIPText 或 RemoteIP
+	//  @Description:
+	//  @return netip.Addr
+	//
+	RemoteIPWithoutCache() netip.Addr
 	RemoteIP() netip.Addr
 	RemoteIPText() string
 	Remove(key string) error
@@ -268,12 +234,8 @@ type Session interface {
 	String(key string) string
 	Value(key string) interface{}
 	// PushToFront
-	//  Deprecated:由于 SetData 只允许框架内部调用,所以此同步方法也弃用.上层请自行封装玩家数据,勿使用 Session 内部data
 	//  推送session数据给网关,网关会同步本地session数据并刷新云端缓存
 	PushToFront(ctx context.Context) error
-	Clear()
-	SetHandshakeData(data *HandshakeData)
-	GetHandshakeData() *HandshakeData
 	// GetBoundData 获取绑定数据
 	//  @return BoundData
 	GetBoundData() *BoundData
@@ -282,6 +244,59 @@ type Session interface {
 	//  @param svrType
 	//  @return string
 	GetBackendID(svrType string) string
+	// GoBySession 根据session派发线程
+	//  @see co.GoByUID or co.GoByID
+	//  @param task
+	GoBySession(task func())
+}
+
+// Session represents a client session, which can store data during the connection.
+// All data is released when the low-level connection is broken.
+// Session instance related to the client will be passed to Handler method in the
+// context parameter.
+//
+//	仅限于框架内部使用
+type Session interface {
+	SessPublic
+	// Deprecated: 用不到,除非定制frontend
+	//  只有在frontend调用才有用
+	GetOnCloseCallbacks() []func()
+	GetSubscriptions() []*nats.Subscription
+	// Deprecated: 用不到,除非定制frontend
+	//  只有在frontend调用才有用
+	//  @param callbacks
+	SetOnCloseCallbacks(callbacks []func())
+	SetIsFrontend(isFrontend bool)
+	SetSubscriptions(subscriptions []*nats.Subscription)
+
+	ResponseMID(ctx context.Context, mid uint, v interface{}, err ...bool) error
+	// Deprecated: 内部方法请勿调用.上层请自行封装玩家数据,勿使用 Session 内部data.内部data的功能已改用于cluster session(redis)
+	// GetData() map[string]interface{}
+	// Deprecated: 内部方法请勿调用.上层请自行封装玩家数据,勿使用 Session 内部data.内部data的功能已改用于cluster session(redis)
+	// SetData(data map[string]interface{}) error
+
+	// GetDataEncoded 框架内部使用,请勿调用
+	//  @private pitaya
+	//  @return []byte
+	GetDataEncoded() []byte
+	// SetDataEncoded  框架内部使用,请勿调用
+	//  @private pitaya
+	//  @param encodedData
+	//  @return error
+	SetDataEncoded(encodedData []byte) error
+	// SetFrontendData  框架内部使用,请勿调用
+	//  @private pitaya
+	//  @param frontendID
+	//  @param frontendSessionID
+	SetFrontendData(frontendID string, frontendSessionID int64)
+	// Close  框架内部使用,请勿调用.Use Kick instead
+	//  @private pitaya
+	//  @param callback 回调数据,通知其他服务时透传
+	//  @param reason
+	Close(callback map[string]string, reason ...CloseReason)
+	Clear()
+	SetHandshakeData(data *HandshakeData)
+	GetHandshakeData() *HandshakeData
 	// Flush2Cluster
 	//  @Description: 打包session数据到存储服务
 	//  @receiver s
@@ -292,10 +307,13 @@ type Session interface {
 	//  @receiver s
 	//  @return error
 	ObtainFromCluster() error
-	// GoBySession 根据session派发线程
-	//  @see co.GoByUID or co.GoByID
-	//  @param task
-	GoBySession(task func())
+	// InitialFromCluster
+	//  @Description:从存储服务获取并解包session数据,排除不允许初始化的数据,仅用于bind时调用
+	//  @receiver s
+	//  @return error
+	InitialFromCluster() error
+	SetBackendID(svrType string, id string) error
+	RemoveBackendID(svrType string) error
 }
 
 type sessionIDService struct {
@@ -535,14 +553,14 @@ func (pool *sessionPoolImpl) ImperfectSessionFromCluster(uid string, entity netw
 	return s, nil
 }
 
-func (pool *sessionPoolImpl) RangeUsers(f func(uid string, sess Session) bool) {
+func (pool *sessionPoolImpl) RangeUsers(f func(uid string, sess SessPublic) bool) {
 	pool.sessionsByUID.Range(func(k, v any) bool {
-		return f(k.(string), v.(Session))
+		return f(k.(string), v.(SessPublic))
 	})
 }
-func (pool *sessionPoolImpl) RangeSessions(f func(id int64, sess Session) bool) {
+func (pool *sessionPoolImpl) RangeSessions(f func(id int64, sess SessPublic) bool) {
 	pool.sessionsByID.Range(func(k, v any) bool {
-		return f(k.(int64), v.(Session))
+		return f(k.(int64), v.(SessPublic))
 	})
 }
 
@@ -886,6 +904,9 @@ func (s *sessionImpl) Close(callback map[string]string, reason ...CloseReason) {
 // RemoteAddr returns the remote network address.
 func (s *sessionImpl) RemoteAddr() net.Addr {
 	return s.entity.RemoteAddr()
+}
+func (s *sessionImpl) RemoteIPWithoutCache() netip.Addr {
+	return s.entity.RemoteIP()
 }
 
 func (s *sessionImpl) RemoteIP() netip.Addr {
@@ -1362,6 +1383,28 @@ func (s *sessionImpl) ObtainFromCluster() error {
 	}
 	return nil
 }
+func (s *sessionImpl) InitialFromCluster() error {
+	v, err := s.pool.storage.Get(s.getSessionStorageKey())
+	if err != nil {
+		return err
+	}
+	encodedData := []byte(v)
+	if len(encodedData) == 0 {
+		return nil
+	}
+	data, err := s.pool.DecodeSessionData(encodedData)
+	if err != nil {
+		return err
+	}
+	s.Lock()
+	s.data = data
+	s.remoteIPText = ""
+	delete(s.data, fieldKeyIP)
+	delete(s.data, fieldKeyFrontendID)
+	delete(s.data, fieldKeyFrontendSessID)
+	s.Unlock()
+	return s.updateEncodedData()
+}
 
 // GoBySession 根据session数据决策派发任务线程
 //
@@ -1376,11 +1419,4 @@ func (s *sessionImpl) GoBySession(task func()) {
 		goID = int(s.ID())
 	}
 	co.GoByID(goID, task)
-}
-
-// PitayaPrivateSession 框架内部使用的session接口
-type PitayaPrivateSession interface {
-	Session
-	SetBackendID(svrType string, id string) error
-	RemoveBackendID(svrType string) error
 }
