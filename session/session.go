@@ -1397,12 +1397,11 @@ func (s *sessionImpl) InitialFromCluster() error {
 		return err
 	}
 	s.Lock()
+	defer s.Unlock()
+	data[fieldKeyFrontendID] = s.data[fieldKeyFrontendID]
+	data[fieldKeyFrontendSessID] = s.data[fieldKeyFrontendSessID]
+	data[fieldKeyIP] = s.data[fieldKeyIP]
 	s.data = data
-	s.remoteIPText = ""
-	delete(s.data, fieldKeyIP)
-	delete(s.data, fieldKeyFrontendID)
-	delete(s.data, fieldKeyFrontendSessID)
-	s.Unlock()
 	return s.updateEncodedData()
 }
 

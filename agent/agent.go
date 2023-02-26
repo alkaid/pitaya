@@ -141,6 +141,7 @@ type (
 		messagesBufferSize int // size of the pending messages buffer
 		metricsReporters   []metrics.Reporter
 		serializer         serialize.Serializer // message serializer
+		serverID           string
 	}
 )
 
@@ -155,6 +156,7 @@ func NewAgentFactory(
 	messagesBufferSize int,
 	sessionPool session.SessionPool,
 	metricsReporters []metrics.Reporter,
+	serverID string,
 ) AgentFactory {
 	return &agentFactoryImpl{
 		appDieChan:         appDieChan,
@@ -166,12 +168,13 @@ func NewAgentFactory(
 		sessionPool:        sessionPool,
 		metricsReporters:   metricsReporters,
 		serializer:         serializer,
+		serverID:           serverID,
 	}
 }
 
 // CreateAgent returns a new agent
 func (f *agentFactoryImpl) CreateAgent(conn net.Conn) Agent {
-	return newAgent(conn, f.decoder, f.encoder, f.serializer, f.heartbeatTimeout, f.messagesBufferSize, f.appDieChan, f.messageEncoder, f.metricsReporters, f.sessionPool)
+	return newAgent(conn, f.decoder, f.encoder, f.serializer, f.heartbeatTimeout, f.messagesBufferSize, f.appDieChan, f.messageEncoder, f.metricsReporters, f.sessionPool, f.serverID)
 }
 
 // NewAgent create new agent instance
@@ -186,6 +189,7 @@ func newAgent(
 	messageEncoder message.Encoder,
 	metricsReporters []metrics.Reporter,
 	sessionPool session.SessionPool,
+	serverID string,
 ) Agent {
 	// initialize heartbeat and handshake data on first user connection
 	serializerName := serializer.GetName()
@@ -217,6 +221,7 @@ func newAgent(
 	s := sessionPool.NewSession(a, true)
 	metrics.ReportNumberOfConnectedClients(metricsReporters, sessionPool.GetSessionCount())
 	a.Session = s
+	s.SetFrontendData(serverID, s.ID())
 	return a
 }
 

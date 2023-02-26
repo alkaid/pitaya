@@ -289,6 +289,7 @@ func (builder *Builder) Build() Pitaya {
 		builder.Config.Pitaya.Buffer.Agent.Messages,
 		builder.SessionPool,
 		builder.MetricsReporters,
+		builder.Server.ID,
 	)
 
 	handlerService := service.NewHandlerService(

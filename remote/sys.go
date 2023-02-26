@@ -79,7 +79,6 @@ func (sys *Sys) Init() {
 			if err != nil {
 				break
 			}
-			s.SetFrontendData(sys.server.ID, s.ID())
 			// 同步到redis
 			err = s.Flush2Cluster()
 			if err != nil {
