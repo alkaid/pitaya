@@ -26,12 +26,13 @@ import (
 	"time"
 
 	"github.com/alkaid/goerrors/errors"
+	"github.com/topfreegames/pitaya/v2/util"
+	"go.uber.org/zap"
 
 	"github.com/alkaid/goerrors/apierrors"
 
-	"go.uber.org/zap"
-
 	nats "github.com/nats-io/nats.go"
+	"github.com/samber/lo"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
@@ -135,6 +136,99 @@ func (ns *NatsRPCClient) SendKick(userID string, serverType string, kick *protos
 	return ns.Send(topic, msg)
 }
 
+func (ns *NatsRPCClient) Publish(
+	ctx context.Context,
+	rpcType protos.RPCType,
+	route *route.Route,
+	session session.Session,
+	msg *message.Message,
+	timeouts ...time.Duration,
+) ([]*protos.Response, error) {
+	var err error
+	spanInfo := &tracing.SpanInfo{
+		RpcSystem: "nats",
+		IsClient:  true,
+		Route:     route,
+		LocalID:   ns.server.ID,
+		LocalType: ns.server.Type,
+		RequestID: "",
+	}
+	ctx = tracing.RPCStartSpan(ctx, spanInfo)
+	defer tracing.FinishSpan(ctx, err)
+
+	if !ns.running {
+		err = constants.ErrRPCClientNotInitialized
+		return nil, errors.WithStack(err)
+	}
+	req, err := buildRequest(ctx, rpcType, route.String(), session, msg, ns.server)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	marshalledData, err := proto.Marshal(&req)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	if ns.metricsReporters != nil {
+		startTime := time.Now()
+		ctx = pcontext.AddListToPropagateCtx(ctx, constants.StartTimeKey, startTime.UnixNano(), constants.RouteKey, route.String())
+		defer func() {
+			typ := "rpc"
+			metrics.ReportTimingFromCtx(ctx, ns.metricsReporters, typ, err)
+		}()
+	}
+
+	// support notify type.  notify msg don't need wait response
+	if msg.Type == message.Notify {
+		err = ns.Send(GetPublishTopic(route.Method), marshalledData)
+		if err != nil {
+			return nil, errors.WithStack(err)
+		}
+		return nil, nil
+	}
+	if !ns.running {
+		return nil, constants.ErrRPCClientNotInitialized
+	}
+	reply := route.Method + session.UID() + util.NanoID(8)
+	sub, err := ns.conn.SubscribeSync(reply)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	defer sub.Unsubscribe()
+	err = ns.conn.Flush()
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	err = ns.conn.PublishRequest(GetPublishTopic(route.Method), reply, marshalledData)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	// Wait for a single response
+	var responses []*protos.Response
+	timeoutPerReply := lo.If(len(timeouts) > 0, timeouts[0]).Else(ns.reqTimeout)
+	for {
+		m, err := sub.NextMsg(timeoutPerReply)
+		if err != nil {
+			if errors.Is(err, nats.ErrTimeout) {
+				err = fmt.Errorf("%w:%s", constants.ErrRPCTimeout, nats.ErrTimeout.Error())
+				return responses, errors.WithStack(err)
+			} else if errors.Is(err, nats.ErrNoResponders) {
+				// 读完最后一个
+				logger.Zap.Debug("", zap.String("uid", lo.If(session == nil, "").Else(session.UID())), zap.String("topic", route.String()), zap.Error(err))
+				break
+			}
+			return responses, errors.WithStack(err)
+		}
+		res := &protos.Response{}
+		err = proto.Unmarshal(m.Data, res)
+		if err != nil {
+			return responses, errors.WithStack(err)
+		}
+		responses = append(responses, res)
+	}
+	return responses, nil
+}
+
 // Call calls a method remotelly
 func (ns *NatsRPCClient) Call(
 	ctx context.Context,
@@ -162,7 +256,7 @@ func (ns *NatsRPCClient) Call(
 		err = constants.ErrRPCClientNotInitialized
 		return nil, errors.WithStack(err)
 	}
-	req, err := buildRequest(ctx, rpcType, route, session, msg, ns.server)
+	req, err := buildRequest(ctx, rpcType, route.String(), session, msg, ns.server)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -194,12 +288,7 @@ func (ns *NatsRPCClient) Call(
 	m, err = ns.conn.Request(getChannel(server.Type, server.ID), marshalledData, ns.reqTimeout)
 	if err != nil {
 		// 针对超时封装一层error便于上层判断
-		if err == nats.ErrTimeout {
-			logg := logger.Zap
-			if session != nil {
-				logg = logg.With(zap.String("uid", session.UID()))
-			}
-			logg.Error("rpc timeout", zap.String("route", route.String()), zap.String("svID", server.ID), zap.Error(err))
+		if errors.Is(err, nats.ErrTimeout) {
 			err = constants.ErrRPCTimeout
 		}
 		return nil, errors.WithStack(err)
@@ -241,7 +330,7 @@ func (ns *NatsRPCClient) Fork(
 		err = constants.ErrRPCClientNotInitialized
 		return errors.WithStack(err)
 	}
-	req, err := buildRequest(ctx, protos.RPCType_User, route, session, msg, ns.server)
+	req, err := buildRequest(ctx, protos.RPCType_User, route.String(), session, msg, ns.server)
 	if err != nil {
 		return errors.WithStack(err)
 	}

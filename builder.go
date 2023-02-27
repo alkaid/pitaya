@@ -2,7 +2,6 @@ package pitaya
 
 import (
 	"github.com/go-redis/redis/v8"
-	"github.com/google/uuid"
 	"github.com/topfreegames/pitaya/v2/acceptor"
 	"github.com/topfreegames/pitaya/v2/agent"
 	"github.com/topfreegames/pitaya/v2/cluster"
@@ -21,6 +20,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/serialize/json"
 	"github.com/topfreegames/pitaya/v2/service"
 	"github.com/topfreegames/pitaya/v2/session"
+	"github.com/topfreegames/pitaya/v2/util"
 	"github.com/topfreegames/pitaya/v2/worker"
 	"go.uber.org/zap"
 )
@@ -151,7 +151,7 @@ func NewBuilder(isFrontend bool,
 	groupServiceConfig config.MemoryGroupConfig,
 	redisConfig config.RedisConfig,
 ) *Builder {
-	server := cluster.NewServer(uuid.New().String(), serverType, isFrontend, serverMetadata)
+	server := cluster.NewServer(util.NanoID(8), serverType, isFrontend, serverMetadata)
 	dieChan := make(chan bool)
 
 	metricsReporters := []metrics.Reporter{}

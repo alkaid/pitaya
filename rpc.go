@@ -23,8 +23,10 @@ package pitaya
 import (
 	"context"
 	"reflect"
+	"strings"
 
 	"github.com/alkaid/goerrors/apierrors"
+	"github.com/topfreegames/pitaya/v2/protos"
 
 	"github.com/topfreegames/pitaya/v2/logger"
 	"go.uber.org/zap"
@@ -69,6 +71,15 @@ func (app *App) NotifyAll(ctx context.Context, routeStr string, arg proto.Messag
 // Fork implement Pitaya.Fork
 func (app *App) Fork(ctx context.Context, routeStr string, arg proto.Message, uid string) error {
 	return app.doFork(ctx, routeStr, arg, uid)
+}
+
+func (app *App) PublishRequest(ctx context.Context, topic string, arg proto.Message, uid string) ([]*protos.Response, error) {
+	return app.doPublish(ctx, topic, true, arg, uid)
+}
+
+func (app *App) Publish(ctx context.Context, topic string, arg proto.Message, uid string) error {
+	_, err := app.doPublish(ctx, topic, false, arg, uid)
+	return err
 }
 
 // NotifyTo
@@ -123,6 +134,9 @@ func (app *App) doSendRPC(ctx context.Context, serverID, routeStr string, reply 
 	var sess session.Session = nil
 	if uid != "" {
 		sess, err = app.imperfectSessionForRPC(ctx, uid)
+		if err != nil {
+			return err
+		}
 	}
 	return app.remoteService.RPC(ctx, serverID, r, reply, arg, sess)
 }
@@ -147,6 +161,9 @@ func (app *App) doSendRPCRaw(ctx context.Context, serverID, routeStr string, arg
 	var sess session.Session = nil
 	if uid != "" {
 		sess, err = app.imperfectSessionForRPC(ctx, uid)
+		if err != nil {
+			return nil, err
+		}
 	}
 	res, err := app.remoteService.DoRPC(ctx, serverID, r, arg, sess)
 	if err != nil {
@@ -173,6 +190,9 @@ func (app *App) doSendNotifyAll(ctx context.Context, routeStr string, arg proto.
 	var sess session.Session = nil
 	if uid != "" {
 		sess, err = app.imperfectSessionForRPC(ctx, uid)
+		if err != nil {
+			return err
+		}
 	}
 	return app.remoteService.NotifyAll(ctx, r, app.server, arg, sess)
 }
@@ -195,6 +215,9 @@ func (app *App) doSendNotify(ctx context.Context, serverID, routeStr string, arg
 	var sess session.Session = nil
 	if uid != "" {
 		sess, err = app.imperfectSessionForRPC(ctx, uid)
+		if err != nil {
+			return err
+		}
 	}
 	return app.remoteService.Notify(ctx, serverID, r, arg, sess)
 }
@@ -215,8 +238,27 @@ func (app *App) doFork(ctx context.Context, routeStr string, arg proto.Message, 
 	var sess session.Session = nil
 	if uid != "" {
 		sess, err = app.imperfectSessionForRPC(ctx, uid)
+		if err != nil {
+			return err
+		}
 	}
 	return app.remoteService.Fork(ctx, r, arg, sess)
+}
+
+func (app *App) doPublish(ctx context.Context, topic string, request bool, arg proto.Message, uid string) ([]*protos.Response, error) {
+	if app.rpcClient == nil {
+		return nil, constants.ErrRPCClientNotInitialized
+	}
+	topic = strings.ReplaceAll(topic, ".", "_")
+	var sess session.Session = nil
+	var err error
+	if uid != "" {
+		sess, err = app.imperfectSessionForRPC(ctx, uid)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return app.remoteService.Publish(ctx, topic, request, arg, sess)
 }
 
 // imperfectSessionForRPC 为rpc调用获取一个可能不健全的session
@@ -236,17 +278,15 @@ func (app *App) imperfectSessionForRPC(ctx context.Context, uid string) (session
 	}
 	sess := app.sessionPool.GetSessionByUID(uid)
 	if sess != nil {
-		logger.Zap.Debug("use session from sessionPool for rpc or getBoundData", zap.String("uid", uid))
 		return sess, nil
 	}
 	sess = app.GetSessionFromCtx(ctx).(session.Session)
 	if sess != nil && sess.UID() == uid {
-		logger.Zap.Debug("use session from context for rpc or getBoundData", zap.String("uid", uid))
 		return sess, nil
 	}
 	agent, err := agent2.NewCluster(uid, app.sessionPool, app.rpcClient, app.serializer, app.serviceDiscovery)
 	if err != nil {
-		logger.Zap.Debug("use session from cacheCluster for rpc or getBoundData", zap.String("uid", uid))
+		logger.Zap.Error("use session from cluster error", zap.String("uid", uid), zap.Error(err))
 		return nil, err
 	}
 	return agent.Session, nil

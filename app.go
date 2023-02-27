@@ -39,6 +39,7 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/pipeline"
+	"github.com/topfreegames/pitaya/v2/protos"
 
 	"github.com/topfreegames/pitaya/v2/acceptor"
 	"github.com/topfreegames/pitaya/v2/cluster"
@@ -191,6 +192,23 @@ type Pitaya interface {
 	//  @param arg
 	//  @param uid 若不为空会携带session数据
 	Fork(ctx context.Context, routeStr string, arg proto.Message, uid string) error
+	// PublishRequest 发布一个topic,会阻塞等待请求返回
+	//  @param ctx
+	//  @param topic 主题,框架会自动加上 pitaya.publish. 的前缀,若topic中含有"."会自动转化为"_"
+	//  @param arg
+	//  @param uid
+	//  @return []*protos.Response 自行判断status以及反序列化data,可以使用protoAny,switch typeUrl来解析
+	//  @return error
+	//
+	PublishRequest(ctx context.Context, topic string, arg proto.Message, uid string) ([]*protos.Response, error)
+	// Publish 发布一个topic,不会阻塞
+	//  @param ctx
+	//  @param topic
+	//  @param arg
+	//  @param uid
+	//  @return error
+	//
+	Publish(ctx context.Context, topic string, arg proto.Message, uid string) error
 	// RPC 根据route调用remote,会阻塞等待 reply 。如果uid不为空且目标服务器是stateful,则会路由到持有session引用的服
 	//  @param ctx
 	//  @param routeStr
@@ -259,7 +277,12 @@ type Pitaya interface {
 	//  @param c
 	//  @param options
 	RegisterRemote(c component.Component, options ...component.Option)
-
+	// RegisterSubscribe 注册subscribe(publish的远端响应)
+	//  @Description:
+	//  @param c
+	//  @param options
+	//
+	RegisterSubscribe(c component.Component, options ...component.Option)
 	// // LazyRegister 延迟注册handle(终端api响应)
 	// //  @param c 注意系统不会回调该component的生命周期函数
 	// //  @param options

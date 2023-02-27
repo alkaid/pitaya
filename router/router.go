@@ -92,12 +92,12 @@ func (r *Router) defaultRoute(
 		svId := ""
 		if server.Frontend {
 			svId = session.GetFrontendID()
-			logW.Debug("frontend route request by session's frontendID", zap.String("svID", svId))
+			// logW.Debug("frontend route request by session's frontendID", zap.String("svID", svId))
 		} else if server.SessionStickiness {
 			svId = session.GetBackendID(server.Type)
-			logW.Debug("stickiness backend route request by session's backendID", zap.String("svID", svId))
+			// logW.Debug("stickiness backend route request by session's backendID", zap.String("svID", svId))
 		} else {
-			logW.Debug("normal backend route request by consist hash")
+			// logW.Debug("normal backend route request by consist hash")
 			// 尝试hash一致性路由
 			if session.UID() != "" {
 				svId, err = r.serviceDiscovery.GetConsistentHashNode(svType, session.UID())
@@ -129,7 +129,7 @@ func (r *Router) defaultRoute(
 			"uid":    session.UID(),
 		}).WithStack()
 	}
-	logger.Zap.Debug("session is nil,route random", zap.String("svType", svType))
+	// logger.Zap.Debug("session is nil,route random", zap.String("svType", svType))
 	return server, nil
 }
 

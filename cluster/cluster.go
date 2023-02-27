@@ -22,6 +22,7 @@ package cluster
 
 import (
 	"context"
+	"time"
 
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
@@ -53,6 +54,7 @@ type RPCClient interface {
 	//  @param msg
 	//  @return error
 	Fork(ctx context.Context, route *route.Route, session session.Session, msg *message.Message) error
+	Publish(ctx context.Context, rpcType protos.RPCType, route *route.Route, session session.Session, msg *message.Message, timeouts ...time.Duration) ([]*protos.Response, error)
 	interfaces.Module
 }
 
@@ -122,7 +124,7 @@ const (
 func buildRequest(
 	ctx context.Context,
 	rpcType protos.RPCType,
-	route *route.Route,
+	route string,
 	session session.Session,
 	msg *message.Message,
 	thisServer *Server,
@@ -131,7 +133,7 @@ func buildRequest(
 	req := protos.Request{
 		Type: rpcType,
 		Msg: &protos.Msg{
-			Route: route.String(),
+			Route: route,
 			Data:  msg.Data,
 		},
 	}

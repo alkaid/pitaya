@@ -631,7 +631,7 @@ func (sd *etcdServiceDiscovery) SyncServers(firstSync bool) error {
 	defer func() {
 		sd.syncServersRunning <- false
 	}()
-	start := time.Now()
+	// start := time.Now()
 	var kvs *clientv3.GetResponse
 	var err error
 	if firstSync {
@@ -694,10 +694,10 @@ func (sd *etcdServiceDiscovery) SyncServers(firstSync bool) error {
 
 	sd.deleteLocalInvalidServers(allIds)
 
-	sd.printServers()
+	// sd.printServers()
 	sd.lastSyncTime = time.Now()
-	elapsed := time.Since(start)
-	logger.Zap.Info("SyncServers took", zap.Duration("elapsed", elapsed))
+	// elapsed := time.Since(start)
+	// logger.Zap.Info("SyncServers took", zap.Duration("elapsed", elapsed))
 	return nil
 }
 

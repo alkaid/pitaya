@@ -37,6 +37,7 @@ import (
 
 	"github.com/nats-io/nuid"
 
+	gonanoid "github.com/matoous/go-nanoid"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
 	pcontext "github.com/topfreegames/pitaya/v2/context"
@@ -238,4 +239,21 @@ func MapStrInter2MapStrStr(in map[string]interface{}) map[string]string {
 		}
 	}
 	return result
+}
+
+const defaultNanoIDLen = 16
+
+// NanoID 随机唯一ID like UUID
+//
+//	@return string
+func NanoID(length ...int) string {
+	length_ := defaultNanoIDLen
+	if len(length) > 0 {
+		length_ = length[0]
+	}
+	id, err := gonanoid.ID(length_)
+	if err != nil {
+		logger.Log.Error("", zap.Error(err))
+	}
+	return id
 }

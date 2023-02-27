@@ -89,6 +89,17 @@ func (gs *GRPCClient) Init() error {
 	return nil
 }
 
+func (gs *GRPCClient) Publish(
+	ctx context.Context,
+	rpcType protos.RPCType,
+	route *route.Route,
+	session session.Session,
+	msg *message.Message,
+	timeouts ...time.Duration,
+) ([]*protos.Response, error) {
+	return nil, constants.ErrNotImplemented
+}
+
 // Call makes a RPC Call
 func (gs *GRPCClient) Call(
 	ctx context.Context,
@@ -116,7 +127,7 @@ func (gs *GRPCClient) Call(
 	ctx = tracing.RPCStartSpan(ctx, spanInfo)
 	defer tracing.FinishSpan(ctx, err)
 
-	req, err := buildRequest(ctx, rpcType, route, session, msg, gs.server)
+	req, err := buildRequest(ctx, rpcType, route.String(), session, msg, gs.server)
 	if err != nil {
 		return nil, err
 	}

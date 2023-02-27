@@ -28,6 +28,7 @@ import (
 	"sync"
 
 	"github.com/alkaid/goerrors/errors"
+	"github.com/samber/lo"
 
 	"github.com/topfreegames/pitaya/v2/co"
 	"google.golang.org/protobuf/proto"
@@ -284,7 +285,7 @@ func (r *RemoteService) DoNotify(ctx context.Context, serverID string, route *ro
 		target, _ := r.serviceDiscovery.GetServer(serverID)
 		if target == nil {
 			err := constants.ErrServerNotFound
-			logger.Zap.Error("notify error", zap.String("route", route.String()), zap.Error(err))
+			logger.Zap.Error("notify error", zap.String("uid", lo.If(session == nil, "").Else(session.UID())), zap.String("route", route.String()), zap.Error(err))
 			return
 		}
 
@@ -306,12 +307,30 @@ func (r *RemoteService) DoFork(ctx context.Context, route *route.Route, protoDat
 		}
 		err := r.rpcClient.Fork(ctx, route, session, msg)
 		if err != nil {
-			logger.Zap.Error("error making broadcast ", zap.String("route", route.String()), zap.Error(err))
+			logger.Zap.Error("error making fork", zap.String("uid", lo.If(session == nil, "").Else(session.UID())), zap.Stringer("route", route), zap.Error(err))
 			return
 		}
 
 	})
 	return nil
+}
+
+func (r *RemoteService) DoPublish(ctx context.Context, topic string, request bool, protoData []byte, session session.Session) ([]*protos.Response, error) {
+	topic = cluster.GetPublishTopic(topic)
+	route, err := route.Decode(topic)
+	if err != nil {
+		return nil, err
+	}
+	msg := &message.Message{
+		Type:  lo.If(request, message.Request).Else(message.Notify),
+		Route: route.Short(),
+		Data:  protoData,
+	}
+	responses, err := r.rpcClient.Publish(ctx, protos.RPCType_User, route, session, msg)
+	if err != nil {
+		logger.Zap.Error("error making publish", zap.String("uid", lo.If(session == nil, "").Else(session.UID())), zap.String("route", route.String()), zap.Error(err))
+	}
+	return responses, err
 }
 
 // RPC makes rpcs
@@ -417,6 +436,18 @@ func (r *RemoteService) Fork(ctx context.Context, ro *route.Route, arg proto.Mes
 		return err
 	}
 	return nil
+}
+
+func (r *RemoteService) Publish(ctx context.Context, topic string, request bool, arg proto.Message, session session.Session) ([]*protos.Response, error) {
+	var data []byte
+	var err error
+	if arg != nil {
+		data, err = proto.Marshal(arg)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return r.DoPublish(ctx, topic, request, data, session)
 }
 
 // Register registers components
@@ -766,16 +797,9 @@ func (r *RemoteService) remoteCall(
 
 	res, err := r.rpcClient.Call(ctx, rpcType, route, session, msg, target)
 	if err != nil {
-		logw := logger.Zap
-		if session != nil {
-			logw = logw.With(zap.String("uid", session.UID()))
-		}
 		code := apierrors.Code(err)
-		if code >= http.StatusInternalServerError {
-			logw.Error("error making call to target", zap.Stringer("route", route), zap.String("host", target.Hostname), zap.String("svID", target.ID), zap.Error(err))
-		} else {
-			logw.Warn("error making call to target", zap.Stringer("route", route), zap.String("host", target.Hostname), zap.String("svID", target.ID), zap.Error(err))
-		}
+		logFun := lo.If(code >= http.StatusInternalServerError, logger.Zap.Error).Else(logger.Zap.Error)
+		logFun("error making call to target", zap.String("uid", lo.If(session == nil, "").Else(session.UID())), zap.Stringer("route", route), zap.String("host", target.Hostname), zap.String("svID", target.ID), zap.Error(err))
 		return nil, err
 	}
 	return res, err

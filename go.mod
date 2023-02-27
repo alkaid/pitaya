@@ -11,6 +11,7 @@ require (
 	github.com/golang/mock v1.6.0
 	github.com/google/uuid v1.3.0
 	github.com/gorilla/websocket v1.5.0
+	github.com/matoous/go-nanoid v1.5.0
 	github.com/nats-io/nats-server/v2 v2.6.4
 	github.com/nats-io/nats.go v1.16.0
 	github.com/nats-io/nuid v1.0.1
@@ -18,6 +19,7 @@ require (
 	github.com/panjf2000/ants/v2 v2.5.0
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/client_golang v1.12.2
+	github.com/samber/lo v1.37.0
 	github.com/sirupsen/logrus v1.8.1
 	github.com/spf13/viper v1.13.0
 	github.com/stretchr/testify v1.8.0
@@ -121,6 +123,7 @@ require (
 	go.uber.org/automaxprocs v1.5.1 // indirect
 	go.uber.org/multierr v1.8.0 // indirect
 	golang.org/x/crypto v0.0.0-20220622213112-05595931fe9d // indirect
+	golang.org/x/exp v0.0.0-20220303212507-bbda1eaf7a17 // indirect
 	golang.org/x/oauth2 v0.0.0-20220822191816-0ebed06d0094 // indirect
 	golang.org/x/sys v0.0.0-20220728004956-3c1f35247d10 // indirect
 	golang.org/x/text v0.3.7 // indirect

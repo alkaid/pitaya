@@ -147,6 +147,9 @@ func GetBindBroadcastTopic(svType string) string {
 func GetForkTopic(svrType string) string {
 	return fmt.Sprintf("pitaya.fork.%s", svrType)
 }
+func GetPublishTopic(topic string) string {
+	return fmt.Sprintf("pitaya.publish.%s", topic)
+}
 
 // onSessionBind should be called on each session bind
 func (ns *NatsRPCServer) onSessionBind(ctx context.Context, s session.Session, callback map[string]string) error {
@@ -447,6 +450,14 @@ func (ns *NatsRPCServer) subscribe(topic string, queue bool) (*nats.Subscription
 }
 
 func (ns *NatsRPCServer) stop() {
+}
+
+func (ns *NatsRPCServer) Subscribe(topic string, groups ...string) (*nats.Subscription, error) {
+	topic = GetPublishTopic(topic)
+	if len(groups) > 0 {
+		return ns.conn.ChanQueueSubscribe(topic, groups[0], ns.subChan)
+	}
+	return ns.conn.ChanSubscribe(topic, ns.subChan)
 }
 
 func (ns *NatsRPCServer) reportMetrics() {
