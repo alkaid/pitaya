@@ -205,7 +205,7 @@ func (ns *NatsRPCClient) Publish(
 	}
 	// Wait for a single response
 	var responses []*protos.Response
-	timeoutPerReply := lo.If(len(timeouts) > 0, timeouts[0]).Else(ns.reqTimeout)
+	timeoutPerReply := lo.If(len(timeouts) == 0, ns.reqTimeout).ElseF(func() time.Duration { return timeouts[0] })
 	for {
 		m, err := sub.NextMsg(timeoutPerReply)
 		if err != nil {
@@ -214,7 +214,10 @@ func (ns *NatsRPCClient) Publish(
 				return responses, errors.WithStack(err)
 			} else if errors.Is(err, nats.ErrNoResponders) {
 				// 读完最后一个
-				logger.Zap.Debug("", zap.String("uid", lo.If(session == nil, "").Else(session.UID())), zap.String("topic", route.String()), zap.Error(err))
+				logger.Zap.Debug("",
+					zap.String("uid", lo.If(session == nil, "").ElseF(func() string { return session.UID() })),
+					zap.String("topic", route.String()),
+					zap.Error(err))
 				break
 			}
 			return responses, errors.WithStack(err)

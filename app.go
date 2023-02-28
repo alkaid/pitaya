@@ -199,7 +199,6 @@ type Pitaya interface {
 	//  @param uid
 	//  @return []*protos.Response 自行判断status以及反序列化data,可以使用protoAny,switch typeUrl来解析
 	//  @return error
-	//
 	PublishRequest(ctx context.Context, topic string, arg proto.Message, uid string) ([]*protos.Response, error)
 	// Publish 发布一个topic,不会阻塞
 	//  @param ctx
@@ -207,7 +206,6 @@ type Pitaya interface {
 	//  @param arg
 	//  @param uid
 	//  @return error
-	//
 	Publish(ctx context.Context, topic string, arg proto.Message, uid string) error
 	// RPC 根据route调用remote,会阻塞等待 reply 。如果uid不为空且目标服务器是stateful,则会路由到持有session引用的服
 	//  @param ctx

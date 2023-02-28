@@ -285,7 +285,10 @@ func (r *RemoteService) DoNotify(ctx context.Context, serverID string, route *ro
 		target, _ := r.serviceDiscovery.GetServer(serverID)
 		if target == nil {
 			err := constants.ErrServerNotFound
-			logger.Zap.Error("notify error", zap.String("uid", lo.If(session == nil, "").Else(session.UID())), zap.String("route", route.String()), zap.Error(err))
+			logger.Zap.Error("notify error",
+				zap.String("uid", lo.If(session == nil, "").ElseF(func() string { return session.UID() })),
+				zap.String("route", route.String()),
+				zap.Error(err))
 			return
 		}
 
@@ -307,7 +310,10 @@ func (r *RemoteService) DoFork(ctx context.Context, route *route.Route, protoDat
 		}
 		err := r.rpcClient.Fork(ctx, route, session, msg)
 		if err != nil {
-			logger.Zap.Error("error making fork", zap.String("uid", lo.If(session == nil, "").Else(session.UID())), zap.Stringer("route", route), zap.Error(err))
+			logger.Zap.Error("error making fork",
+				zap.String("uid", lo.If(session == nil, "").ElseF(func() string { return session.UID() })),
+				zap.Stringer("route", route),
+				zap.Error(err))
 			return
 		}
 
@@ -328,7 +334,10 @@ func (r *RemoteService) DoPublish(ctx context.Context, topic string, request boo
 	}
 	responses, err := r.rpcClient.Publish(ctx, protos.RPCType_User, route, session, msg)
 	if err != nil {
-		logger.Zap.Error("error making publish", zap.String("uid", lo.If(session == nil, "").Else(session.UID())), zap.String("route", route.String()), zap.Error(err))
+		logger.Zap.Error("error making publish",
+			zap.String("uid", lo.If(session == nil, "").ElseF(func() string { return session.UID() })),
+			zap.String("route", route.String()),
+			zap.Error(err))
 	}
 	return responses, err
 }
@@ -798,8 +807,11 @@ func (r *RemoteService) remoteCall(
 	res, err := r.rpcClient.Call(ctx, rpcType, route, session, msg, target)
 	if err != nil {
 		code := apierrors.Code(err)
-		logFun := lo.If(code >= http.StatusInternalServerError, logger.Zap.Error).Else(logger.Zap.Error)
-		logFun("error making call to target", zap.String("uid", lo.If(session == nil, "").Else(session.UID())), zap.Stringer("route", route), zap.String("host", target.Hostname), zap.String("svID", target.ID), zap.Error(err))
+		logFun := lo.If(code >= http.StatusInternalServerError, logger.Zap.Error).Else(logger.Zap.Warn)
+		logFun("error making call to target",
+			zap.String("uid", lo.If(session == nil, "").ElseF(func() string { return session.UID() })),
+			zap.Stringer("route", route), zap.String("host", target.Hostname), zap.String("svID", target.ID),
+			zap.Error(err))
 		return nil, err
 	}
 	return res, err

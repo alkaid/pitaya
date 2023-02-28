@@ -445,7 +445,7 @@ func (sd *etcdServiceDiscovery) GetServer(id string) (*Server, error) {
 	if sv, ok := sd.serverMapByID.Load(id); ok {
 		return sv.(*Server), nil
 	}
-	return nil, fmt.Errorf("%w:%s", constants.ErrNoServerWithID, id)
+	return nil, errors.WithStack(fmt.Errorf("%w:%s", constants.ErrNoServerWithID, id))
 }
 
 func (sd *etcdServiceDiscovery) InitETCDClient() error {
