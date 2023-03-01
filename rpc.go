@@ -280,9 +280,9 @@ func (app *App) imperfectSessionForRPC(ctx context.Context, uid string) (session
 	if sess != nil {
 		return sess, nil
 	}
-	sess = app.GetSessionFromCtx(ctx).(session.Session)
-	if sess != nil && sess.UID() == uid {
-		return sess, nil
+	sess2 := app.GetSessionFromCtx(ctx)
+	if sess2 != nil && sess2.UID() == uid {
+		return sess2.(session.Session), nil
 	}
 	agent, err := agent2.NewCluster(uid, app.sessionPool, app.rpcClient, app.serializer, app.serviceDiscovery)
 	if err != nil {
