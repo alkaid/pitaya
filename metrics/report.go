@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/alkaid/goerrors/apierrors"
+	"github.com/topfreegames/pitaya/v2/logger"
 
 	"github.com/topfreegames/pitaya/v2/constants"
 
@@ -45,7 +46,14 @@ func ReportTimingFromCtx(ctx context.Context, reporters []Reporter, typ string, 
 	}
 	if len(reporters) > 0 {
 		startTime := pcontext.GetFromPropagateCtx(ctx, constants.StartTimeKey)
+		if startTime == nil {
+			return
+		}
 		route := pcontext.GetFromPropagateCtx(ctx, constants.RouteKey)
+		if route == nil {
+			logger.Zap.Error("route cannot be nil from context")
+			return
+		}
 		elapsed := time.Since(time.Unix(0, startTime.(int64)))
 		tags := getTags(ctx, map[string]string{
 			"route":  route.(string),
