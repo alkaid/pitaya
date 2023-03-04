@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+//package protos;
+package demo.pb.protos;
+option go_package = "examples/demo/cluster_protobuf/protos";
+// Response represents a rpc message
+message Response {
+  int32 Code = 1;
+  string Msg = 2;
+}
+
+// UserMessage represents a message that user sent
+message UserMessage {
+  string Name = 1;
+  string Content = 2;
+}
+
+// NewUser message will be received when new user join room
+message NewUser{
+  string Content = 1;
+}
+
+message RPCMsg{
+  string Route = 1;
+  string Msg = 2;
+}
+
+// AllMembers contains all members uid
+message AllMembers {
+  repeated string Members = 1;
+}
+
+
+message LoginReq {
+  string token = 1;
+}
+message LoginResponse {
+  int32 Code = 1;
+  string Msg = 2;
+  string uid=3;
+}

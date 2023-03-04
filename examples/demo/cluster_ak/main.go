@@ -3,14 +3,13 @@ package main
 import (
 	"flag"
 	"fmt"
-
 	"strings"
 
 	"github.com/topfreegames/pitaya/v2"
 	"github.com/topfreegames/pitaya/v2/acceptor"
 	"github.com/topfreegames/pitaya/v2/component"
 	"github.com/topfreegames/pitaya/v2/config"
-	"github.com/topfreegames/pitaya/v2/examples/demo/cluster_protobuf/services"
+	"github.com/topfreegames/pitaya/v2/examples/demo/cluster_ak/services"
 	"github.com/topfreegames/pitaya/v2/groups"
 	"github.com/topfreegames/pitaya/v2/serialize/protobuf"
 )
@@ -44,7 +43,7 @@ var app pitaya.Pitaya
 func main() {
 	port := flag.Int("port", 3250, "the port to listen")
 	svType := flag.String("type", "connector", "the server type")
-	isFrontend := flag.Bool("frontend", true, "if server is frontend")
+	isFrontend := flag.Bool("frontend", false, "if server is frontend")
 
 	flag.Parse()
 

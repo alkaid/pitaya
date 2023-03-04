@@ -40,6 +40,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/util"
 	"github.com/zeromicro/go-zero/core/hash"
+	logutil "go.etcd.io/etcd/client/pkg/v3/logutil"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/namespace"
 )
@@ -452,9 +453,11 @@ func (sd *etcdServiceDiscovery) InitETCDClient() error {
 	logger.Zap.Info("Initializing ETCD client")
 	var cli *clientv3.Client
 	var err error
+	etcdClientLogger, _ := logutil.CreateDefaultZapLogger(logutil.ConvertToZapLevel("error"))
 	config := clientv3.Config{
 		Endpoints:   sd.etcdEndpoints,
 		DialTimeout: sd.etcdDialTimeout,
+		Logger:      etcdClientLogger,
 	}
 	if sd.etcdUser != "" && sd.etcdPass != "" {
 		config.Username = sd.etcdUser

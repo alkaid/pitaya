@@ -94,6 +94,9 @@ type PitayaConfig struct {
 	Metrics struct {
 		Period time.Duration
 	}
+	Acceptor struct {
+		ProxyProtocol bool
+	}
 	ConfSource ConfSource // 配置源
 	Log        struct {
 		Development bool   // 是否开发模式
@@ -178,6 +181,11 @@ func NewDefaultPitayaConfig() *PitayaConfig {
 			Period time.Duration
 		}{
 			Period: time.Duration(15 * time.Second),
+		},
+		Acceptor: struct {
+			ProxyProtocol bool
+		}{
+			ProxyProtocol: false,
 		},
 		ConfSource: ConfSource{
 			Interval: time.Duration(5 * time.Minute),

@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
+	"github.com/golang/protobuf/proto"
 	"github.com/google/uuid"
 	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
@@ -40,7 +41,6 @@ import (
 	"github.com/topfreegames/pitaya/v2/protos"
 	"github.com/topfreegames/pitaya/v2/route"
 	sessionmocks "github.com/topfreegames/pitaya/v2/session/mocks"
-	"google.golang.org/protobuf/proto"
 )
 
 func TestNewNatsRPCClient(t *testing.T) {
@@ -349,11 +349,6 @@ func TestNatsRPCClientBuildRequest(t *testing.T) {
 					Type:  protos.MsgType_MsgRequest,
 				},
 				FrontendID: "",
-				Session: &protos.Session{
-					Id:   sessionID,
-					Uid:  uid,
-					Data: data2,
-				},
 			},
 		},
 		{
@@ -375,37 +370,16 @@ func TestNatsRPCClientBuildRequest(t *testing.T) {
 				},
 			},
 		},
-		{
-			"test-notify-user", false, protos.RPCType_User, rt,
-			&message.Message{Type: message.Notify, ID: messageID, Data: data},
-			protos.Request{
-				Type: protos.RPCType_User,
-				Msg: &protos.Msg{
-					Route: rt.String(),
-					Data:  data,
-					Type:  protos.MsgType_MsgNotify,
-					Id:    0,
-				},
-				FrontendID: "",
-				Session: &protos.Session{
-					Id:   sessionID,
-					Uid:  uid,
-					Data: data2,
-				},
-			},
-		},
 	}
 	for _, table := range tables {
 		t.Run(table.name, func(t *testing.T) {
 			ctrl := gomock.NewController(t)
 
 			ss := sessionmocks.NewMockSession(ctrl)
-			ss.EXPECT().ID().Return(sessionID)
-			ss.EXPECT().UID().Return(uid)
-			ss.EXPECT().GetDataEncoded().Return(data2)
-			if table.frontendServer {
-				ss.EXPECT().SetFrontendData(gomock.Any(), gomock.Any())
-				ss.EXPECT().ID().Return(sessionID)
+			if table.rpcType == protos.RPCType_Sys {
+				ss.EXPECT().ID().Return(sessionID).Times(1)
+				ss.EXPECT().UID().Return(uid).Times(1)
+				ss.EXPECT().GetDataEncoded().Return(data2).Times(1)
 			}
 
 			rpcClient.server.Frontend = table.frontendServer
@@ -413,7 +387,7 @@ func TestNatsRPCClientBuildRequest(t *testing.T) {
 			assert.NoError(t, err)
 			assert.NotNil(t, req.Metadata)
 			req.Metadata = nil
-			assert.True(t, proto.Equal(&table.expected, &req))
+			assert.Equal(t, table.expected, req)
 		})
 	}
 }
@@ -451,17 +425,15 @@ func TestNatsRPCClientCall(t *testing.T) {
 
 	tables := []struct {
 		name     string
-		msgType  message.Type
 		response interface{}
 		expected *protos.Response
 		err      error
 	}{
-		{"test_error", message.Request, &protos.Response{Data: []byte("nok"), Error: &protos.Error{Msg: "nok"}}, nil, e.NewError(errors.New("nok"), e.ErrUnknownCode)},
-		{"test_ok", message.Request, &protos.Response{Data: []byte("ok")}, &protos.Response{Data: []byte("ok")}, nil},
-		{"test_bad_response", message.Request, []byte("invalid"), nil, errors.New("cannot parse invalid wire-format data")},
-		{"test_bad_proto", message.Request, &protos.Session{Id: 1, Uid: "snap"}, nil, errors.New("cannot parse invalid wire-format data")},
-		{"test_no_response", message.Request, nil, nil, errors.New("nats: timeout")},
-		{"test_notify", message.Notify, &protos.Response{Data: []byte("not need response")}, &protos.Response{}, nil},
+		{"test_error", &protos.Response{Data: []byte("nok"), Error: &protos.Error{Msg: "nok"}}, nil, e.NewError(errors.New("nok"), e.ErrUnknownCode)},
+		{"test_ok", &protos.Response{Data: []byte("ok")}, &protos.Response{Data: []byte("ok")}, nil},
+		{"test_bad_response", []byte("invalid"), nil, errors.New("cannot parse invalid wire-format data")},
+		{"test_bad_proto", &protos.Session{Id: 1, Uid: "snap"}, nil, errors.New("cannot parse invalid wire-format data")},
+		{"test_no_response", nil, nil, errors.New("nats: timeout")},
 	}
 
 	for _, table := range tables {
@@ -473,7 +445,6 @@ func TestNatsRPCClientCall(t *testing.T) {
 			sv2 := getServer()
 			sv2.Type = uuid.New().String()
 			sv2.ID = uuid.New().String()
-			msg.Type = table.msgType
 			subs, err := conn.Subscribe(getChannel(sv2.Type, sv2.ID), func(m *nats.Msg) {
 				if table.response != nil {
 					if val, ok := table.response.(*protos.Response); ok {
@@ -492,100 +463,17 @@ func TestNatsRPCClientCall(t *testing.T) {
 			time.Sleep(50 * time.Millisecond)
 
 			ss := sessionmocks.NewMockSession(ctrl)
-			ss.EXPECT().ID().Return(sessionID)
-			ss.EXPECT().UID().Return(uid)
-			ss.EXPECT().GetDataEncoded().Return(data2)
-			if sv2.Frontend {
-				ss.EXPECT().SetFrontendData(gomock.Any(), gomock.Any())
-				ss.EXPECT().ID().Return(sessionID)
-			}
+			ss.EXPECT().ID().Return(sessionID).Times(1)
+			ss.EXPECT().UID().Return(uid).Times(1)
+			ss.EXPECT().GetDataEncoded().Return(data2).Times(1)
+			ss.EXPECT().SetRequestInFlight(gomock.Any(), gomock.Any(), gomock.Any()).Times(2)
 
 			res, err := rpcClient.Call(context.Background(), protos.RPCType_Sys, rt, ss, msg, sv2)
-			if table.msgType == message.Notify {
-				assert.NotEqual(t, table.expected, table.response)
-			}
-			assert.True(t, proto.Equal(table.expected, res))
+			assert.Equal(t, table.expected, res)
 			if table.err != nil {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), table.err.Error())
 			}
-			err = subs.Unsubscribe()
-			assert.NoError(t, err)
-			conn.Close()
-		})
-	}
-}
-
-func TestNatsRPCClientBroadcast(t *testing.T) {
-	s := helpers.GetTestNatsServer(t)
-	sv := getServer()
-	defer s.Shutdown()
-	cfg := config.NewDefaultNatsRPCClientConfig()
-	cfg.Connect = fmt.Sprintf("nats://%s", s.Addr())
-	cfg.RequestTimeout = time.Duration(300 * time.Millisecond)
-	rpcClient, _ := NewNatsRPCClient(*cfg, sv, nil, nil)
-	rpcClient.Init()
-
-	rt := route.NewRoute("sv", "svc", "method")
-
-	sessionID := int64(1)
-	uid := "uid"
-	data2 := []byte("data2")
-
-	msg := &message.Message{
-		Type: message.Request,
-		ID:   uint(123),
-		Data: []byte("data"),
-	}
-
-	tables := []struct {
-		name       string
-		hasSession bool
-		isGlobal   bool
-		msgType    message.Type
-	}{
-		//非session全局广播
-		{"test_global", false, true, message.Request},
-		//带session非全局广播
-		{"test_session", true, false, message.Notify},
-		//非session非全局广播
-		{"test_no_session", false, false, message.Request},
-		//带session全局广播
-		{"test_global_session", true, true, message.Notify},
-	}
-
-	for _, table := range tables {
-		t.Run(table.name, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
-			conn, err := setupNatsConn(fmt.Sprintf("nats://%s", s.Addr()), nil)
-			assert.NoError(t, err)
-
-			sv2 := getServer()
-			sv2.Type = uuid.New().String()
-			sv2.ID = uuid.New().String()
-			msg.Type = table.msgType
-			if table.isGlobal {
-				rt.SvType = ""
-			}
-			subs, err := conn.Subscribe(GetForkTopic(rt.SvType, table.hasSession), func(m *nats.Msg) {
-				assert.Equal(t, msg.Data, m.Data)
-			})
-			assert.NoError(t, err)
-			// TODO this is ugly, can lead to flaky tests and we could probably do it better
-			time.Sleep(50 * time.Millisecond)
-
-			ss := sessionmocks.NewMockSession(ctrl)
-			ss.EXPECT().ID().Return(sessionID)
-			ss.EXPECT().UID().Return(uid)
-			ss.EXPECT().GetDataEncoded().Return(data2)
-			if sv2.Frontend {
-				ss.EXPECT().SetFrontendData(gomock.Any(), gomock.Any())
-				ss.EXPECT().ID().Return(sessionID)
-			}
-
-			err = rpcClient.Fork(context.Background(), rt, ss, msg)
-			assert.NoError(t, err)
-			assert.Equal(t, message.Notify, msg.Type)
 			err = subs.Unsubscribe()
 			assert.NoError(t, err)
 			conn.Close()

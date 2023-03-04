@@ -723,7 +723,12 @@ func (app *App) listen() {
 				co.Go(func() { app.handlerService.Handle(connV) })
 			}
 		})
-
+		if app.config.Acceptor.ProxyProtocol {
+			logger.Log.Info("Enabling PROXY protocol for inbond connections")
+			a.EnableProxyProtocol()
+		} else {
+			logger.Log.Debug("PROXY protocol is disabled for inbound connections")
+		}
 		co.Go(func() {
 			a.ListenAndServe()
 		})
