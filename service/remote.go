@@ -26,7 +26,6 @@ import (
 	"net/http"
 	"reflect"
 	"sync"
-	"time"
 
 	"github.com/alkaid/goerrors/errors"
 	"github.com/samber/lo"
@@ -41,7 +40,6 @@ import (
 	"github.com/topfreegames/pitaya/v2/conn/codec"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
-	pcontext "github.com/topfreegames/pitaya/v2/context"
 	"github.com/topfreegames/pitaya/v2/docgenerator"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/pipeline"
@@ -179,34 +177,12 @@ func (r *RemoteService) Call(ctx context.Context, req *protos.Request) (*protos.
 	spanInfo.LocalType = r.server.Type
 	c, err := util.GetContextFromRequest(req, r.server.ID)
 	c = tracing.RPCStartSpan(c, spanInfo)
-	cc, cancel := context.WithCancel(c)
 	defer tracing.FinishSpan(c, err)
 	var res *protos.Response
 
 	if err == nil {
-		result := make(chan *protos.Response, 1)
-		go func() {
-			result <- processRemoteMessage(cc, req, r)
-		}()
-
-		// Set a timeout for processing the call
-		timeout := time.Duration(300) * time.Second
-
-		reqTimeout := pcontext.GetFromPropagateCtx(ctx, constants.RequestTimeout)
-		if reqTimeout != nil {
-			timeout, err = time.ParseDuration(reqTimeout.(string))
-			if err != nil {
-				logger.Log.Errorf("Error while parsing timeout duration: %s", err.Error())
-			}
-		}
-
-		select {
-		case <-time.After(timeout):
-			err = fmt.Errorf("Timed out calling route %s after %s .", req.GetMsg().GetRoute(), timeout)
-			cancel()
-		case res := <-result:
-			return res, nil
-		}
+		// 这里不能和官方一样单独线程,调用方已经用co.GoByID包装.
+		res = processRemoteMessage(c, req, r)
 	}
 
 	if err != nil {
