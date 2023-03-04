@@ -319,7 +319,8 @@ func (ns *NatsRPCServer) processMessages(threadID int) {
 			co.GoByID(goID, func() {
 				resp, err := ns.pitayaServer.Call(ctx, req)
 				if err != nil {
-					logger.Zap.Error("rpc error calling pitayaServer", zap.Error(err))
+					logger.Zap.Error("rpc error calling pitayaServer", zap.String("route", ns.requests[threadID].Msg.Route),
+						zap.Int("goID", goID), zap.Error(err))
 				}
 				if req.GetMsg().Type != protos.MsgType_MsgNotify {
 					p, err := ns.marshalResponse(resp)

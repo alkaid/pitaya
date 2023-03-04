@@ -25,13 +25,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/alkaid/goerrors/errors"
-	"github.com/topfreegames/pitaya/v2/util"
-	"go.uber.org/zap"
-
 	"github.com/alkaid/goerrors/apierrors"
-
 	nats "github.com/nats-io/nats.go"
+	"github.com/pkg/errors"
 	"github.com/samber/lo"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/conn/message"
@@ -43,6 +39,8 @@ import (
 	"github.com/topfreegames/pitaya/v2/route"
 	"github.com/topfreegames/pitaya/v2/session"
 	"github.com/topfreegames/pitaya/v2/tracing"
+	"github.com/topfreegames/pitaya/v2/util"
+	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -259,6 +257,21 @@ func (ns *NatsRPCClient) Call(
 		err = constants.ErrRPCClientNotInitialized
 		return nil, errors.WithStack(err)
 	}
+
+	if session != nil {
+		requestID := util.NanoID(16)
+		requestInfo := ""
+		if route != nil {
+			requestInfo = route.Method
+		}
+
+		session.SetRequestInFlight(requestID, requestInfo, true)
+		defer session.SetRequestInFlight(requestID, "", false)
+	}
+
+	logger.Log.Debugf("[rpc_client] sending remote nats request for route %s with timeout of %s", route, ns.reqTimeout)
+
+	ctx = pcontext.AddToPropagateCtx(ctx, constants.RequestTimeout, ns.reqTimeout.String())
 	req, err := buildRequest(ctx, rpcType, route.String(), session, msg, ns.server)
 	if err != nil {
 		return nil, errors.WithStack(err)

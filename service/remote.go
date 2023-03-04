@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"reflect"
 	"sync"
+	"time"
 
 	"github.com/alkaid/goerrors/errors"
 	"github.com/samber/lo"
@@ -40,6 +41,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/conn/codec"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
+	pcontext "github.com/topfreegames/pitaya/v2/context"
 	"github.com/topfreegames/pitaya/v2/docgenerator"
 	"github.com/topfreegames/pitaya/v2/logger"
 	"github.com/topfreegames/pitaya/v2/pipeline"
@@ -166,7 +168,6 @@ func (r *RemoteService) GetRemoteBindingListener() []cluster.RemoteBindingListen
 //
 //	@implement protos.PitayaServer
 func (r *RemoteService) Call(ctx context.Context, req *protos.Request) (*protos.Response, error) {
-	c, err := util.GetContextFromRequest(req, r.server.ID)
 	rt, err := route.Decode(req.GetMsg().GetRoute())
 	if err != nil {
 		return nil, err
@@ -176,14 +177,42 @@ func (r *RemoteService) Call(ctx context.Context, req *protos.Request) (*protos.
 	spanInfo.Route = rt
 	spanInfo.LocalID = r.server.ID
 	spanInfo.LocalType = r.server.Type
-	c = tracing.RPCStartSpan(ctx, spanInfo)
+	c, err := util.GetContextFromRequest(req, r.server.ID)
+	c = tracing.RPCStartSpan(c, spanInfo)
+	cc, cancel := context.WithCancel(c)
+	defer tracing.FinishSpan(c, err)
 	var res *protos.Response
+
+	if err == nil {
+		result := make(chan *protos.Response, 1)
+		go func() {
+			result <- processRemoteMessage(cc, req, r)
+		}()
+
+		// Set a timeout for processing the call
+		timeout := time.Duration(300) * time.Second
+
+		reqTimeout := pcontext.GetFromPropagateCtx(ctx, constants.RequestTimeout)
+		if reqTimeout != nil {
+			timeout, err = time.ParseDuration(reqTimeout.(string))
+			if err != nil {
+				logger.Log.Errorf("Error while parsing timeout duration: %s", err.Error())
+			}
+		}
+
+		select {
+		case <-time.After(timeout):
+			err = fmt.Errorf("Timed out calling route %s after %s .", req.GetMsg().GetRoute(), timeout)
+			cancel()
+		case res := <-result:
+			return res, nil
+		}
+	}
+
 	if err != nil {
 		res = &protos.Response{
 			Status: &apierrors.FromError(err).Status,
 		}
-	} else {
-		res = processRemoteMessage(c, req, r)
 	}
 
 	if res.Status != nil {
@@ -191,7 +220,7 @@ func (r *RemoteService) Call(ctx context.Context, req *protos.Request) (*protos.
 	}
 
 	defer tracing.FinishSpan(c, err)
-	return res, nil
+	return res, err
 }
 
 // Deprecated:Use remote.Sys .SessionBoundFork() instead 由于上层frontend之间的广播方式改走Fork()实现,这里不会再收到响应

@@ -6,10 +6,6 @@ package mocks
 
 import (
 	context "context"
-	reflect "reflect"
-	time "time"
-
-	redis "github.com/go-redis/redis/v8"
 	gomock "github.com/golang/mock/gomock"
 	cluster "github.com/topfreegames/pitaya/v2/cluster"
 	component "github.com/topfreegames/pitaya/v2/component"
@@ -19,45 +15,35 @@ import (
 	router "github.com/topfreegames/pitaya/v2/router"
 	session "github.com/topfreegames/pitaya/v2/session"
 	worker "github.com/topfreegames/pitaya/v2/worker"
-	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
+	protoiface "google.golang.org/protobuf/runtime/protoiface"
+	reflect "reflect"
+	time "time"
 )
 
-// MockPitaya is a mock of Pitaya interface.
+// MockPitaya is a mock of Pitaya interface
 type MockPitaya struct {
 	ctrl     *gomock.Controller
 	recorder *MockPitayaMockRecorder
 }
 
-// MockPitayaMockRecorder is the mock recorder for MockPitaya.
+// MockPitayaMockRecorder is the mock recorder for MockPitaya
 type MockPitayaMockRecorder struct {
 	mock *MockPitaya
 }
 
-// NewMockPitaya creates a new mock instance.
+// NewMockPitaya creates a new mock instance
 func NewMockPitaya(ctrl *gomock.Controller) *MockPitaya {
 	mock := &MockPitaya{ctrl: ctrl}
 	mock.recorder = &MockPitayaMockRecorder{mock}
 	return mock
 }
 
-// EXPECT returns an object that allows the caller to indicate expected use.
+// EXPECT returns an object that allows the caller to indicate expected use
 func (m *MockPitaya) EXPECT() *MockPitayaMockRecorder {
 	return m.recorder
 }
 
-// AddConfLoader mocks base method.
-func (m *MockPitaya) AddConfLoader(arg0 config.ConfLoader) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "AddConfLoader", arg0)
-}
-
-// AddConfLoader indicates an expected call of AddConfLoader.
-func (mr *MockPitayaMockRecorder) AddConfLoader(arg0 interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddConfLoader", reflect.TypeOf((*MockPitaya)(nil).AddConfLoader), arg0)
-}
-
-// AddRoute mocks base method.
+// AddRoute mocks base method
 func (m *MockPitaya) AddRoute(arg0 string, arg1 router.RoutingFunc) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "AddRoute", arg0, arg1)
@@ -65,37 +51,13 @@ func (m *MockPitaya) AddRoute(arg0 string, arg1 router.RoutingFunc) error {
 	return ret0
 }
 
-// AddRoute indicates an expected call of AddRoute.
+// AddRoute indicates an expected call of AddRoute
 func (mr *MockPitayaMockRecorder) AddRoute(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddRoute", reflect.TypeOf((*MockPitaya)(nil).AddRoute), arg0, arg1)
 }
 
-// AddServerDiscoveryListener mocks base method.
-func (m *MockPitaya) AddServerDiscoveryListener(arg0 cluster.SDListener) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "AddServerDiscoveryListener", arg0)
-}
-
-// AddServerDiscoveryListener indicates an expected call of AddServerDiscoveryListener.
-func (mr *MockPitayaMockRecorder) AddServerDiscoveryListener(arg0 interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddServerDiscoveryListener", reflect.TypeOf((*MockPitaya)(nil).AddServerDiscoveryListener), arg0)
-}
-
-// AddSessionListener mocks base method.
-func (m *MockPitaya) AddSessionListener(arg0 cluster.RemoteSessionListener) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "AddSessionListener", arg0)
-}
-
-// AddSessionListener indicates an expected call of AddSessionListener.
-func (mr *MockPitayaMockRecorder) AddSessionListener(arg0 interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "AddSessionListener", reflect.TypeOf((*MockPitaya)(nil).AddSessionListener), arg0)
-}
-
-// Documentation mocks base method.
+// Documentation mocks base method
 func (m *MockPitaya) Documentation(arg0 bool) (map[string]interface{}, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "Documentation", arg0)
@@ -104,41 +66,13 @@ func (m *MockPitaya) Documentation(arg0 bool) (map[string]interface{}, error) {
 	return ret0, ret1
 }
 
-// Documentation indicates an expected call of Documentation.
+// Documentation indicates an expected call of Documentation
 func (mr *MockPitayaMockRecorder) Documentation(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Documentation", reflect.TypeOf((*MockPitaya)(nil).Documentation), arg0)
 }
 
-// FlushServer2Cluster mocks base method.
-func (m *MockPitaya) FlushServer2Cluster(arg0 *cluster.Server) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "FlushServer2Cluster", arg0)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// FlushServer2Cluster indicates an expected call of FlushServer2Cluster.
-func (mr *MockPitayaMockRecorder) FlushServer2Cluster(arg0 interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "FlushServer2Cluster", reflect.TypeOf((*MockPitaya)(nil).FlushServer2Cluster), arg0)
-}
-
-// Fork mocks base method.
-func (m *MockPitaya) Fork(arg0 context.Context, arg1 string, arg2 protoreflect.ProtoMessage, arg3 string) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Fork", arg0, arg1, arg2, arg3)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// Fork indicates an expected call of Fork.
-func (mr *MockPitayaMockRecorder) Fork(arg0, arg1, arg2, arg3 interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Fork", reflect.TypeOf((*MockPitaya)(nil).Fork), arg0, arg1, arg2, arg3)
-}
-
-// GetDieChan mocks base method.
+// GetDieChan mocks base method
 func (m *MockPitaya) GetDieChan() chan bool {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetDieChan")
@@ -146,13 +80,13 @@ func (m *MockPitaya) GetDieChan() chan bool {
 	return ret0
 }
 
-// GetDieChan indicates an expected call of GetDieChan.
+// GetDieChan indicates an expected call of GetDieChan
 func (mr *MockPitayaMockRecorder) GetDieChan() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetDieChan", reflect.TypeOf((*MockPitaya)(nil).GetDieChan))
 }
 
-// GetMetricsReporters mocks base method.
+// GetMetricsReporters mocks base method
 func (m *MockPitaya) GetMetricsReporters() []metrics.Reporter {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetMetricsReporters")
@@ -160,13 +94,13 @@ func (m *MockPitaya) GetMetricsReporters() []metrics.Reporter {
 	return ret0
 }
 
-// GetMetricsReporters indicates an expected call of GetMetricsReporters.
+// GetMetricsReporters indicates an expected call of GetMetricsReporters
 func (mr *MockPitayaMockRecorder) GetMetricsReporters() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetMetricsReporters", reflect.TypeOf((*MockPitaya)(nil).GetMetricsReporters))
 }
 
-// GetModule mocks base method.
+// GetModule mocks base method
 func (m *MockPitaya) GetModule(arg0 string) (interfaces.Module, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetModule", arg0)
@@ -175,27 +109,13 @@ func (m *MockPitaya) GetModule(arg0 string) (interfaces.Module, error) {
 	return ret0, ret1
 }
 
-// GetModule indicates an expected call of GetModule.
+// GetModule indicates an expected call of GetModule
 func (mr *MockPitayaMockRecorder) GetModule(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetModule", reflect.TypeOf((*MockPitaya)(nil).GetModule), arg0)
 }
 
-// GetRedis mocks base method.
-func (m *MockPitaya) GetRedis() redis.Cmdable {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetRedis")
-	ret0, _ := ret[0].(redis.Cmdable)
-	return ret0
-}
-
-// GetRedis indicates an expected call of GetRedis.
-func (mr *MockPitayaMockRecorder) GetRedis() *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRedis", reflect.TypeOf((*MockPitaya)(nil).GetRedis))
-}
-
-// GetServer mocks base method.
+// GetServer mocks base method
 func (m *MockPitaya) GetServer() *cluster.Server {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetServer")
@@ -203,13 +123,13 @@ func (m *MockPitaya) GetServer() *cluster.Server {
 	return ret0
 }
 
-// GetServer indicates an expected call of GetServer.
+// GetServer indicates an expected call of GetServer
 func (mr *MockPitayaMockRecorder) GetServer() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetServer", reflect.TypeOf((*MockPitaya)(nil).GetServer))
 }
 
-// GetServerByID mocks base method.
+// GetServerByID mocks base method
 func (m *MockPitaya) GetServerByID(arg0 string) (*cluster.Server, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetServerByID", arg0)
@@ -218,13 +138,13 @@ func (m *MockPitaya) GetServerByID(arg0 string) (*cluster.Server, error) {
 	return ret0, ret1
 }
 
-// GetServerByID indicates an expected call of GetServerByID.
+// GetServerByID indicates an expected call of GetServerByID
 func (mr *MockPitayaMockRecorder) GetServerByID(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetServerByID", reflect.TypeOf((*MockPitaya)(nil).GetServerByID), arg0)
 }
 
-// GetServerID mocks base method.
+// GetServerID mocks base method
 func (m *MockPitaya) GetServerID() string {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetServerID")
@@ -232,27 +152,13 @@ func (m *MockPitaya) GetServerID() string {
 	return ret0
 }
 
-// GetServerID indicates an expected call of GetServerID.
+// GetServerID indicates an expected call of GetServerID
 func (mr *MockPitayaMockRecorder) GetServerID() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetServerID", reflect.TypeOf((*MockPitaya)(nil).GetServerID))
 }
 
-// GetServerTypes mocks base method.
-func (m *MockPitaya) GetServerTypes() map[string]*cluster.Server {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetServerTypes")
-	ret0, _ := ret[0].(map[string]*cluster.Server)
-	return ret0
-}
-
-// GetServerTypes indicates an expected call of GetServerTypes.
-func (mr *MockPitayaMockRecorder) GetServerTypes() *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetServerTypes", reflect.TypeOf((*MockPitaya)(nil).GetServerTypes))
-}
-
-// GetServers mocks base method.
+// GetServers mocks base method
 func (m *MockPitaya) GetServers() []*cluster.Server {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetServers")
@@ -260,13 +166,13 @@ func (m *MockPitaya) GetServers() []*cluster.Server {
 	return ret0
 }
 
-// GetServers indicates an expected call of GetServers.
+// GetServers indicates an expected call of GetServers
 func (mr *MockPitayaMockRecorder) GetServers() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetServers", reflect.TypeOf((*MockPitaya)(nil).GetServers))
 }
 
-// GetServersByType mocks base method.
+// GetServersByType mocks base method
 func (m *MockPitaya) GetServersByType(arg0 string) (map[string]*cluster.Server, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetServersByType", arg0)
@@ -275,13 +181,13 @@ func (m *MockPitaya) GetServersByType(arg0 string) (map[string]*cluster.Server, 
 	return ret0, ret1
 }
 
-// GetServersByType indicates an expected call of GetServersByType.
+// GetServersByType indicates an expected call of GetServersByType
 func (mr *MockPitayaMockRecorder) GetServersByType(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetServersByType", reflect.TypeOf((*MockPitaya)(nil).GetServersByType), arg0)
 }
 
-// GetSessionFromCtx mocks base method.
+// GetSessionFromCtx mocks base method
 func (m *MockPitaya) GetSessionFromCtx(arg0 context.Context) session.Session {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GetSessionFromCtx", arg0)
@@ -289,13 +195,13 @@ func (m *MockPitaya) GetSessionFromCtx(arg0 context.Context) session.Session {
 	return ret0
 }
 
-// GetSessionFromCtx indicates an expected call of GetSessionFromCtx.
+// GetSessionFromCtx indicates an expected call of GetSessionFromCtx
 func (mr *MockPitayaMockRecorder) GetSessionFromCtx(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetSessionFromCtx", reflect.TypeOf((*MockPitaya)(nil).GetSessionFromCtx), arg0)
 }
 
-// GroupAddMember mocks base method.
+// GroupAddMember mocks base method
 func (m *MockPitaya) GroupAddMember(arg0 context.Context, arg1, arg2 string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GroupAddMember", arg0, arg1, arg2)
@@ -303,13 +209,13 @@ func (m *MockPitaya) GroupAddMember(arg0 context.Context, arg1, arg2 string) err
 	return ret0
 }
 
-// GroupAddMember indicates an expected call of GroupAddMember.
+// GroupAddMember indicates an expected call of GroupAddMember
 func (mr *MockPitayaMockRecorder) GroupAddMember(arg0, arg1, arg2 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GroupAddMember", reflect.TypeOf((*MockPitaya)(nil).GroupAddMember), arg0, arg1, arg2)
 }
 
-// GroupBroadcast mocks base method.
+// GroupBroadcast mocks base method
 func (m *MockPitaya) GroupBroadcast(arg0 context.Context, arg1, arg2, arg3 string, arg4 interface{}) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GroupBroadcast", arg0, arg1, arg2, arg3, arg4)
@@ -317,13 +223,13 @@ func (m *MockPitaya) GroupBroadcast(arg0 context.Context, arg1, arg2, arg3 strin
 	return ret0
 }
 
-// GroupBroadcast indicates an expected call of GroupBroadcast.
+// GroupBroadcast indicates an expected call of GroupBroadcast
 func (mr *MockPitayaMockRecorder) GroupBroadcast(arg0, arg1, arg2, arg3, arg4 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GroupBroadcast", reflect.TypeOf((*MockPitaya)(nil).GroupBroadcast), arg0, arg1, arg2, arg3, arg4)
 }
 
-// GroupContainsMember mocks base method.
+// GroupContainsMember mocks base method
 func (m *MockPitaya) GroupContainsMember(arg0 context.Context, arg1, arg2 string) (bool, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GroupContainsMember", arg0, arg1, arg2)
@@ -332,13 +238,13 @@ func (m *MockPitaya) GroupContainsMember(arg0 context.Context, arg1, arg2 string
 	return ret0, ret1
 }
 
-// GroupContainsMember indicates an expected call of GroupContainsMember.
+// GroupContainsMember indicates an expected call of GroupContainsMember
 func (mr *MockPitayaMockRecorder) GroupContainsMember(arg0, arg1, arg2 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GroupContainsMember", reflect.TypeOf((*MockPitaya)(nil).GroupContainsMember), arg0, arg1, arg2)
 }
 
-// GroupCountMembers mocks base method.
+// GroupCountMembers mocks base method
 func (m *MockPitaya) GroupCountMembers(arg0 context.Context, arg1 string) (int, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GroupCountMembers", arg0, arg1)
@@ -347,13 +253,13 @@ func (m *MockPitaya) GroupCountMembers(arg0 context.Context, arg1 string) (int, 
 	return ret0, ret1
 }
 
-// GroupCountMembers indicates an expected call of GroupCountMembers.
+// GroupCountMembers indicates an expected call of GroupCountMembers
 func (mr *MockPitayaMockRecorder) GroupCountMembers(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GroupCountMembers", reflect.TypeOf((*MockPitaya)(nil).GroupCountMembers), arg0, arg1)
 }
 
-// GroupCreate mocks base method.
+// GroupCreate mocks base method
 func (m *MockPitaya) GroupCreate(arg0 context.Context, arg1 string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GroupCreate", arg0, arg1)
@@ -361,13 +267,13 @@ func (m *MockPitaya) GroupCreate(arg0 context.Context, arg1 string) error {
 	return ret0
 }
 
-// GroupCreate indicates an expected call of GroupCreate.
+// GroupCreate indicates an expected call of GroupCreate
 func (mr *MockPitayaMockRecorder) GroupCreate(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GroupCreate", reflect.TypeOf((*MockPitaya)(nil).GroupCreate), arg0, arg1)
 }
 
-// GroupCreateWithTTL mocks base method.
+// GroupCreateWithTTL mocks base method
 func (m *MockPitaya) GroupCreateWithTTL(arg0 context.Context, arg1 string, arg2 time.Duration) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GroupCreateWithTTL", arg0, arg1, arg2)
@@ -375,13 +281,13 @@ func (m *MockPitaya) GroupCreateWithTTL(arg0 context.Context, arg1 string, arg2 
 	return ret0
 }
 
-// GroupCreateWithTTL indicates an expected call of GroupCreateWithTTL.
+// GroupCreateWithTTL indicates an expected call of GroupCreateWithTTL
 func (mr *MockPitayaMockRecorder) GroupCreateWithTTL(arg0, arg1, arg2 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GroupCreateWithTTL", reflect.TypeOf((*MockPitaya)(nil).GroupCreateWithTTL), arg0, arg1, arg2)
 }
 
-// GroupDelete mocks base method.
+// GroupDelete mocks base method
 func (m *MockPitaya) GroupDelete(arg0 context.Context, arg1 string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GroupDelete", arg0, arg1)
@@ -389,13 +295,13 @@ func (m *MockPitaya) GroupDelete(arg0 context.Context, arg1 string) error {
 	return ret0
 }
 
-// GroupDelete indicates an expected call of GroupDelete.
+// GroupDelete indicates an expected call of GroupDelete
 func (mr *MockPitayaMockRecorder) GroupDelete(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GroupDelete", reflect.TypeOf((*MockPitaya)(nil).GroupDelete), arg0, arg1)
 }
 
-// GroupMembers mocks base method.
+// GroupMembers mocks base method
 func (m *MockPitaya) GroupMembers(arg0 context.Context, arg1 string) ([]string, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GroupMembers", arg0, arg1)
@@ -404,13 +310,13 @@ func (m *MockPitaya) GroupMembers(arg0 context.Context, arg1 string) ([]string, 
 	return ret0, ret1
 }
 
-// GroupMembers indicates an expected call of GroupMembers.
+// GroupMembers indicates an expected call of GroupMembers
 func (mr *MockPitayaMockRecorder) GroupMembers(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GroupMembers", reflect.TypeOf((*MockPitaya)(nil).GroupMembers), arg0, arg1)
 }
 
-// GroupRemoveAll mocks base method.
+// GroupRemoveAll mocks base method
 func (m *MockPitaya) GroupRemoveAll(arg0 context.Context, arg1 string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GroupRemoveAll", arg0, arg1)
@@ -418,13 +324,13 @@ func (m *MockPitaya) GroupRemoveAll(arg0 context.Context, arg1 string) error {
 	return ret0
 }
 
-// GroupRemoveAll indicates an expected call of GroupRemoveAll.
+// GroupRemoveAll indicates an expected call of GroupRemoveAll
 func (mr *MockPitayaMockRecorder) GroupRemoveAll(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GroupRemoveAll", reflect.TypeOf((*MockPitaya)(nil).GroupRemoveAll), arg0, arg1)
 }
 
-// GroupRemoveMember mocks base method.
+// GroupRemoveMember mocks base method
 func (m *MockPitaya) GroupRemoveMember(arg0 context.Context, arg1, arg2 string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GroupRemoveMember", arg0, arg1, arg2)
@@ -432,13 +338,13 @@ func (m *MockPitaya) GroupRemoveMember(arg0 context.Context, arg1, arg2 string) 
 	return ret0
 }
 
-// GroupRemoveMember indicates an expected call of GroupRemoveMember.
+// GroupRemoveMember indicates an expected call of GroupRemoveMember
 func (mr *MockPitayaMockRecorder) GroupRemoveMember(arg0, arg1, arg2 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GroupRemoveMember", reflect.TypeOf((*MockPitaya)(nil).GroupRemoveMember), arg0, arg1, arg2)
 }
 
-// GroupRenewTTL mocks base method.
+// GroupRenewTTL mocks base method
 func (m *MockPitaya) GroupRenewTTL(arg0 context.Context, arg1 string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "GroupRenewTTL", arg0, arg1)
@@ -446,13 +352,13 @@ func (m *MockPitaya) GroupRenewTTL(arg0 context.Context, arg1 string) error {
 	return ret0
 }
 
-// GroupRenewTTL indicates an expected call of GroupRenewTTL.
+// GroupRenewTTL indicates an expected call of GroupRenewTTL
 func (mr *MockPitayaMockRecorder) GroupRenewTTL(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GroupRenewTTL", reflect.TypeOf((*MockPitaya)(nil).GroupRenewTTL), arg0, arg1)
 }
 
-// IsRunning mocks base method.
+// IsRunning mocks base method
 func (m *MockPitaya) IsRunning() bool {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "IsRunning")
@@ -460,83 +366,41 @@ func (m *MockPitaya) IsRunning() bool {
 	return ret0
 }
 
-// IsRunning indicates an expected call of IsRunning.
+// IsRunning indicates an expected call of IsRunning
 func (mr *MockPitayaMockRecorder) IsRunning() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IsRunning", reflect.TypeOf((*MockPitaya)(nil).IsRunning))
 }
 
-// Notify mocks base method.
-func (m *MockPitaya) Notify(arg0 context.Context, arg1 string, arg2 protoreflect.ProtoMessage, arg3 string) error {
+// RPC mocks base method
+func (m *MockPitaya) RPC(arg0 context.Context, arg1 string, arg2, arg3 protoiface.MessageV1) error {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Notify", arg0, arg1, arg2, arg3)
+	ret := m.ctrl.Call(m, "RPC", arg0, arg1, arg2, arg3)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
-// Notify indicates an expected call of Notify.
-func (mr *MockPitayaMockRecorder) Notify(arg0, arg1, arg2, arg3 interface{}) *gomock.Call {
+// RPC indicates an expected call of RPC
+func (mr *MockPitayaMockRecorder) RPC(arg0, arg1, arg2, arg3 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Notify", reflect.TypeOf((*MockPitaya)(nil).Notify), arg0, arg1, arg2, arg3)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RPC", reflect.TypeOf((*MockPitaya)(nil).RPC), arg0, arg1, arg2, arg3)
 }
 
-// NotifyAll mocks base method.
-func (m *MockPitaya) NotifyAll(arg0 context.Context, arg1 string, arg2 protoreflect.ProtoMessage, arg3 string) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "NotifyAll", arg0, arg1, arg2, arg3)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// NotifyAll indicates an expected call of NotifyAll.
-func (mr *MockPitayaMockRecorder) NotifyAll(arg0, arg1, arg2, arg3 interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NotifyAll", reflect.TypeOf((*MockPitaya)(nil).NotifyAll), arg0, arg1, arg2, arg3)
-}
-
-// NotifyTo mocks base method.
-func (m *MockPitaya) NotifyTo(arg0 context.Context, arg1, arg2 string, arg3 protoreflect.ProtoMessage) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "NotifyTo", arg0, arg1, arg2, arg3)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// NotifyTo indicates an expected call of NotifyTo.
-func (mr *MockPitayaMockRecorder) NotifyTo(arg0, arg1, arg2, arg3 interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "NotifyTo", reflect.TypeOf((*MockPitaya)(nil).NotifyTo), arg0, arg1, arg2, arg3)
-}
-
-// RPC mocks base method.
-func (m *MockPitaya) RPC(arg0 context.Context, arg1 string, arg2, arg3 protoreflect.ProtoMessage, arg4 string) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "RPC", arg0, arg1, arg2, arg3, arg4)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// RPC indicates an expected call of RPC.
-func (mr *MockPitayaMockRecorder) RPC(arg0, arg1, arg2, arg3, arg4 interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RPC", reflect.TypeOf((*MockPitaya)(nil).RPC), arg0, arg1, arg2, arg3, arg4)
-}
-
-// RPCTo mocks base method.
-func (m *MockPitaya) RPCTo(arg0 context.Context, arg1, arg2 string, arg3, arg4 protoreflect.ProtoMessage) error {
+// RPCTo mocks base method
+func (m *MockPitaya) RPCTo(arg0 context.Context, arg1, arg2 string, arg3, arg4 protoiface.MessageV1) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "RPCTo", arg0, arg1, arg2, arg3, arg4)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
-// RPCTo indicates an expected call of RPCTo.
+// RPCTo indicates an expected call of RPCTo
 func (mr *MockPitayaMockRecorder) RPCTo(arg0, arg1, arg2, arg3, arg4 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RPCTo", reflect.TypeOf((*MockPitaya)(nil).RPCTo), arg0, arg1, arg2, arg3, arg4)
 }
 
-// Register mocks base method.
+// Register mocks base method
 func (m *MockPitaya) Register(arg0 component.Component, arg1 ...component.Option) {
 	m.ctrl.T.Helper()
 	varargs := []interface{}{arg0}
@@ -546,14 +410,14 @@ func (m *MockPitaya) Register(arg0 component.Component, arg1 ...component.Option
 	m.ctrl.Call(m, "Register", varargs...)
 }
 
-// Register indicates an expected call of Register.
+// Register indicates an expected call of Register
 func (mr *MockPitayaMockRecorder) Register(arg0 interface{}, arg1 ...interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	varargs := append([]interface{}{arg0}, arg1...)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Register", reflect.TypeOf((*MockPitaya)(nil).Register), varargs...)
 }
 
-// RegisterModule mocks base method.
+// RegisterModule mocks base method
 func (m *MockPitaya) RegisterModule(arg0 interfaces.Module, arg1 string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "RegisterModule", arg0, arg1)
@@ -561,13 +425,13 @@ func (m *MockPitaya) RegisterModule(arg0 interfaces.Module, arg1 string) error {
 	return ret0
 }
 
-// RegisterModule indicates an expected call of RegisterModule.
+// RegisterModule indicates an expected call of RegisterModule
 func (mr *MockPitayaMockRecorder) RegisterModule(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RegisterModule", reflect.TypeOf((*MockPitaya)(nil).RegisterModule), arg0, arg1)
 }
 
-// RegisterModuleAfter mocks base method.
+// RegisterModuleAfter mocks base method
 func (m *MockPitaya) RegisterModuleAfter(arg0 interfaces.Module, arg1 string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "RegisterModuleAfter", arg0, arg1)
@@ -575,13 +439,13 @@ func (m *MockPitaya) RegisterModuleAfter(arg0 interfaces.Module, arg1 string) er
 	return ret0
 }
 
-// RegisterModuleAfter indicates an expected call of RegisterModuleAfter.
+// RegisterModuleAfter indicates an expected call of RegisterModuleAfter
 func (mr *MockPitayaMockRecorder) RegisterModuleAfter(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RegisterModuleAfter", reflect.TypeOf((*MockPitaya)(nil).RegisterModuleAfter), arg0, arg1)
 }
 
-// RegisterModuleBefore mocks base method.
+// RegisterModuleBefore mocks base method
 func (m *MockPitaya) RegisterModuleBefore(arg0 interfaces.Module, arg1 string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "RegisterModuleBefore", arg0, arg1)
@@ -589,13 +453,13 @@ func (m *MockPitaya) RegisterModuleBefore(arg0 interfaces.Module, arg1 string) e
 	return ret0
 }
 
-// RegisterModuleBefore indicates an expected call of RegisterModuleBefore.
+// RegisterModuleBefore indicates an expected call of RegisterModuleBefore
 func (mr *MockPitayaMockRecorder) RegisterModuleBefore(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RegisterModuleBefore", reflect.TypeOf((*MockPitaya)(nil).RegisterModuleBefore), arg0, arg1)
 }
 
-// RegisterRPCJob mocks base method.
+// RegisterRPCJob mocks base method
 func (m *MockPitaya) RegisterRPCJob(arg0 worker.RPCJob) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "RegisterRPCJob", arg0)
@@ -603,13 +467,13 @@ func (m *MockPitaya) RegisterRPCJob(arg0 worker.RPCJob) error {
 	return ret0
 }
 
-// RegisterRPCJob indicates an expected call of RegisterRPCJob.
+// RegisterRPCJob indicates an expected call of RegisterRPCJob
 func (mr *MockPitayaMockRecorder) RegisterRPCJob(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RegisterRPCJob", reflect.TypeOf((*MockPitaya)(nil).RegisterRPCJob), arg0)
 }
 
-// RegisterRemote mocks base method.
+// RegisterRemote mocks base method
 func (m *MockPitaya) RegisterRemote(arg0 component.Component, arg1 ...component.Option) {
 	m.ctrl.T.Helper()
 	varargs := []interface{}{arg0}
@@ -619,15 +483,15 @@ func (m *MockPitaya) RegisterRemote(arg0 component.Component, arg1 ...component.
 	m.ctrl.Call(m, "RegisterRemote", varargs...)
 }
 
-// RegisterRemote indicates an expected call of RegisterRemote.
+// RegisterRemote indicates an expected call of RegisterRemote
 func (mr *MockPitayaMockRecorder) RegisterRemote(arg0 interface{}, arg1 ...interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	varargs := append([]interface{}{arg0}, arg1...)
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RegisterRemote", reflect.TypeOf((*MockPitaya)(nil).RegisterRemote), varargs...)
 }
 
-// ReliableRPC mocks base method.
-func (m *MockPitaya) ReliableRPC(arg0 string, arg1 map[string]interface{}, arg2, arg3 protoreflect.ProtoMessage) (string, error) {
+// ReliableRPC mocks base method
+func (m *MockPitaya) ReliableRPC(arg0 string, arg1 map[string]interface{}, arg2, arg3 protoiface.MessageV1) (string, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ReliableRPC", arg0, arg1, arg2, arg3)
 	ret0, _ := ret[0].(string)
@@ -635,14 +499,14 @@ func (m *MockPitaya) ReliableRPC(arg0 string, arg1 map[string]interface{}, arg2,
 	return ret0, ret1
 }
 
-// ReliableRPC indicates an expected call of ReliableRPC.
+// ReliableRPC indicates an expected call of ReliableRPC
 func (mr *MockPitayaMockRecorder) ReliableRPC(arg0, arg1, arg2, arg3 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReliableRPC", reflect.TypeOf((*MockPitaya)(nil).ReliableRPC), arg0, arg1, arg2, arg3)
 }
 
-// ReliableRPCWithOptions mocks base method.
-func (m *MockPitaya) ReliableRPCWithOptions(arg0 string, arg1 map[string]interface{}, arg2, arg3 protoreflect.ProtoMessage, arg4 *config.EnqueueOpts) (string, error) {
+// ReliableRPCWithOptions mocks base method
+func (m *MockPitaya) ReliableRPCWithOptions(arg0 string, arg1 map[string]interface{}, arg2, arg3 protoiface.MessageV1, arg4 *config.EnqueueOpts) (string, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ReliableRPCWithOptions", arg0, arg1, arg2, arg3, arg4)
 	ret0, _ := ret[0].(string)
@@ -650,13 +514,13 @@ func (m *MockPitaya) ReliableRPCWithOptions(arg0 string, arg1 map[string]interfa
 	return ret0, ret1
 }
 
-// ReliableRPCWithOptions indicates an expected call of ReliableRPCWithOptions.
+// ReliableRPCWithOptions indicates an expected call of ReliableRPCWithOptions
 func (mr *MockPitayaMockRecorder) ReliableRPCWithOptions(arg0, arg1, arg2, arg3, arg4 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ReliableRPCWithOptions", reflect.TypeOf((*MockPitaya)(nil).ReliableRPCWithOptions), arg0, arg1, arg2, arg3, arg4)
 }
 
-// SendKickToUsers mocks base method.
+// SendKickToUsers mocks base method
 func (m *MockPitaya) SendKickToUsers(arg0 []string, arg1 string) ([]string, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "SendKickToUsers", arg0, arg1)
@@ -665,13 +529,13 @@ func (m *MockPitaya) SendKickToUsers(arg0 []string, arg1 string) ([]string, erro
 	return ret0, ret1
 }
 
-// SendKickToUsers indicates an expected call of SendKickToUsers.
+// SendKickToUsers indicates an expected call of SendKickToUsers
 func (mr *MockPitayaMockRecorder) SendKickToUsers(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendKickToUsers", reflect.TypeOf((*MockPitaya)(nil).SendKickToUsers), arg0, arg1)
 }
 
-// SendPushToUsers mocks base method.
+// SendPushToUsers mocks base method
 func (m *MockPitaya) SendPushToUsers(arg0 string, arg1 interface{}, arg2 []string, arg3 string) ([]string, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "SendPushToUsers", arg0, arg1, arg2, arg3)
@@ -680,25 +544,25 @@ func (m *MockPitaya) SendPushToUsers(arg0 string, arg1 interface{}, arg2 []strin
 	return ret0, ret1
 }
 
-// SendPushToUsers indicates an expected call of SendPushToUsers.
+// SendPushToUsers indicates an expected call of SendPushToUsers
 func (mr *MockPitayaMockRecorder) SendPushToUsers(arg0, arg1, arg2, arg3 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendPushToUsers", reflect.TypeOf((*MockPitaya)(nil).SendPushToUsers), arg0, arg1, arg2, arg3)
 }
 
-// SetDebug mocks base method.
+// SetDebug mocks base method
 func (m *MockPitaya) SetDebug(arg0 bool) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "SetDebug", arg0)
 }
 
-// SetDebug indicates an expected call of SetDebug.
+// SetDebug indicates an expected call of SetDebug
 func (mr *MockPitayaMockRecorder) SetDebug(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetDebug", reflect.TypeOf((*MockPitaya)(nil).SetDebug), arg0)
 }
 
-// SetDictionary mocks base method.
+// SetDictionary mocks base method
 func (m *MockPitaya) SetDictionary(arg0 map[string]uint16) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "SetDictionary", arg0)
@@ -706,55 +570,55 @@ func (m *MockPitaya) SetDictionary(arg0 map[string]uint16) error {
 	return ret0
 }
 
-// SetDictionary indicates an expected call of SetDictionary.
+// SetDictionary indicates an expected call of SetDictionary
 func (mr *MockPitayaMockRecorder) SetDictionary(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetDictionary", reflect.TypeOf((*MockPitaya)(nil).SetDictionary), arg0)
 }
 
-// SetHeartbeatTime mocks base method.
+// SetHeartbeatTime mocks base method
 func (m *MockPitaya) SetHeartbeatTime(arg0 time.Duration) {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "SetHeartbeatTime", arg0)
 }
 
-// SetHeartbeatTime indicates an expected call of SetHeartbeatTime.
+// SetHeartbeatTime indicates an expected call of SetHeartbeatTime
 func (mr *MockPitayaMockRecorder) SetHeartbeatTime(arg0 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetHeartbeatTime", reflect.TypeOf((*MockPitaya)(nil).SetHeartbeatTime), arg0)
 }
 
-// Shutdown mocks base method.
+// Shutdown mocks base method
 func (m *MockPitaya) Shutdown() {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "Shutdown")
 }
 
-// Shutdown indicates an expected call of Shutdown.
+// Shutdown indicates an expected call of Shutdown
 func (mr *MockPitayaMockRecorder) Shutdown() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Shutdown", reflect.TypeOf((*MockPitaya)(nil).Shutdown))
 }
 
-// Start mocks base method.
+// Start mocks base method
 func (m *MockPitaya) Start() {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "Start")
 }
 
-// Start indicates an expected call of Start.
+// Start indicates an expected call of Start
 func (mr *MockPitayaMockRecorder) Start() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Start", reflect.TypeOf((*MockPitaya)(nil).Start))
 }
 
-// StartWorker mocks base method.
+// StartWorker mocks base method
 func (m *MockPitaya) StartWorker() {
 	m.ctrl.T.Helper()
 	m.ctrl.Call(m, "StartWorker")
 }
 
-// StartWorker indicates an expected call of StartWorker.
+// StartWorker indicates an expected call of StartWorker
 func (mr *MockPitayaMockRecorder) StartWorker() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "StartWorker", reflect.TypeOf((*MockPitaya)(nil).StartWorker))

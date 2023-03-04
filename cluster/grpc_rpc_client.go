@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/alkaid/goerrors/apierrors"
-
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
@@ -39,6 +38,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/route"
 	"github.com/topfreegames/pitaya/v2/session"
 	"github.com/topfreegames/pitaya/v2/tracing"
+	"github.com/topfreegames/pitaya/v2/util"
 	"google.golang.org/grpc"
 )
 
@@ -127,6 +127,17 @@ func (gs *GRPCClient) Call(
 	ctx = tracing.RPCStartSpan(ctx, spanInfo)
 	defer tracing.FinishSpan(ctx, err)
 
+	if session != nil {
+		requestID := util.NanoID(16)
+		requestInfo := ""
+		if route != nil {
+			requestInfo = route.Method
+		}
+		session.SetRequestInFlight(requestID, requestInfo, true)
+		defer session.SetRequestInFlight(requestID, "", false)
+	}
+
+	ctx = pcontext.AddToPropagateCtx(ctx, constants.RequestTimeout, gs.reqTimeout.String())
 	req, err := buildRequest(ctx, rpcType, route.String(), session, msg, gs.server)
 	if err != nil {
 		return nil, err

@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
+	"github.com/golang/protobuf/proto"
 	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/topfreegames/pitaya/v2/config"
@@ -38,7 +39,6 @@ import (
 	"github.com/topfreegames/pitaya/v2/protos"
 	protosmocks "github.com/topfreegames/pitaya/v2/protos/mocks"
 	sessionmocks "github.com/topfreegames/pitaya/v2/session/mocks"
-	"google.golang.org/protobuf/proto"
 )
 
 type funcPtrMatcher struct {
@@ -126,24 +126,6 @@ func TestNatsRPCServerGetUserKickTopic(t *testing.T) {
 	assert.Equal(t, "pitaya/connector/user/10/kick", GetUserKickTopic("10", "connector"))
 	assert.Equal(t, "pitaya/game/user/11/kick", GetUserKickTopic("11", "game"))
 }
-
-func TestNatsRPCServerGetForkTopic(t *testing.T) {
-	t.Parallel()
-	assert.Equal(t, "pitaya.fork.type", GetForkTopic("type"))
-}
-
-//
-//func TestNatsRPCServerNeedQueueSubscribe(t *testing.T) {
-//	t.Parallel()
-//	assert.Equal(t, false, NeedQueueSubscribe(&Server{Stateful: false}, false, false))
-//	assert.Equal(t, false, NeedQueueSubscribe(&Server{Stateful: true}, false, false))
-//	assert.Equal(t, false, NeedQueueSubscribe(&Server{Stateful: false}, false, true))
-//
-//	assert.Equal(t, false, NeedQueueSubscribe(&Server{Stateful: true}, true, true))
-//	assert.Equal(t, true, NeedQueueSubscribe(&Server{Stateful: false}, true, true))
-//	assert.Equal(t, true, NeedQueueSubscribe(&Server{Stateful: true}, true, false))
-//	assert.Equal(t, true, NeedQueueSubscribe(&Server{Stateful: false}, true, false))
-//}
 
 func TestNatsRPCServerGetUnhandledRequestsChannel(t *testing.T) {
 	t.Parallel()
@@ -291,7 +273,7 @@ func TestNatsRPCServerSubscribe(t *testing.T) {
 
 	for _, table := range tables {
 		t.Run(table.topic, func(t *testing.T) {
-			subs, err := rpcServer.subscribe(table.topic, false)
+			subs, err := rpcServer.subscribe(table.topic)
 			assert.NoError(t, err)
 			assert.Equal(t, true, subs.IsValid())
 			conn.Publish(table.topic, table.msg)
@@ -327,7 +309,7 @@ func TestNatsRPCServerHandleMessages(t *testing.T) {
 
 	for _, table := range tables {
 		t.Run(table.topic, func(t *testing.T) {
-			subs, err := rpcServer.subscribe(table.topic, false)
+			subs, err := rpcServer.subscribe(table.topic)
 			assert.NoError(t, err)
 			assert.Equal(t, true, subs.IsValid())
 			b, err := proto.Marshal(table.req)
@@ -353,7 +335,7 @@ func TestNatsRPCServerInitShouldFailIfConnFails(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockSessionPool := sessionmocks.NewMockSessionPool(ctrl)
 	rpcServer, _ := NewNatsRPCServer(*cfg, sv, nil, nil, mockSessionPool)
-	mockSessionPool.EXPECT().OnSessionBind(rpcServer.onSessionBind).Times(0)
+	//mockSessionPool.EXPECT().OnSessionBind(rpcServer.onSessionBind)
 	err := rpcServer.Init()
 	assert.Error(t, err)
 }
