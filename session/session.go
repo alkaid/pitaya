@@ -305,6 +305,8 @@ type Session interface {
 	Clear()
 	SetHandshakeData(data *HandshakeData)
 	GetHandshakeData() *HandshakeData
+	ClusterStorageKey() string
+	GetClusterStorage() CacheInterface
 	// Flush2Cluster
 	//  @Description: 打包session数据到存储服务
 	//  @receiver s
@@ -1372,8 +1374,15 @@ func (s *sessionImpl) RemoveBackendID(svrType string) error {
 	delete(backends, svrType)
 	return s.updateEncodedData()
 }
-func (s *sessionImpl) getSessionStorageKey() string {
+func (s *sessionImpl) ClusterStorageKey() string {
+	if s.uid == "" {
+		return ""
+	}
 	return s.pool.getSessionStorageKey(s.uid)
+}
+
+func (s *sessionImpl) GetClusterStorage() CacheInterface {
+	return s.pool.storage
 }
 
 // Flush2Cluster
@@ -1388,7 +1397,7 @@ func (s *sessionImpl) Flush2Cluster() error {
 	// TODO GetDataEncoded 内部没有处理错误,本应修正,但是其他地方有引用 暂不改动这里后续考虑优化
 	data := s.GetDataEncoded()
 	// TODO 考虑是否需要redsync锁
-	return s.pool.storage.Set(s.getSessionStorageKey(), string(data))
+	return s.pool.storage.Set(s.ClusterStorageKey(), string(data))
 }
 
 // ObtainFromCluster
@@ -1397,7 +1406,7 @@ func (s *sessionImpl) Flush2Cluster() error {
 //	@receiver s
 //	@return error
 func (s *sessionImpl) ObtainFromCluster() error {
-	v, err := s.pool.storage.Get(s.getSessionStorageKey())
+	v, err := s.pool.storage.Get(s.ClusterStorageKey())
 	if err != nil {
 		return err
 	}
@@ -1408,7 +1417,7 @@ func (s *sessionImpl) ObtainFromCluster() error {
 	return nil
 }
 func (s *sessionImpl) InitialFromCluster() error {
-	v, err := s.pool.storage.Get(s.getSessionStorageKey())
+	v, err := s.pool.storage.Get(s.ClusterStorageKey())
 	if err != nil {
 		return err
 	}

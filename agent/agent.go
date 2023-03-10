@@ -72,24 +72,25 @@ const handlerType = "handler"
 
 type (
 	agentImpl struct {
-		Session            session.Session // session
-		sessionPool        session.SessionPool
-		appDieChan         chan bool         // app die channel
-		chDie              chan struct{}     // wait for close
-		chSend             chan pendingWrite // push message queue
-		chStopHeartbeat    chan struct{}     // stop heartbeats
-		chStopWrite        chan struct{}     // stop writing messages
-		closeMutex         sync.Mutex
-		conn               net.Conn            // low-level conn fd
-		decoder            codec.PacketDecoder // binary decoder
-		encoder            codec.PacketEncoder // binary encoder
-		heartbeatTimeout   time.Duration
-		lastAt             int64 // last heartbeat unix time stamp
-		messageEncoder     message.Encoder
-		messagesBufferSize int // size of the pending messages buffer
-		metricsReporters   []metrics.Reporter
-		serializer         serialize.Serializer // message serializer
-		state              int32                // current agent state
+		Session              session.Session // session
+		sessionPool          session.SessionPool
+		appDieChan           chan bool         // app die channel
+		chDie                chan struct{}     // wait for close
+		chSend               chan pendingWrite // push message queue
+		chStopHeartbeat      chan struct{}     // stop heartbeats
+		chStopWrite          chan struct{}     // stop writing messages
+		chStopKeepCacheAlive chan struct{}
+		closeMutex           sync.Mutex
+		conn                 net.Conn            // low-level conn fd
+		decoder              codec.PacketDecoder // binary decoder
+		encoder              codec.PacketEncoder // binary encoder
+		heartbeatTimeout     time.Duration
+		lastAt               int64 // last heartbeat unix time stamp
+		messageEncoder       message.Encoder
+		messagesBufferSize   int // size of the pending messages buffer
+		metricsReporters     []metrics.Reporter
+		serializer           serialize.Serializer // message serializer
+		state                int32                // current agent state
 	}
 
 	pendingMessage struct {
@@ -200,22 +201,23 @@ func newAgent(
 	})
 
 	a := &agentImpl{
-		appDieChan:         dieChan,
-		chDie:              make(chan struct{}),
-		chSend:             make(chan pendingWrite, messagesBufferSize),
-		chStopHeartbeat:    make(chan struct{}),
-		chStopWrite:        make(chan struct{}),
-		messagesBufferSize: messagesBufferSize,
-		conn:               conn,
-		decoder:            packetDecoder,
-		encoder:            packetEncoder,
-		heartbeatTimeout:   heartbeatTime,
-		lastAt:             time.Now().Unix(),
-		serializer:         serializer,
-		state:              constants.StatusStart,
-		messageEncoder:     messageEncoder,
-		metricsReporters:   metricsReporters,
-		sessionPool:        sessionPool,
+		appDieChan:           dieChan,
+		chDie:                make(chan struct{}),
+		chSend:               make(chan pendingWrite, messagesBufferSize),
+		chStopHeartbeat:      make(chan struct{}),
+		chStopWrite:          make(chan struct{}),
+		chStopKeepCacheAlive: make(chan struct{}),
+		messagesBufferSize:   messagesBufferSize,
+		conn:                 conn,
+		decoder:              packetDecoder,
+		encoder:              packetEncoder,
+		heartbeatTimeout:     heartbeatTime,
+		lastAt:               time.Now().Unix(),
+		serializer:           serializer,
+		state:                constants.StatusStart,
+		messageEncoder:       messageEncoder,
+		metricsReporters:     metricsReporters,
+		sessionPool:          sessionPool,
 	}
 
 	// binding session
@@ -378,6 +380,7 @@ func (a *agentImpl) Close(callback map[string]string, reason ...session.CloseRea
 	default:
 		close(a.chStopWrite)
 		close(a.chStopHeartbeat)
+		close(a.chStopKeepCacheAlive)
 		close(a.chDie)
 		a.onSessionClosed(a.Session, callback, reason...)
 	}
@@ -450,6 +453,7 @@ func (a *agentImpl) Handle() {
 
 	co.Go(func() { a.write() })
 	co.Go(func() { a.heartbeat() })
+	co.Go(func() { a.keepClusterCacheAlive() })
 	<-a.chDie // agent closed signal
 }
 
@@ -468,6 +472,38 @@ func (a *agentImpl) IPVersion() string {
 	}
 
 	return version
+}
+
+const ttlKeepAliveIntervalRate = 10
+
+// keepClusterCacheAlive redis缓存保活
+// 注意若cacheTTL配置变更减少到10倍以下会导致interval过大来不及expire.TODO 有时间再优化
+//
+//	@receiver a
+func (a *agentImpl) keepClusterCacheAlive() {
+	ticker := time.NewTicker(a.Session.GetClusterStorage().CacheTTL() / ttlKeepAliveIntervalRate)
+
+	defer func() {
+		ticker.Stop()
+	}()
+
+	for {
+		select {
+		case <-ticker.C:
+			if a.Session.UID() == "" {
+				continue
+			}
+			err := a.Session.GetClusterStorage().Expire(a.Session.ClusterStorageKey())
+			if err != nil {
+				logger.Zap.Error("keep session cluster cache alive error", zap.Error(err))
+				continue
+			}
+		case <-a.chDie:
+			return
+		case <-a.chStopKeepCacheAlive:
+			return
+		}
+	}
 }
 
 func (a *agentImpl) heartbeat() {
@@ -490,7 +526,7 @@ func (a *agentImpl) heartbeat() {
 			binary.BigEndian.PutUint64(bs, uint64(time.Now().UnixMilli()))
 			hbData, err := a.encoder.Encode(packet.Heartbeat, bs)
 			if err != nil {
-				logger.Zap.Error("encode hearbeat ")
+				logger.Zap.Error("encode heartbeat failed", zap.Error(err))
 			}
 			// chSend is never closed so we need this to don't block if agent is already closed
 			select {

@@ -8,11 +8,13 @@ import (
 )
 
 // CacheInterface
-//  @Description:
+//
+//	@Description:
 type CacheInterface interface {
 	Set(key string, value string) error
 	Get(key string) (string, error)
 	Expire(key string) error
+	CacheTTL() time.Duration
 }
 type RedisCache struct {
 	client redis.Cmdable
@@ -34,4 +36,7 @@ func (r RedisCache) Get(key string) (string, error) {
 }
 func (r RedisCache) Expire(key string) error {
 	return r.client.Expire(context.Background(), key, r.ttl).Err()
+}
+func (r RedisCache) CacheTTL() time.Duration {
+	return r.ttl
 }

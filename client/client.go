@@ -334,14 +334,14 @@ func (c *Client) sendHeartbeats(interval int) {
 func (c *Client) Disconnect(reason CloseReason) {
 	if c.Connected {
 		c.Connected = false
-		// TODO 测试时发现有概率 panic: close of closed channel。 原因未知,有时间再看
+		// TODO 测试时发现有概率 panic: close of closed channel。 原因未知,有时间再看. 这里是粗鲁的安全关闭，并不是一个好的实现。
 		util.SafeCall(nil, func() {
 			close(c.closeChan)
+			c.conn.Close()
+			if c.onDisconnected != nil {
+				c.onDisconnected(reason)
+			}
 		})
-		c.conn.Close()
-		if c.onDisconnected != nil {
-			c.onDisconnected(reason)
-		}
 	}
 }
 
