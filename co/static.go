@@ -11,9 +11,9 @@ import (
 
 // loopInstance 全局默认 Looper
 //  @return Asyncio
-func loopInstance() Asyncio {
-	return holder.pitayaSingleLooper
-}
+// func loopInstance() Asyncio {
+// 	return holder.pitayaSingleLooper
+// }
 
 //
 // // Async 全局 Looper 单例的 Looper.Async
@@ -50,10 +50,11 @@ func loopInstance() Asyncio {
 // }
 
 // Await [T any] Coroutine.Await 的泛型包装,所属 Coroutine 从上下文获得
-//  @param ctx 请使用调用链中已存在的Context传入,请勿自行生成
-//  @param task
-//  @return T
-//  @return error
+//
+//	@param ctx 请使用调用链中已存在的Context传入,请勿自行生成
+//	@param task
+//	@return T
+//	@return error
 func Await[T any](ctx context.Context, task TaskFunT[T]) (T, error) {
 	co := getCoFromCtx(ctx)
 	var zero T
@@ -77,10 +78,11 @@ func Await[T any](ctx context.Context, task TaskFunT[T]) (T, error) {
 }
 
 // AwaitGo [T any] Coroutine.AwaitGo 的泛型包装,所属 Coroutine 从上下文获得
-//  @param ctx 请使用调用链中已存在的Context传入,请勿自行生成
-//  @param task
-//  @return T
-//  @return error
+//
+//	@param ctx 请使用调用链中已存在的Context传入,请勿自行生成
+//	@param task
+//	@return T
+//	@return error
 func AwaitGo[T any](ctx context.Context, task TaskFunT[T]) (T, error) {
 	co := getCoFromCtx(ctx)
 	var zero T
@@ -104,10 +106,11 @@ func AwaitGo[T any](ctx context.Context, task TaskFunT[T]) (T, error) {
 }
 
 // AwaitGoMulti Coroutine.AwaitGoMulti 的包装
-//  @param ctx 请使用调用链中已存在的Context传入,请勿自行生成
-//  @param tasks
-//  @return []*Result
-//  @return error
+//
+//	@param ctx 请使用调用链中已存在的Context传入,请勿自行生成
+//	@param tasks
+//	@return []*Result
+//	@return error
 func AwaitGoMulti(ctx context.Context, tasks ...TaskFun) ([]*Result, error) {
 	co := getCoFromCtx(ctx)
 	// 不支持当前环境内无协程

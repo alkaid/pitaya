@@ -3,8 +3,6 @@ package co
 
 import (
 	"runtime"
-
-	"github.com/topfreegames/pitaya/v2/constants"
 )
 
 const defaultCoBuffers = 100000
@@ -14,35 +12,36 @@ type CoroutineConfig struct {
 	Buffers int
 }
 
-// RegNewGroupWithConfig 创建 cointf.Coroutine 所在线程的分组,并注册到系统
-//  @param id
-//  @param config
-//  @return error
-func RegNewGroupWithConfig(id string, config *CoroutineConfig) ([]*Looper, error) {
-	if holder.Died {
-		return nil, constants.ErrClosedGroup
-	}
-	if _, ok := holder.groups[id]; ok {
-		return nil, constants.ErrGroupAlreadyExists
-	}
-	applyDefault(config)
-	var list []*Looper
-	for i := 0; i < config.Nums; i++ {
-		list = append(list, NewLooper(i, config.Buffers))
-	}
-	holder.groups[id] = list
-	return list, nil
-}
-
-// RegNewGroup 使用默认配置创建 cointf.Coroutine 所在线程的分组,并注册到系统
-//  @param id
-//  @return error
-func RegNewGroup(id string) ([]*Looper, error) {
-	return RegNewGroupWithConfig(id, &CoroutineConfig{})
-}
+// // RegNewGroupWithConfig 创建 cointf.Coroutine 所在线程的分组,并注册到系统
+// //  @param id
+// //  @param config
+// //  @return error
+// func RegNewGroupWithConfig(id string, config *CoroutineConfig) ([]*Looper, error) {
+// 	if holder.Died {
+// 		return nil, constants.ErrClosedGroup
+// 	}
+// 	if _, ok := holder.groups[id]; ok {
+// 		return nil, constants.ErrGroupAlreadyExists
+// 	}
+// 	applyDefault(config)
+// 	var list []*Looper
+// 	for i := 0; i < config.Nums; i++ {
+// 		list = append(list, NewLooper(i, config.Buffers))
+// 	}
+// 	holder.groups[id] = list
+// 	return list, nil
+// }
+//
+// // RegNewGroup 使用默认配置创建 cointf.Coroutine 所在线程的分组,并注册到系统
+// //  @param id
+// //  @return error
+// func RegNewGroup(id string) ([]*Looper, error) {
+// 	return RegNewGroupWithConfig(id, &CoroutineConfig{})
+// }
 
 // applyDefault 默认配置
-//  @param config
+//
+//	@param config
 func applyDefault(config *CoroutineConfig) {
 	if config.Nums <= 0 {
 		config.Nums = runtime.GOMAXPROCS(0)
