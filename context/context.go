@@ -24,6 +24,7 @@ import (
 	"context"
 	"encoding/json"
 
+	"github.com/pkg/errors"
 	"github.com/topfreegames/pitaya/v2/logger"
 
 	"github.com/topfreegames/pitaya/v2/constants"
@@ -62,9 +63,10 @@ func GetFromPropagateCtx(ctx context.Context, key string) any {
 }
 
 // toRaw returns the values that will be propagated through RPC calls in map[string]any format
-//  框架内部使用
-//  @param ctx
-//  @return map[string]any
+//
+//	框架内部使用
+//	@param ctx
+//	@return map[string]any
 func toRaw(ctx context.Context) map[string]any {
 	if ctx == nil {
 		return map[string]any{}
@@ -116,7 +118,7 @@ func Decode(m []byte) (context.Context, error) {
 	mp := make(map[string]any, 0)
 	err := json.Unmarshal(m, &mp)
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	return FromMap(mp), nil
 }

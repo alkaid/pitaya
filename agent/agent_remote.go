@@ -26,6 +26,7 @@ import (
 	"net/netip"
 	"reflect"
 
+	"github.com/pkg/errors"
 	"go.uber.org/zap"
 
 	"github.com/topfreegames/pitaya/v2/cluster"
@@ -96,7 +97,7 @@ func NewRemote(
 // Kick kicks the user
 func (a *Remote) Kick(ctx context.Context, reason ...session.CloseReason) error {
 	if a.Session.UID() == "" {
-		return constants.ErrNoUIDBind
+		return errors.WithStack(constants.ErrNoUIDBind)
 	}
 	rea := 0
 	if len(reason) > 0 {
@@ -109,7 +110,7 @@ func (a *Remote) Kick(ctx context.Context, reason ...session.CloseReason) error 
 		Reason: int32(rea),
 	})
 	if err != nil {
-		return err
+		return errors.WithStack(err)
 	}
 	_, err = a.SendRequest(ctx, a.frontendID, constants.KickRoute, b)
 	return err

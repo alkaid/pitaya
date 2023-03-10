@@ -22,7 +22,6 @@ package util
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -30,6 +29,7 @@ import (
 	"strconv"
 
 	"github.com/alkaid/goerrors/apierrors"
+	"github.com/pkg/errors"
 
 	"go.uber.org/zap"
 
@@ -134,7 +134,7 @@ func SerializeOrRaw(serializer serialize.Serializer, v interface{}) ([]byte, err
 	}
 	data, err := serializer.Marshal(v)
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	return data, nil
 }
@@ -154,7 +154,7 @@ func GetErrorFromPayload(serializer serialize.Serializer, payload []byte) error 
 	case *protobuf.Serializer:
 		pErr := &apierrors.Status{}
 		_ = serializer.Unmarshal(payload, pErr)
-		err = apierrors.FromStatus(pErr)
+		err = apierrors.FromStatusWithoutStack(pErr)
 	}
 	return err
 }
@@ -218,7 +218,7 @@ func GetContextFromRequest(req *protos.Request, serverID string) (context.Contex
 		return nil, err
 	}
 	if ctx == nil {
-		return nil, constants.ErrNoContextFound
+		return nil, errors.WithStack(constants.ErrNoContextFound)
 	}
 	ctx = CtxWithDefaultLogger(ctx, req.GetMsg().GetRoute(), "")
 	return ctx, nil

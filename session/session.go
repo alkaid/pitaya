@@ -515,7 +515,7 @@ func (pool *sessionPoolImpl) DecodeSessionData(encodedData []byte) (map[string]i
 	var data map[string]interface{}
 	err := json.Unmarshal(encodedData, &data)
 	if err != nil {
-		return nil, err
+		return nil, errors.WithStack(err)
 	}
 	return data, nil
 }
@@ -606,7 +606,7 @@ func (s *sessionImpl) updateEncodedData() error {
 	var b []byte
 	b, err := s.pool.EncodeSessionData(s.data)
 	if err != nil {
-		return err
+		return errors.WithStack(err)
 	}
 	s.encodedData = b
 	return nil
@@ -764,14 +764,14 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, callback map[string]
 		err = cb(ctx, s, callback)
 		if err != nil {
 			s.uid = ""
-			return errors.WithStack(err)
+			return err
 		}
 	}
 	for _, cb := range s.pool.afterBindCallbacks {
 		err = cb(ctx, s, callback)
 		if err != nil {
 			s.uid = ""
-			return errors.WithStack(err)
+			return err
 		}
 	}
 
@@ -786,13 +786,13 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, callback map[string]
 		if err != nil {
 			logger.Zap.Error("error while trying to push session to front", zap.Error(err))
 			s.uid = ""
-			return errors.WithStack(err)
+			return err
 		}
 
 		// 绑定成功 同步数据到当前session 否则后续从context中获取的session拿不到boundData数据
 		err = s.ObtainFromCluster()
 		if err != nil {
-			return errors.WithStack(err)
+			return err
 		}
 	}
 
@@ -1242,7 +1242,7 @@ func (s *sessionImpl) bindInFront(ctx context.Context, callback map[string]strin
 	}
 	b, err := proto.Marshal(bindMsg)
 	if err != nil {
-		return err
+		return errors.WithStack(err)
 	}
 	res, err := s.entity.SendRequest(ctx, s.frontendID, constants.SessionBindRoute, b)
 	if err != nil {
@@ -1383,7 +1383,7 @@ func (s *sessionImpl) getSessionStorageKey() string {
 //	@return error
 func (s *sessionImpl) Flush2Cluster() error {
 	if "" == s.uid {
-		return constants.ErrIllegalUID
+		return errors.WithStack(constants.ErrIllegalUID)
 	}
 	// TODO GetDataEncoded 内部没有处理错误,本应修正,但是其他地方有引用 暂不改动这里后续考虑优化
 	data := s.GetDataEncoded()

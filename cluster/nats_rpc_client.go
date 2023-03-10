@@ -317,7 +317,7 @@ func (ns *NatsRPCClient) Call(
 	}
 
 	if res.Status != nil {
-		return nil, apierrors.FromStatus(res.Status).WithStack()
+		return nil, apierrors.FromStatus(res.Status)
 	}
 	return res, nil
 }

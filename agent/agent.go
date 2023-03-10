@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/pkg/errors"
 	"github.com/topfreegames/pitaya/v2/acceptor"
 	"go.uber.org/zap"
 
@@ -424,10 +425,10 @@ func (a *agentImpl) Kick(ctx context.Context, reason ...session.CloseReason) err
 	binary.BigEndian.PutUint32(bs, uint32(kickReason))
 	p, err := a.encoder.Encode(packet.Kick, bs)
 	if err != nil {
-		return err
+		return errors.WithStack(err)
 	}
 	_, err = a.conn.Write(p)
-	return err
+	return errors.WithStack(err)
 }
 
 // SetLastAt sets the last at to now

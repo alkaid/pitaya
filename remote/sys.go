@@ -23,6 +23,7 @@ package remote
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"github.com/pkg/errors"
 
@@ -315,7 +316,7 @@ func (s *Sys) BindSession(ctx context.Context, bindMsg *protos.BindMsg) (*protos
 	// func (s *Sys) BindSession(ctx context.Context, sessionData *protos.Session) (*protos.Response, error) {
 	sess := s.sessionPool.GetSessionByID(bindMsg.Sid)
 	if sess == nil {
-		return nil, constants.ErrSessionNotFound
+		return nil, protos.ErrSessionNotFound().WithMetadata(map[string]string{"uid": bindMsg.Uid, "sid": strconv.Itoa(int(bindMsg.Sid)), "fid": bindMsg.Fid}).WithStack()
 	}
 	if err := sess.Bind(ctx, bindMsg.Uid, bindMsg.Metadata); err != nil {
 		return nil, err
@@ -335,7 +336,7 @@ func (s *Sys) PushSession(ctx context.Context, sessionData *protos.Session) (*pr
 	sess := s.sessionPool.GetSessionByID(sessionData.Id)
 	if sess == nil {
 		// return nil, constants.ErrSessionNotFound
-		return nil, protos.ErrSessionNotFound()
+		return nil, protos.ErrSessionNotFound().WithMetadata(map[string]string{"uid": sessionData.Uid, "sid": strconv.Itoa(int(sessionData.Id))}).WithStack()
 	}
 	if err := sess.SetDataEncoded(sessionData.Data); err != nil {
 		return nil, err
@@ -358,7 +359,7 @@ func (s *Sys) Kick(ctx context.Context, msg *protos.KickMsg) (*protos.KickAnswer
 	}
 	sess := s.sessionPool.GetSessionByUID(msg.GetUserId())
 	if sess == nil {
-		return res, constants.ErrSessionNotFound
+		return res, protos.ErrSessionNotFound().WithMetadata(map[string]string{"uid": msg.UserId, "reason": strconv.Itoa(int(msg.Reason))}).WithStack()
 	}
 	err := sess.Kick(ctx, msg.Metadata, session.CloseReason(msg.Reason))
 	if err != nil {
@@ -391,9 +392,9 @@ func (s *Sys) BindBackendSession(ctx context.Context, msg *protos.BindBackendMsg
 		sess = s.getSessionFromCtx(ctx)
 		var err error
 		if sess == nil {
-			err = fmt.Errorf("%w,session is nil", constants.ErrSessionNotFound)
+			err = protos.ErrSessionNotFound().WithMessage("session is nil on bind backend").WithMetadata(map[string]string{"uid": msg.Uid, "bid": msg.Bid, "btype": msg.Btype}).WithStack()
 		} else if sess.UID() != msg.Uid {
-			err = fmt.Errorf("%w,session uid not equl target uid,sessUid=%s,msgUid=%s", constants.ErrSessionNotFound, sess.UID(), msg.Uid)
+			err = protos.ErrSessionNotFound().WithMessage("session uid not equl target uid on ").WithMetadata(map[string]string{"uid": msg.Uid, "sessUid": sess.UID(), "bid": msg.Bid, "btype": msg.Btype}).WithStack()
 		}
 		if err != nil {
 			logger.Zap.Error("", zap.Error(err))
