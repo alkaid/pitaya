@@ -21,10 +21,8 @@
 package pitaya
 
 import (
-	"github.com/topfreegames/pitaya/v2/cluster"
 	"github.com/topfreegames/pitaya/v2/component"
 	"github.com/topfreegames/pitaya/v2/logger"
-	"github.com/topfreegames/pitaya/v2/route"
 	"go.uber.org/zap"
 )
 
@@ -45,13 +43,7 @@ func (app *App) RegisterRemote(c component.Component, options ...component.Optio
 
 // RegisterSubscribe register a remote component with options
 func (app *App) RegisterSubscribe(c component.Component, options ...component.Option) {
-	// 订阅的service名默认为publish
-	r, err := route.Decode(cluster.GetPublishTopic("nothing"))
-	if err != nil {
-		logger.Zap.Error("", zap.Error(err))
-		return
-	}
-	options = append(options, component.WithName(r.Service))
+	options = append(options, component.WithSubscriber())
 	app.remoteComp = append(app.remoteComp, regComp{c, options})
 }
 
@@ -66,13 +58,7 @@ func (app *App) LazyRegisterRemote(c component.Component, options ...component.O
 	}
 }
 func (app *App) LazyRegisterSubscribe(c component.Component, options ...component.Option) {
-	// 订阅的service名默认为publish
-	r, err := route.Decode(cluster.GetPublishTopic("nothing"))
-	if err != nil {
-		logger.Zap.Error("", zap.Error(err))
-		return
-	}
-	options = append(options, component.WithName(r.Service))
+	options = append(options, component.WithSubscriber())
 	if err := app.remoteService.Register(c, options); err != nil {
 		logger.Zap.Error("Failed to lazy register remote", zap.Error(err))
 	}
@@ -118,7 +104,7 @@ func (app *App) startupComponents() {
 			logger.Zap.Warn("registered a remote component but remoteService is not running! skipping...")
 		} else {
 			if err := app.remoteService.Register(c.comp, c.opts); err != nil {
-				logger.Zap.Warn("Failed to register remote", zap.Error(err))
+				logger.Zap.Error("Failed to register remote", zap.Error(err))
 			}
 		}
 	}

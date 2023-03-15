@@ -276,19 +276,30 @@ type Pitaya interface {
 	//  @param options
 	RegisterRemote(c component.Component, options ...component.Option)
 	// RegisterSubscribe 注册subscribe(publish的远端响应)
-	//  @Description:
+	//
+	// 若要使用消费组,请使用 component.WithSubscriberGroup
+	//
+	// 不同subscriber之间的方法名不能重名
 	//  @param c
 	//  @param options
 	//
 	RegisterSubscribe(c component.Component, options ...component.Option)
-	// // LazyRegister 延迟注册handle(终端api响应)
-	// //  @param c 注意系统不会回调该component的生命周期函数
-	// //  @param options
-	// LazyRegister(c component.Component, options ...component.Option)
-	// // LazyRegisterRemote  延迟注册remote(远端rpc响应)
-	// //  @param c 注意系统不会回调该component的生命周期函数
-	// //  @param options
-	// LazyRegisterRemote(c component.Component, options ...component.Option)
+	// LazyRegisterSubscribe 注册subscribe(publish的远端响应) 意系统不会回调该component的生命周期函数
+	//
+	// 若要使用消费组,请使用 component.WithSubscriberGroup
+	//
+	// 不同subscriber之间的方法名不能相同
+	//  @param c
+	//  @param options
+	LazyRegisterSubscribe(c component.Component, options ...component.Option)
+	// LazyRegister 延迟注册handle(终端api响应)
+	//  @param c 注意系统不会回调该component的生命周期函数
+	//  @param options
+	LazyRegister(c component.Component, options ...component.Option)
+	// LazyRegisterRemote  延迟注册remote(远端rpc响应)
+	//  @param c 注意系统不会回调该component的生命周期函数
+	//  @param options
+	LazyRegisterRemote(c component.Component, options ...component.Option)
 
 	// RegisterInterceptor 注册handle的拦截器,注册后原hande的消息响应将不再分发给handle
 	//  @param serviceName

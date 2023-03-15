@@ -25,6 +25,13 @@ func configureBackend() {
 		component.WithName("room"),
 		component.WithNameFunc(strings.ToLower),
 	)
+	app.RegisterSubscribe(room,
+		component.WithName("room"),
+	)
+	app.RegisterSubscribe(room,
+		component.WithName("roomqueue"),
+		component.WithSubscriberGroup("room"),
+	)
 }
 
 func configureFrontend(port int) {

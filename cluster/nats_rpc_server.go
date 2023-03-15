@@ -22,7 +22,6 @@ package cluster
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"hash/crc32"
 	"math"
@@ -30,8 +29,8 @@ import (
 	"time"
 
 	"github.com/alkaid/goerrors/apierrors"
-
 	nats "github.com/nats-io/nats.go"
+	"github.com/pkg/errors"
 	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/constants"
@@ -43,6 +42,8 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )
+
+var ErrAlreadySubscribed = errors.New("already subscribed")
 
 // NatsRPCServer struct
 type NatsRPCServer struct {
@@ -63,7 +64,9 @@ type NatsRPCServer struct {
 	userPushCh             chan *protos.Push
 	userKickCh             chan *protos.KickMsg
 	sub                    *nats.Subscription
-	broadcastSubs          []*nats.Subscription // 广播订阅
+	broadcastSubs          []*nats.Subscription          // 广播订阅
+	publishSubs            map[string]*nats.Subscription // publish订阅:topic->sub
+	preparePubSubTopics    map[string]string             // publish预备订阅:topic->group
 	dropped                int
 	pitayaServer           protos.PitayaServer
 	metricsReporters       []metrics.Reporter
@@ -80,15 +83,17 @@ func NewNatsRPCServer(
 	sessionPool session.SessionPool,
 ) (*NatsRPCServer, error) {
 	ns := &NatsRPCServer{
-		server:            server,
-		stopChan:          make(chan bool),
-		unhandledReqCh:    make(chan *protos.Request),
-		dropped:           0,
-		metricsReporters:  metricsReporters,
-		appDieChan:        appDieChan,
-		connectionTimeout: nats.DefaultTimeout,
-		sessionPool:       sessionPool,
-		broadcastSubs:     make([]*nats.Subscription, 0),
+		server:              server,
+		stopChan:            make(chan bool),
+		unhandledReqCh:      make(chan *protos.Request),
+		dropped:             0,
+		metricsReporters:    metricsReporters,
+		appDieChan:          appDieChan,
+		connectionTimeout:   nats.DefaultTimeout,
+		sessionPool:         sessionPool,
+		broadcastSubs:       make([]*nats.Subscription, 0),
+		publishSubs:         map[string]*nats.Subscription{},
+		preparePubSubTopics: map[string]string{},
 	}
 	if err := ns.configure(config); err != nil {
 		return nil, err
@@ -147,8 +152,11 @@ func GetBindBroadcastTopic(svType string) string {
 func GetForkTopic(svrType string) string {
 	return fmt.Sprintf("pitaya.fork.%s", svrType)
 }
+
+const PublishServiceName = "publish"
+
 func GetPublishTopic(topic string) string {
-	return fmt.Sprintf("pitaya.publish.%s", topic)
+	return fmt.Sprintf("pitaya.%s.%s", PublishServiceName, topic)
 }
 
 // onSessionBind should be called on each session bind
@@ -222,8 +230,15 @@ func (ns *NatsRPCServer) handleMessages() {
 				logger.Zap.Error("error getting number of dropped messages", zap.Error(err))
 			}
 			// 添加广播订阅的消息丢失日志和统计
-			for i := 0; i < len(ns.broadcastSubs); i++ {
-				tmpDropped, err := ns.broadcastSubs[i].Dropped()
+			for _, sub := range ns.broadcastSubs {
+				tmpDropped, err := sub.Dropped()
+				if err != nil {
+					logger.Zap.Error("error getting number of dropped messages", zap.Error(err))
+				}
+				dropped += tmpDropped
+			}
+			for _, sub := range ns.publishSubs {
+				tmpDropped, err := sub.Dropped()
 				if err != nil {
 					logger.Zap.Error("error getting number of dropped messages", zap.Error(err))
 				}
@@ -276,7 +291,7 @@ func (ns *NatsRPCServer) marshalResponse(res *protos.Response) ([]byte, error) {
 	}
 
 	if err == nil && res.Status != nil {
-		err = errors.New(res.Status.Message)
+		err = apierrors.FromStatus(res.Status)
 	}
 	return p, err
 }
@@ -391,6 +406,19 @@ func (ns *NatsRPCServer) Init() error {
 		return err
 	}
 	ns.broadcastSubs = append(ns.broadcastSubs, bcstSub)
+	// publish订阅
+	for t, group := range ns.preparePubSubTopics {
+		var sub *nats.Subscription
+		if group == "" {
+			sub, err = ns.conn.ChanSubscribe(t, ns.subChan)
+		} else {
+			sub, err = ns.conn.ChanQueueSubscribe(t, group, ns.subChan)
+		}
+		if err != nil {
+			return errors.WithStack(err)
+		}
+		ns.publishSubs[t] = sub
+	}
 	// topic = GetForkTopic("", false)
 	// queue = NeedQueueSubscribe(ns.server, true, false)
 	// if bcstSub, err = ns.subscribe(topic, queue); err != nil {
@@ -453,12 +481,40 @@ func (ns *NatsRPCServer) subscribe(topic string, queue bool) (*nats.Subscription
 func (ns *NatsRPCServer) stop() {
 }
 
-func (ns *NatsRPCServer) Subscribe(topic string, groups ...string) (*nats.Subscription, error) {
+func (ns *NatsRPCServer) Subscribe(topic string, groups ...string) error {
 	topic = GetPublishTopic(topic)
-	if len(groups) > 0 {
-		return ns.conn.ChanQueueSubscribe(topic, groups[0], ns.subChan)
+	// TODO 线程不安全,若后续真有动态订阅需求再优化
+	sub, ok := ns.publishSubs[topic]
+	if ok {
+		logger.Zap.Warn("", zap.String("topic", topic), zap.Error(ErrAlreadySubscribed))
+		return nil
 	}
-	return ns.conn.ChanSubscribe(topic, ns.subChan)
+	_, ok = ns.preparePubSubTopics[topic]
+	if ok {
+		logger.Zap.Warn("", zap.String("topic", topic), zap.Error(ErrAlreadySubscribed))
+		return nil
+	}
+	var err error
+	group := ""
+	if len(groups) > 0 {
+		group = groups[0]
+	}
+	// 若还未连接则加入预备
+	if ns.conn == nil {
+		ns.preparePubSubTopics[topic] = group
+		return nil
+	}
+	// 已连接直接订阅
+	if group == "" {
+		sub, err = ns.conn.ChanSubscribe(topic, ns.subChan)
+	} else {
+		sub, err = ns.conn.ChanQueueSubscribe(topic, group, ns.subChan)
+	}
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	ns.publishSubs[topic] = sub
+	return nil
 }
 
 func (ns *NatsRPCServer) reportMetrics() {

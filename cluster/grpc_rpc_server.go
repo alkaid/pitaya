@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net"
 
+	"github.com/topfreegames/pitaya/v2/constants"
 	"google.golang.org/grpc"
 
 	"github.com/topfreegames/pitaya/v2/config"
@@ -66,6 +67,9 @@ func (gs *GRPCServer) Init() error {
 // SetPitayaServer sets the pitaya server
 func (gs *GRPCServer) SetPitayaServer(ps protos.PitayaServer) {
 	gs.pitayaServer = ps
+}
+func (gs *GRPCServer) Subscribe(topic string, groups ...string) error {
+	return constants.ErrNotImplemented
 }
 
 // AfterInit runs after initialization

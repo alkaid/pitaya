@@ -36,6 +36,7 @@ import (
 // RPCServer interface
 type RPCServer interface {
 	SetPitayaServer(protos.PitayaServer)
+	Subscribe(topic string, groups ...string) error
 	interfaces.Module
 }
 

@@ -63,6 +63,7 @@ type RemoteService struct {
 	encoder                codec.PacketEncoder
 	rpcClient              cluster.RPCClient
 	services               map[string]*component.Service // all registered service
+	subscribers            map[string]*component.Service
 	router                 *router.Router
 	messageEncoder         message.Encoder
 	server                 *cluster.Server // server obj
@@ -92,6 +93,7 @@ func NewRemoteService(
 ) *RemoteService {
 	remote := &RemoteService{
 		services:               make(map[string]*component.Service),
+		subscribers:            make(map[string]*component.Service),
 		rpcClient:              rpcClient,
 		rpcServer:              rpcServer,
 		encoder:                encoder,
@@ -467,21 +469,38 @@ func (r *RemoteService) Publish(ctx context.Context, topic string, request bool,
 // Register registers components
 func (r *RemoteService) Register(comp component.Component, opts []component.Option) error {
 	s := component.NewService(comp, opts)
+	services := lo.If(s.Options.Subscriber, r.subscribers).Else(r.services)
 
-	if _, ok := r.services[s.Name]; ok {
-		return fmt.Errorf("remote: service already defined: %s", s.Name)
+	if _, ok := services[s.Name]; ok {
+		return errors.WithStack(fmt.Errorf("remote: service already defined: %s", s.Name))
 	}
 
 	if err := s.ExtractRemote(); err != nil {
 		return err
 	}
 
-	r.services[s.Name] = s
+	services[s.Name] = s
 	// register all remotes
-	for name, remote := range s.Remotes {
-		r.remotes[fmt.Sprintf("%s.%s", s.Name, name)] = remote
+	// 注册非订阅者的rpc remote
+	if !s.Options.Subscriber {
+		for name, remote := range s.Remotes {
+			r.remotes[fmt.Sprintf("%s.%s", s.Name, name)] = remote
+		}
+		return nil
 	}
-
+	var groups []string
+	if s.Options.SubscriberGroup != "" {
+		groups = append(groups, s.Options.SubscriberGroup)
+	}
+	// 注册订阅
+	for name, remote := range s.Remotes {
+		// 同一个服务器的不同subscriber之间订阅的topic不能相同
+		r.remotes[fmt.Sprintf("%s.%s", cluster.PublishServiceName, name)] = remote
+		err := r.rpcServer.Subscribe(name, groups...)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

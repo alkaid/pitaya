@@ -26,6 +26,8 @@ type (
 	options struct {
 		name             string                                 // component name
 		nameFunc         func(string) string                    // rename handler name
+		Subscriber       bool                                   // 是否订阅者
+		SubscriberGroup  string                                 // 订阅消费组
 		EnableReactor    bool                                   // 启用单线程reactor模型
 		ReceiverProvider func(ctx context.Context) Component    // 延迟绑定的receiver实例
 		TaskGoProvider   func(ctx context.Context, task func()) // 异步任务派发线程提供者
@@ -50,6 +52,26 @@ func WithNameFunc(fn func(string) string) Option {
 	}
 }
 
+// WithSubscriber 设为订阅者
+//
+//	@param group
+//	@return Option
+func WithSubscriber() Option {
+	return func(opt *options) {
+		opt.Subscriber = true
+	}
+}
+
+// WithSubscriberGroup 订阅消费组
+//
+//	@param group
+//	@return Option
+func WithSubscriberGroup(group string) Option {
+	return func(opt *options) {
+		opt.SubscriberGroup = group
+	}
+}
+
 func WithEnableReactor(enableReactor bool) Option {
 	return func(opt *options) {
 		opt.EnableReactor = enableReactor
@@ -57,8 +79,9 @@ func WithEnableReactor(enableReactor bool) Option {
 }
 
 // WithReceiverProvider 注册延迟动态绑定 receiver 的函数
-//  @param ReceiverProvider
-//  @return Option
+//
+//	@param ReceiverProvider
+//	@return Option
 func WithReceiverProvider(receiverProvider func(ctx context.Context) Component) Option {
 	return func(opt *options) {
 		opt.ReceiverProvider = receiverProvider
@@ -66,8 +89,9 @@ func WithReceiverProvider(receiverProvider func(ctx context.Context) Component) 
 }
 
 // WithTaskGoProvider 注册延迟动态绑定的异步任务派发线程
-//  @param taskGoProvider
-//  @return Option
+//
+//	@param taskGoProvider
+//	@return Option
 func WithTaskGoProvider(taskGoProvider func(ctx context.Context, task func())) Option {
 	return func(opt *options) {
 		opt.TaskGoProvider = taskGoProvider
