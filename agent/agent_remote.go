@@ -67,6 +67,7 @@ func NewRemote(
 	frontendID string,
 	messageEncoder message.Encoder,
 	sessionPool session.SessionPool,
+	rpcType protos.RPCType,
 ) (*Remote, error) {
 	a := &Remote{
 		chDie:            make(chan struct{}),
@@ -80,17 +81,25 @@ func NewRemote(
 	}
 
 	// binding session
-	s := sessionPool.NewSession(a, false, sess.GetUid())
-	// 如果当前服务是网关,则不应该覆盖data,data数据应以网关为准
-	if !serviceDiscovery.GetSelfServer().Frontend {
-		// s.SetFrontendData(frontendID, sess.GetId())  // 功能和SetDataEncoded重复
-		err := s.SetDataEncoded(sess.GetData())
-		if err != nil {
-			return nil, err
-		}
-	}
+	s, isNew := sessionPool.NewSession(a, false, sess.GetUid())
 	a.Session = s
-
+	// 如果当前服务是网关,则不应该覆盖data,data数据应以网关为准。要改变网关数据只能使用session.push
+	selfSv := serviceDiscovery.GetSelfServer()
+	if selfSv.Frontend {
+		return a, nil
+	}
+	// 所有backend要覆盖自定义数据
+	s.SetIP(sess.Ip)
+	err := s.SetDataEncoded(sess.GetData())
+	if err != nil {
+		return nil, err
+	}
+	// 新建的session绑定关系要设置
+	if isNew {
+		s.SetFrontendData(frontendID, sess.GetId())
+		s.SetBackends(sess.Backends)
+	}
+	// 已经存在的session 不能设置绑定关系,由sys.xxx的各种bind kick rpc来设置绑定关系
 	return a, nil
 }
 
@@ -254,5 +263,5 @@ func (a *Remote) SendRequest(ctx context.Context, serverID, reqRoute string, v i
 	if err != nil {
 		return nil, err
 	}
-	return a.rpcClient.Call(ctx, protos.RPCType_User, r, nil, msg, server)
+	return a.rpcClient.Call(ctx, protos.RPCType_User, r, a.Session, msg, server)
 }

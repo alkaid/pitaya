@@ -221,10 +221,16 @@ func newAgent(
 	}
 
 	// binding session
-	s := sessionPool.NewSession(a, true)
+	s, _ := sessionPool.NewSession(a, true)
 	metrics.ReportNumberOfConnectedClients(metricsReporters, sessionPool.GetSessionCount())
 	a.Session = s
 	s.SetFrontendData(serverID, s.ID())
+	ip, err := a.RemoteIP().MarshalText()
+	if err != nil {
+		logger.Zap.Error("marshal ip error", zap.Error(err))
+	} else {
+		s.SetIP(string(ip))
+	}
 	return a
 }
 

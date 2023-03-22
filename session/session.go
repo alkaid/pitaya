@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
+	"github.com/samber/lo"
 	"github.com/topfreegames/pitaya/v2/co"
 
 	"github.com/topfreegames/pitaya/v2/util"
@@ -47,12 +48,13 @@ import (
 )
 
 const (
-	cacheKeyPitayaSession  = "pit:s:%s:" // pitaya session key = pitaya:session:<uid>
+	cacheKeyPitayaSession  = "pit:u:%s:" // pitaya session key = pitaya:session:<uid>
 	fieldKeyFrontendID     = "f"         // frontend id
 	fieldKeyFrontendSessID = "s"         // frontend session id
+	fieldKeyOnline         = "o"         // 是否在线
 	fieldKeyBackends       = "bs"        // backends id list
-	fieldKeyUID            = "u"         // uid
-	fieldKeyIP             = "ip"        // uid
+	fieldKeyIP             = "ip"        // ip
+	fieldKeyData           = "u"         // 用户自定义数据 json存储
 )
 
 type CloseReason = int // 关闭原因
@@ -98,7 +100,7 @@ type sessionPoolImpl struct {
 type SessionPool interface {
 	// NewSession returns a new session instance 或者缓存
 	// a networkentity.NetworkEntity is a low-level network instance
-	NewSession(entity networkentity.NetworkEntity, frontend bool, UID ...string) Session
+	NewSession(entity networkentity.NetworkEntity, frontend bool, UID ...string) (s Session, isNew bool)
 	GetSessionCount() int64
 	GetUserCount() int64
 	GetSessionCloseCallbacks() []OnSessionCloseFunc
@@ -122,15 +124,6 @@ type SessionPool interface {
 	// SetClusterCache 设置后端缓存存储服务
 	//  @param storage
 	SetClusterCache(storage CacheInterface)
-	// ImperfectSessionFromCluster  框架内部使用,请勿调用
-	//  @private pitaya
-	//  @Description:从后端存储的session数据构造出一个不健全的session.
-	//  "不健全"指session的agent仅有少数 networkentity.NetworkEntity 方法
-	//  @receiver pool
-	//  @param uid
-	//  @return Session
-	//  @return error
-	ImperfectSessionFromCluster(uid string, entity networkentity.NetworkEntity) (Session, error)
 	RangeUsers(f func(uid string, sess SessPublic) bool)
 	RangeSessions(f func(sid int64, sess SessPublic) bool)
 }
@@ -157,15 +150,17 @@ type sessionImpl struct {
 	uid               string                      // binding user id
 	lastTime          int64                       // last heartbeat time
 	entity            networkentity.NetworkEntity // low-level network entity
-	data              map[string]interface{}      // session data store
-	boundData         *BoundData                  // session的绑定数据
+	data              map[string]any              // session data store 用户自定义数据
 	handshakeData     *HandshakeData              // handshake data received by the client
 	encodedData       []byte                      // session data encoded as a byte array
 	OnCloseCallbacks  []func()                    // onClose callbacks
 	IsFrontend        bool                        // if session is a frontend session
 	frontendID        string                      // the id of the frontend that owns the session
 	frontendSessionID int64                       // the id of the session on the frontend server
-	remoteIPText      string                      // 远程客户端ip地址
+	online            bool                        // 是否在线,仅cluster session有效
+	backends          map[string]string           // 绑定的backends
+	bsMutex           sync.RWMutex                // backends 的mutex
+	ip                string                      // 远程客户端ip地址
 	Subscriptions     []*nats.Subscription        // subscription created on bind when using nats rpc server  // subscription created on bind when using nats rpc server
 	requestsInFlight  ReqInFlight
 	pool              *sessionPoolImpl
@@ -184,6 +179,9 @@ type SessPublic interface {
 	Push(route string, v interface{}) error
 	ID() int64
 	UID() string
+	// Online 是否在线,用于cluster类型session的在线判断
+	//  @return bool
+	Online() bool
 	// Bind 绑定session到他当前所在的frontend
 	//  @param ctx
 	//  @param uid
@@ -221,8 +219,15 @@ type SessPublic interface {
 	RemoteIP() netip.Addr
 	RemoteIPText() string
 	Remove(key string) error
+	// Set 设置用户自定义数据
+	//  @param key
+	//  @param value
+	//  @return error
 	Set(key string, value interface{}) error
 	HasKey(key string) bool
+	// Get 获取用户自定义数据
+	//  @param key
+	//  @return interface{}
 	Get(key string) interface{}
 	Int(key string) int
 	Int8(key string) int8
@@ -241,9 +246,9 @@ type SessPublic interface {
 	// PushToFront
 	//  推送session数据给网关,网关会同步本地session数据并刷新云端缓存
 	PushToFront(ctx context.Context) error
-	// GetBoundData 获取绑定数据
-	//  @return BoundData
-	GetBoundData() *BoundData
+	// GetBackends 获取绑定的后端backends
+	//  @return map[string]string
+	GetBackends() map[string]string
 	// GetBackendID
 	//  @Description:获取绑定的后端服务id
 	//  @param svrType
@@ -297,6 +302,7 @@ type Session interface {
 	//  @param frontendID
 	//  @param frontendSessionID
 	SetFrontendData(frontendID string, frontendSessionID int64)
+	SetIP(ip string)
 	// Close  框架内部使用,请勿调用.Use Kick instead
 	//  @private pitaya
 	//  @param callback 回调数据,通知其他服务时透传
@@ -305,25 +311,38 @@ type Session interface {
 	Clear()
 	SetHandshakeData(data *HandshakeData)
 	GetHandshakeData() *HandshakeData
+	// SendRequestToFrontend 发送请求到网关,会携带session数据
+	//  @param ctx
+	//  @param route
+	//  @param msg
+	//  @return *protos.Response
+	//  @return error
+	SendRequestToFrontend(ctx context.Context, route string, msg proto.Message) (*protos.Response, error)
 	ClusterStorageKey() string
 	GetClusterStorage() CacheInterface
-	// Flush2Cluster
-	//  @Description: 打包session数据到存储服务
-	//  @receiver s
+	// FlushFrontendData 网关的绑定关系/ip/online写入cache
 	//  @return error
-	Flush2Cluster() error
-	// ObtainFromCluster
-	//  @Description:从存储服务获取并解包session数据
+	FlushFrontendData() error
+	// FlushOnline 是否在线写入cahce 在线1离线0
+	//  @return error
+	FlushOnline() error
+	// FlushBackendData backends绑定数据写入cache
+	//  @return error
+	FlushBackendData() error
+	// FlushUserData 用户自定义数据写入cache
+	//  @return error
+	FlushUserData() error
+	// ObtainFromCluster 从存储服务获取并解包session数据
 	//  @receiver s
 	//  @return error
 	ObtainFromCluster() error
-	// InitialFromCluster
-	//  @Description:从存储服务获取并解包session数据,排除不允许初始化的数据,仅用于bind时调用
+	// InitialFromCluster 从存储服务获取并解包session数据,排除不允许初始化的数据,仅用于bind时调用
 	//  @receiver s
 	//  @return error
 	InitialFromCluster() error
-	SetBackendID(svrType string, id string) error
-	RemoveBackendID(svrType string) error
+	SetBackends(bs map[string]string)
+	SetBackendID(svrType string, id string)
+	RemoveBackendID(svrType string)
 }
 
 type sessionIDService struct {
@@ -344,27 +363,26 @@ func (c *sessionIDService) sessionID() int64 {
 // NewSession
 //
 //	@implement SessionPool.NewSession
-func (pool *sessionPoolImpl) NewSession(entity networkentity.NetworkEntity, frontend bool, UID ...string) Session {
+func (pool *sessionPoolImpl) NewSession(entity networkentity.NetworkEntity, frontend bool, UID ...string) (sess Session, isNew bool) {
 	// stateful类型的backend服务会绑定并缓存session 所以这里有缓存直接取缓存
 	if len(UID) > 0 {
 		sess := pool.GetSessionByUID(UID[0])
 		if sess != nil {
-			return sess
+			return sess, false
 		}
 	}
 	s := &sessionImpl{
 		id:               pool.sessionIDSvc.sessionID(),
 		entity:           entity,
-		data:             make(map[string]interface{}),
+		data:             make(map[string]any),
 		handshakeData:    nil,
 		lastTime:         time.Now().Unix(),
 		OnCloseCallbacks: []func(){},
 		IsFrontend:       frontend,
 		pool:             pool,
 		requestsInFlight: ReqInFlight{m: make(map[string]string)},
-		boundData: &BoundData{
-			Backends: make(map[string]string),
-		},
+		backends:         map[string]string{},
+		online:           true,
 	}
 	// sessionstick 的 backend，在 BindBackend()时保存,这里只处理 frontend
 	if frontend {
@@ -374,7 +392,7 @@ func (pool *sessionPoolImpl) NewSession(entity networkentity.NetworkEntity, fron
 	if len(UID) > 0 {
 		s.uid = UID[0]
 	}
-	return s
+	return s, true
 }
 
 // NewSessionPool returns a new session pool instance
@@ -511,10 +529,10 @@ func (pool *sessionPoolImpl) EncodeSessionData(data map[string]interface{}) ([]b
 }
 
 func (pool *sessionPoolImpl) DecodeSessionData(encodedData []byte) (map[string]interface{}, error) {
-	if len(encodedData) == 0 {
-		return nil, nil
-	}
 	var data map[string]interface{}
+	if len(encodedData) == 0 {
+		return data, nil
+	}
 	err := json.Unmarshal(encodedData, &data)
 	if err != nil {
 		return nil, errors.WithStack(err)
@@ -563,23 +581,6 @@ func (pool *sessionPoolImpl) SetClusterCache(storage CacheInterface) {
 	pool.storage = storage
 }
 
-// ImperfectSessionFromCluster
-//
-//	@implement SessionPool.ImperfectSessionFromCluster
-//	TODO 逻辑移到 agent.Cluster
-func (pool *sessionPoolImpl) ImperfectSessionFromCluster(uid string, entity networkentity.NetworkEntity) (Session, error) {
-	v, err := pool.storage.Get(pool.getSessionStorageKey(uid))
-	if err != nil {
-		return nil, err
-	}
-	s := pool.NewSession(entity, false, uid)
-	err = s.SetDataEncoded([]byte(v))
-	if err != nil {
-		return nil, err
-	}
-	return s, nil
-}
-
 func (pool *sessionPoolImpl) RangeUsers(f func(uid string, sess SessPublic) bool) {
 	pool.sessionsByUID.Range(func(k, v any) bool {
 		return f(k.(string), v.(SessPublic))
@@ -596,15 +597,6 @@ func (pool *sessionPoolImpl) getSessionStorageKey(uid string) string {
 }
 
 func (s *sessionImpl) updateEncodedData() error {
-	s.boundData.UID = s.uid
-	s.boundData.FrontendID = s.frontendID
-	v, ok := s.data[fieldKeyBackends]
-	if !ok {
-		s.boundData.Backends = make(map[string]string)
-	} else {
-		tmp := v.(map[string]interface{})
-		s.boundData.Backends = util.MapStrInter2MapStrStr(tmp)
-	}
 	var b []byte
 	b, err := s.pool.EncodeSessionData(s.data)
 	if err != nil {
@@ -683,32 +675,21 @@ func (s *sessionImpl) GetData() map[string]interface{} {
 	return s.data
 }
 
-// Deprecated: 内部方法请勿调用 由于session数据的redis存储依赖于session.data,故这里不能让上层改变data实例
+// SetData 设置用户自定义数据
+//
+//	@receiver s
+//	@param data
+//	@return error
 func (s *sessionImpl) SetData(data map[string]interface{}) error {
 	s.Lock()
 	defer s.Unlock()
 
 	s.data = data
-	s.frontendID = s.stringUnsafe(fieldKeyFrontendID)
-	s.uid = s.stringUnsafe(fieldKeyUID)
-	tmpId, err := strconv.Atoi(s.stringUnsafe(fieldKeyFrontendSessID))
-	if err != nil {
-		logger.Zap.Warn("", zap.Error(err))
-	}
-	s.frontendSessionID = int64(tmpId)
-	s.remoteIPText = s.stringUnsafe(fieldKeyIP)
 	return s.updateEncodedData()
 }
 
 // GetDataEncoded returns the session data as an encoded value
 func (s *sessionImpl) GetDataEncoded() []byte {
-	s.Lock()
-	defer s.Unlock()
-	// 打包
-	s.data[fieldKeyUID] = s.uid
-	s.data[fieldKeyFrontendID] = s.frontendID
-	s.data[fieldKeyFrontendSessID] = strconv.Itoa(int(s.frontendSessionID))
-	s.updateEncodedData()
 	return s.encodedData
 }
 
@@ -724,31 +705,14 @@ func (s *sessionImpl) SetDataEncoded(encodedData []byte) error {
 	return s.SetData(data)
 }
 
-func (s *sessionImpl) ipFromEntity() string {
-	if s.remoteIPText == "" {
-		ip, err := s.entity.RemoteIP().MarshalText()
-		if err != nil {
-			logger.Zap.Error("marshal ip error", zap.Error(err))
-		}
-		s.remoteIPText = string(ip)
-	}
-	return s.remoteIPText
-}
-
 // SetFrontendData sets frontend id and session id
 func (s *sessionImpl) SetFrontendData(frontendID string, frontendSessionID int64) {
-	s.Lock()
-	defer s.Unlock()
 	s.frontendID = frontendID
 	s.frontendSessionID = frontendSessionID
+}
 
-	s.data[fieldKeyFrontendID] = frontendID
-	s.data[fieldKeyFrontendSessID] = strconv.Itoa(int(s.frontendSessionID))
-	s.data[fieldKeyIP] = s.ipFromEntity()
-	err := s.updateEncodedData()
-	if err != nil {
-		logger.Zap.Error("set frontend data error", zap.Error(err))
-	}
+func (s *sessionImpl) SetIP(ip string) {
+	s.ip = ip
 }
 
 // Bind bind UID to current session
@@ -899,6 +863,7 @@ func (s *sessionImpl) OnClose(c func()) error {
 func (s *sessionImpl) Close(callback map[string]string, reason ...CloseReason) {
 	logger.Zap.Debug("session close", zap.Int64("id", s.ID()), zap.String("uid", s.UID()))
 	atomic.AddInt64(&s.pool.SessionCount, -1)
+	s.online = false
 	s.pool.sessionsByID.Delete(s.ID())
 	// 须校验存的session和要关闭的是否同一个session，相同才清uid-session map中的值。否则互相频繁顶号时会有误删的异步问题
 	oldSession := s.pool.GetSessionByUID(s.UID())
@@ -937,14 +902,14 @@ func (s *sessionImpl) RemoteIPWithoutCache() netip.Addr {
 
 func (s *sessionImpl) RemoteIP() netip.Addr {
 	ip := netip.Addr{}
-	err := ip.UnmarshalText([]byte(s.remoteIPText))
+	err := ip.UnmarshalText([]byte(s.ip))
 	if err != nil {
 		logger.Zap.Error("unmarsha ip error", zap.Error(err))
 	}
 	return ip
 }
 func (s *sessionImpl) RemoteIPText() string {
-	return s.remoteIPText
+	return s.ip
 }
 
 // Remove delete data associated with the key from session storage
@@ -1235,18 +1200,13 @@ func (s *sessionImpl) Value(key string) interface{} {
 }
 
 func (s *sessionImpl) bindInFront(ctx context.Context, callback map[string]string) error {
-	// return s.sendRequestToFront(ctx, constants.SessionBindRoute, false)
 	bindMsg := &protos.BindMsg{
 		Uid:      s.uid,
 		Fid:      s.frontendID,
 		Sid:      s.frontendSessionID,
 		Metadata: callback,
 	}
-	b, err := proto.Marshal(bindMsg)
-	if err != nil {
-		return errors.WithStack(err)
-	}
-	res, err := s.entity.SendRequest(ctx, s.frontendID, constants.SessionBindRoute, b)
+	res, err := s.SendRequestToFrontend(ctx, constants.SessionBindRoute, bindMsg)
 	if err != nil {
 		return err
 	}
@@ -1259,11 +1219,13 @@ func (s *sessionImpl) PushToFront(ctx context.Context) error {
 	if s.IsFrontend {
 		return constants.ErrFrontSessionCantPushToFront
 	}
-	return s.sendRequestToFront(ctx, constants.SessionPushRoute, true)
-}
-
-func (s *sessionImpl) PushToBackend(ctx context.Context) error {
-	return nil
+	// rpcClient.Call虽然会填充session数据,但是frontend接收时不会也不应该把session proto数据覆盖local session,所以这里还是额外传送一份session
+	_, err := s.SendRequestToFrontend(ctx, constants.SessionPushRoute, &protos.Session{
+		Id:   s.frontendSessionID,
+		Uid:  s.uid,
+		Data: s.encodedData,
+	})
+	return err
 }
 
 // Clear releases all data related to current session
@@ -1289,90 +1251,57 @@ func (s *sessionImpl) GetHandshakeData() *HandshakeData {
 	return s.handshakeData
 }
 
-func (s *sessionImpl) sendRequestToFront(ctx context.Context, route string, includeData bool) error {
-	sessionData := &protos.Session{
-		Id:  s.frontendSessionID,
-		Uid: s.uid,
-	}
-	if includeData {
-		sessionData.Data = s.encodedData
-	}
-	b, err := proto.Marshal(sessionData)
-	if err != nil {
-		return errors.WithStack(err)
-	}
-	res, err := s.entity.SendRequest(ctx, s.frontendID, route, b)
-	if err != nil {
-		return err
-	}
-	logger.Log.Debugf("%s Got response: %+v", route, res)
-	return nil
-}
-func (s *sessionImpl) sendRequestToBackend(ctx context.Context, route string, includeData bool, backendID string) error {
-	sessionData := &protos.Session{
-		Id:  s.frontendSessionID,
-		Uid: s.uid,
-	}
-	if includeData {
-		sessionData.Data = s.encodedData
-	}
-	b, err := proto.Marshal(sessionData)
-	if err != nil {
-		return err
-	}
-	res, err := s.entity.SendRequest(ctx, backendID, route, b)
-	if err != nil {
-		return err
-	}
-	logger.Log.Debugf("%s Got response: %+v", route, res)
-	return nil
-}
-
-func (s *sessionImpl) GetBoundData() *BoundData {
-	return s.boundData
-}
-
-// GetBackendID
+// SendRequest 发送数据到指定server,会携带网关数据
 //
-//	@implement Session.GetBackendID
+//	@receiver s
+//	@param ctx
+//	@param serverID
+//	@param route
+//	@param msg
+//	@return *protos.Response
+//	@return error
+func (s *sessionImpl) SendRequest(ctx context.Context, serverID, route string, msg proto.Message) (*protos.Response, error) {
+	b, err := proto.Marshal(msg)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	return s.entity.SendRequest(ctx, serverID, route, b)
+}
+func (s *sessionImpl) SendRequestToFrontend(ctx context.Context, route string, msg proto.Message) (*protos.Response, error) {
+	return s.SendRequest(ctx, s.frontendID, route, msg)
+}
+
+func (s *sessionImpl) GetBackends() map[string]string {
+	bs := map[string]string{}
+	s.bsMutex.RLock()
+	defer s.bsMutex.RUnlock()
+	for k, v := range s.backends {
+		bs[k] = v
+	}
+	return bs
+}
 func (s *sessionImpl) GetBackendID(svrType string) string {
-	s.RLock()
-	defer s.RUnlock()
-	backends, ok := s.data[fieldKeyBackends]
-	if !ok {
-		return ""
-	}
-	bid, ok := backends.(map[string]interface{})[svrType]
-	if !ok {
-		return ""
-	}
-	return bid.(string)
+	s.bsMutex.RLock()
+	defer s.bsMutex.RUnlock()
+	return s.backends[svrType]
 }
-func (s *sessionImpl) SetBackendID(svrType string, id string) error {
-	s.RLock()
-	defer s.RUnlock()
-	var backends map[string]interface{}
-	v, ok := s.data[fieldKeyBackends]
-	if !ok {
-		backends = make(map[string]interface{})
-	} else {
-		backends = v.(map[string]interface{})
-	}
-	backends[svrType] = id
-	s.data[fieldKeyBackends] = backends
-	return s.updateEncodedData()
+func (s *sessionImpl) SetBackends(bs map[string]string) {
+	s.bsMutex.Lock()
+	defer s.bsMutex.Unlock()
+	s.backends = bs
 }
-func (s *sessionImpl) RemoveBackendID(svrType string) error {
-	s.Lock()
-	defer s.Unlock()
-	v, ok := s.data[fieldKeyBackends]
-	var backends map[string]interface{}
-	if !ok {
-		return nil
-	}
-	backends = v.(map[string]interface{})
-	delete(backends, svrType)
-	return s.updateEncodedData()
+func (s *sessionImpl) SetBackendID(svrType string, id string) {
+	s.bsMutex.Lock()
+	defer s.bsMutex.Unlock()
+	s.backends[svrType] = id
+}
+func (s *sessionImpl) RemoveBackendID(svrType string) {
+	s.bsMutex.Lock()
+	defer s.bsMutex.Unlock()
+	delete(s.backends, svrType)
+}
+func (s *sessionImpl) Online() bool {
+	return s.online
 }
 func (s *sessionImpl) ClusterStorageKey() string {
 	if s.uid == "" {
@@ -1385,19 +1314,58 @@ func (s *sessionImpl) GetClusterStorage() CacheInterface {
 	return s.pool.storage
 }
 
-// Flush2Cluster
-//
-//	@Description: 打包session数据到存储服务
-//	@receiver s
-//	@return error
-func (s *sessionImpl) Flush2Cluster() error {
+func (s *sessionImpl) FlushFrontendData() error {
 	if "" == s.uid {
 		return errors.WithStack(constants.ErrIllegalUID)
 	}
-	// TODO GetDataEncoded 内部没有处理错误,本应修正,但是其他地方有引用 暂不改动这里后续考虑优化
-	data := s.GetDataEncoded()
-	// TODO 考虑是否需要redsync锁
-	return s.pool.storage.Set(s.ClusterStorageKey(), string(data))
+	err := s.pool.storage.Hmset(s.ClusterStorageKey(), map[string]string{
+		fieldKeyOnline:         lo.If(s.online, "1").Else("0"),
+		fieldKeyFrontendID:     s.frontendID,
+		fieldKeyFrontendSessID: strconv.FormatInt(s.frontendSessionID, 10),
+		fieldKeyIP:             s.ip,
+	})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+func (s *sessionImpl) FlushOnline() error {
+	if "" == s.uid {
+		return errors.WithStack(constants.ErrIllegalUID)
+	}
+	err := s.pool.storage.Hset(s.ClusterStorageKey(), fieldKeyOnline, lo.If(s.online, "1").Else("0"))
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *sessionImpl) FlushBackendData() error {
+	if "" == s.uid {
+		return errors.WithStack(constants.ErrIllegalUID)
+	}
+	s.bsMutex.RLock()
+	backends, err := json.Marshal(s.backends)
+	s.bsMutex.RUnlock()
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	err = s.pool.storage.Hset(s.ClusterStorageKey(), fieldKeyBackends, string(backends))
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *sessionImpl) FlushUserData() error {
+	if "" == s.uid {
+		return errors.WithStack(constants.ErrIllegalUID)
+	}
+	err := s.pool.storage.Hset(s.ClusterStorageKey(), fieldKeyData, string(s.encodedData))
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 // ObtainFromCluster
@@ -1406,36 +1374,71 @@ func (s *sessionImpl) Flush2Cluster() error {
 //	@receiver s
 //	@return error
 func (s *sessionImpl) ObtainFromCluster() error {
-	v, err := s.pool.storage.Get(s.ClusterStorageKey())
+	cache, err := s.pool.storage.Hgetall(s.ClusterStorageKey())
 	if err != nil {
 		return err
 	}
-	err = s.SetDataEncoded([]byte(v))
-	if err != nil {
-		return err
+	for field, v := range cache {
+		switch field {
+		case fieldKeyFrontendID:
+			s.frontendID = v
+		case fieldKeyFrontendSessID:
+			s.frontendSessionID, err = strconv.ParseInt(v, 10, 64)
+			if err != nil {
+				logger.Zap.Error("parse frontend id error", zap.Error(err))
+			}
+		case fieldKeyBackends:
+			bsData, err := s.pool.DecodeSessionData([]byte(v))
+			if err != nil {
+				return err
+			}
+			s.SetBackends(util.MapStrInter2MapStrStr(bsData))
+		case fieldKeyData:
+			data, err := s.pool.DecodeSessionData([]byte(v))
+			if err != nil {
+				return err
+			}
+			s.data = data
+			err = s.updateEncodedData()
+			if err != nil {
+				return err
+			}
+		case fieldKeyIP:
+			s.ip = v
+		case fieldKeyOnline:
+			s.online = v == "1"
+		}
 	}
 	return nil
 }
+
 func (s *sessionImpl) InitialFromCluster() error {
-	v, err := s.pool.storage.Get(s.ClusterStorageKey())
+	// 仅供bind时使用,仅恢复backend绑定关系和用户自定义数据
+	cache, err := s.pool.storage.Hgetall(s.ClusterStorageKey())
 	if err != nil {
 		return err
 	}
-	encodedData := []byte(v)
-	if len(encodedData) == 0 {
-		return nil
+	for field, v := range cache {
+		switch field {
+		case fieldKeyBackends:
+			bsData, err := s.pool.DecodeSessionData([]byte(v))
+			if err != nil {
+				return err
+			}
+			s.SetBackends(util.MapStrInter2MapStrStr(bsData))
+		case fieldKeyData:
+			data, err := s.pool.DecodeSessionData([]byte(v))
+			if err != nil {
+				return err
+			}
+			s.data = data
+			err = s.updateEncodedData()
+			if err != nil {
+				return err
+			}
+		}
 	}
-	data, err := s.pool.DecodeSessionData(encodedData)
-	if err != nil {
-		return err
-	}
-	s.Lock()
-	defer s.Unlock()
-	data[fieldKeyFrontendID] = s.data[fieldKeyFrontendID]
-	data[fieldKeyFrontendSessID] = s.data[fieldKeyFrontendSessID]
-	data[fieldKeyIP] = s.data[fieldKeyIP]
-	s.data = data
-	return s.updateEncodedData()
+	return nil
 }
 
 // GoBySession 根据session数据决策派发任务线程

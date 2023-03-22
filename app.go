@@ -332,13 +332,6 @@ type Pitaya interface {
 	//  @return error
 	KickBackend(ctx context.Context, uid string, targetServerType string, callback map[string]string) error
 
-	// GetBoundData 获取uid对应session绑定的数据,仅在uid session bound到网关后才有效,因为bound后才会从cluster缓存同步数据给session
-	//  @receiver app
-	//  @param ctx
-	//  @param uid
-	//  @return *session.BoundData
-	//  @return error
-	GetBoundData(ctx context.Context, uid string) (*session.BoundData, error)
 	// GetLocalSessionByUid 获取本地已绑定的session,若没有返回空. 可用于判断uid是否绑定到了该服务器
 	//
 	// @param ctx
@@ -590,21 +583,6 @@ func (app *App) KickBackend(ctx context.Context, uid string, targetServerType st
 		return err
 	}
 	return sess.KickBackend(ctx, targetServerType, callback)
-}
-
-// GetBoundData 获取uid对应session绑定的数据,仅在uid session bound到网关后才有效,因为bound后才会从cluster缓存同步数据给session
-//
-//	@receiver app
-//	@param ctx
-//	@param uid
-//	@return *session.BoundData
-//	@return error
-func (app *App) GetBoundData(ctx context.Context, uid string) (*session.BoundData, error) {
-	sess, err := app.imperfectSessionForRPC(ctx, uid)
-	if err != nil {
-		return nil, err
-	}
-	return sess.GetBoundData(), nil
 }
 
 // GetLocalSessionByUid 获取本地已绑定的session,若没有返回空. 可用于判断uid是否绑定到了该服务器

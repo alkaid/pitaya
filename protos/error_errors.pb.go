@@ -15,11 +15,11 @@ var errForbiddenServerOfSession *apierrors.Error
 var errSessionNotFound *apierrors.Error
 
 func init() {
-	errUnknown = apierrors.New(500, "protos.ErrUnknown", "", PitayaError_ErrUnknown.String())
+	errUnknown = apierrors.New(500, "protos.ErrUnknown", PitayaError_ErrUnknown.String(), "")
 	apierrors.Register(errUnknown)
-	errForbiddenServerOfSession = apierrors.New(403, "protos.ErrForbiddenServerOfSession", "err_pitaya_forbidden_server_of_session", "forbidden this session request the server,because session unbound")
+	errForbiddenServerOfSession = apierrors.New(403, "protos.ErrForbiddenServerOfSession", "forbidden this session request the server,because session unbound", "err_pitaya_forbidden_server_of_session")
 	apierrors.Register(errForbiddenServerOfSession)
-	errSessionNotFound = apierrors.New(400, "protos.ErrSessionNotFound", "err_pitaya_session_not_found", "session not found")
+	errSessionNotFound = apierrors.New(400, "protos.ErrSessionNotFound", "session not found", "err_pitaya_session_not_found")
 	apierrors.Register(errSessionNotFound)
 }
 

@@ -145,11 +145,6 @@ func buildRequest(
 	}
 	if thisServer.Frontend {
 		req.FrontendID = thisServer.ID
-		// 设置frontend信息到 session.data,以保证转发后decode的session.data中有frontend信息
-		// TODO 本来应该在 agentImpl 实例化时设置,实在没有可以传入frontendID的地方
-		if session != nil {
-			session.SetFrontendData(thisServer.ID, session.ID())
-		}
 	}
 
 	switch msg.Type {
@@ -170,9 +165,11 @@ func buildRequest(
 	// 无论是 RPCType_Sys 还是 RPCType_User 只要传入了session就带数据过去
 	if session != nil {
 		req.Session = &protos.Session{
-			Id:   session.ID(),
-			Uid:  session.UID(),
-			Data: session.GetDataEncoded(),
+			Id:       session.GetFrontendSessionID(),
+			Uid:      session.UID(),
+			Data:     session.GetDataEncoded(),
+			Backends: session.GetBackends(),
+			Ip:       session.RemoteIPText(),
 		}
 	}
 	return req, nil

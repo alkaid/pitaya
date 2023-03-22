@@ -65,6 +65,7 @@ func (sys *Sys) Init() {
 			return nil
 		}
 		// 绑定当前frontendID
+		// 剔除旧的session数据,若有
 		var err error
 		oldSession := sys.sessionPool.GetSessionByUID(s.UID())
 		if oldSession != nil {
@@ -73,54 +74,53 @@ func (sys *Sys) Init() {
 				return err
 			}
 		}
-		olddata := s.GetDataEncoded()
-		for i := 0; i < 1; i++ {
-			// 从redis同步backend bind数据到本地
-			err = s.InitialFromCluster()
-			if err != nil {
-				break
-			}
-			// 同步到redis
-			err = s.Flush2Cluster()
-			if err != nil {
-				break
-			}
-			// 通知所有server已经成功绑定
-			var r *route.Route
-			msg := &protos.BindMsg{
-				Uid:      s.UID(),
-				Fid:      sys.server.ID,
-				Sid:      s.ID(),
-				Metadata: callback,
-			}
-			// 广播逻辑从 modules.UniqueSession 移到此处,原广播方法改用新的Fork方法
-			// err = sys.rpcClient.BroadcastSessionBind(s.UID())
-			r, err = route.Decode(sys.server.Type + "." + constants.SessionBoundForkRoute)
-			if err != nil {
-				break
-			}
-			// 通知所有frontend实例
-			err = sys.remote.Fork(ctx, r, msg, s)
-			if err != nil {
-				break
-			}
-			// 通知所有其他服务
-			r, err = route.Decode(constants.SessionBoundRoute)
-			if err != nil {
-				break
-			}
-			err = sys.remote.NotifyAll(ctx, r, sys.server, msg, s)
-		}
+		logW := logger.Zap.With(zap.Int64("sid", s.ID()), zap.String("uid", s.UID()))
+		// 从redis同步backend bind数据到本地
+		err = s.InitialFromCluster()
 		if err != nil {
-			// 回滚
-			// TODO 这里回滚的处理过于粗暴,后期考虑标志出上面的逻辑进行到哪一步了,根据不同的进度做不同的回滚策略,比如如果已经同步到redis，那就要回滚redis
-			s.SetDataEncoded(olddata)
-			s.Flush2Cluster()
-			logW := logger.Zap.With(zap.Int64("sid", s.ID()), zap.String("uid", s.UID()))
 			logW.Error("session binding error", zap.Error(err))
 			return err
 		}
-		return err
+		// 同步到redis
+		err = s.FlushFrontendData()
+		if err != nil {
+			logW.Error("session binding error", zap.Error(err))
+			return err
+		}
+		// 通知所有server已经成功绑定
+		var r *route.Route
+		msg := &protos.BindMsg{
+			Uid:      s.UID(),
+			Fid:      sys.server.ID,
+			Sid:      s.ID(),
+			Metadata: callback,
+		}
+		// 广播逻辑从 modules.UniqueSession 移到此处,原广播方法改用新的Fork方法
+		// err = sys.rpcClient.BroadcastSessionBind(s.UID())
+		r, err = route.Decode(sys.server.Type + "." + constants.SessionBoundForkRoute)
+		if err != nil {
+			// 不可能走到该分支
+			logW.Error("session binding error", zap.Error(err))
+			return err
+		}
+		// 通知所有frontend实例
+		err = sys.remote.Fork(ctx, r, msg, s)
+		if err != nil {
+			logW.Warn("session bind fork error", zap.Error(err))
+			// 非致命异常 继续
+		}
+		// 通知所有其他服务
+		r, err = route.Decode(constants.SessionBoundRoute)
+		if err != nil {
+			logW.Warn("session bind notify error", zap.Error(err))
+			// 非致命异常 继续
+		}
+		err = sys.remote.NotifyAll(ctx, r, sys.server, msg, s)
+		if err != nil {
+			logW.Warn("session bind notify error", zap.Error(err))
+			// 非致命异常 继续
+		}
+		return nil
 	})
 	// 网关本地session关闭回调,通知其他服务器
 	sys.sessionPool.OnSessionClose(func(s session.Session, callback map[string]string, reason session.CloseReason) {
@@ -133,9 +133,14 @@ func (sys *Sys) Init() {
 		if reason == session.CloseReasonKickRebind {
 			return
 		}
-		// 与stateful backend不同,frontend的绑定数据无须清除
-		// 通知所有 server
 		logW := logger.Zap.With(zap.Int64("sid", s.ID()), zap.String("uid", s.UID()))
+		// 与stateful backend不同,frontend的绑定数据无须清除
+		err := s.FlushOnline()
+		if err != nil {
+			logW.Error("", zap.Error(err))
+			return
+		}
+		// 通知所有 server
 		r, err := route.Decode(constants.SessionClosedRoute)
 		if err != nil {
 			logW.Error("session on close error", zap.Error(err))
@@ -182,12 +187,9 @@ func (sys *Sys) Init() {
 		}
 		rollback := func(err error) {
 			// 回滚 清理本地缓存 清理redis
-			err2 := s.RemoveBackendID(serverType)
-			if err2 != nil {
-				logErr(err2)
-			}
+			s.RemoveBackendID(serverType)
 			sys.sessionPool.RemoveSessionLocal(s)
-			err2 = s.Flush2Cluster()
+			err2 := s.FlushBackendData()
 			if err2 != nil {
 				logErr(err2)
 			}
@@ -207,7 +209,7 @@ func (sys *Sys) Init() {
 			return err
 		}
 		// 通知网关同步数据
-		err = s.PushToFront(ctx)
+		_, err = s.SendRequestToFrontend(ctx, constants.SessionBindBackendRoute, msg)
 		if err != nil {
 			// 同步失败(网关狗带或session已经下线) 回滚
 			rollback(err)
@@ -281,12 +283,12 @@ func (sys *Sys) Init() {
 			return nil
 		}
 		// 通知网关同步数据
-		err = s.PushToFront(ctx)
+		_, err = s.SendRequestToFrontend(ctx, constants.KickBackendRoute, msg)
 		if err != nil {
 			// 报错session找不到,说明网关的session已经下线,不管是session找不到还是网关狗带等其他错误都应该忽略该错误并代替网关执行redis清除步骤
 			// if  errors.Is(err, protos.ErrSessionNotFound()) {
 			logW.Warn("the session may be closed or frontend is down. ignore the error then clean cluster's cache", zap.Error(err))
-			err = s.Flush2Cluster()
+			err = s.FlushBackendData()
 			if err != nil {
 				return err
 			}
@@ -329,19 +331,22 @@ func (s *Sys) BindSession(ctx context.Context, bindMsg *protos.BindMsg) (*protos
 //	@see constants.SessionPushRoute
 //	@receiver s
 //	@param ctx
-//	@param sessionData
+//	@param sessionData 废弃,使用context session
 //	@return *protos.Response
 //	@return error
 func (s *Sys) PushSession(ctx context.Context, sessionData *protos.Session) (*protos.Response, error) {
 	sess := s.sessionPool.GetSessionByID(sessionData.Id)
 	if sess == nil {
-		// return nil, constants.ErrSessionNotFound
 		return nil, protos.ErrSessionNotFound().WithMetadata(map[string]string{"uid": sessionData.Uid, "sid": strconv.Itoa(int(sessionData.Id))}).WithStack()
+	}
+	if sess.UID() != sessionData.Uid {
+		// 不应该到该分支,到这说明有bug
+		return nil, fmt.Errorf("uid not equal.src=%d,dest=%d", sess.UID(), sessionData.Uid)
 	}
 	if err := sess.SetDataEncoded(sessionData.Data); err != nil {
 		return nil, err
 	}
-	err := sess.Flush2Cluster()
+	err := sess.FlushUserData()
 	if err != nil {
 		return nil, err
 	}
@@ -378,9 +383,18 @@ func (s *Sys) Kick(ctx context.Context, msg *protos.KickMsg) (*protos.KickAnswer
 //	@return *protos.Response
 //	@return error
 func (s *Sys) BindBackendSession(ctx context.Context, msg *protos.BindBackendMsg) (*protos.Response, error) {
-	// 不能是网关收到
+	// 若是网关收到 说明是同步数据的请求
 	if s.server.Frontend {
-		return nil, constants.ErrDeveloperLogicFatal
+		sess := s.sessionPool.GetSessionByUID(msg.Uid)
+		if sess == nil {
+			return nil, protos.ErrSessionNotFound().WithMessage("session is nil on bind backend push to frontend").WithMetadata(map[string]string{"uid": msg.Uid, "bid": msg.Bid, "btype": msg.Btype}).WithStack()
+		}
+		sess.SetBackendID(msg.Btype, msg.Bid)
+		err := sess.FlushBackendData()
+		if err != nil {
+			return nil, err
+		}
+		return &protos.Response{}, nil
 	}
 	// 当前服不是目标服 报错
 	if msg.Btype != s.server.Type || msg.Bid != s.server.ID {
@@ -417,9 +431,18 @@ func (s *Sys) BindBackendSession(ctx context.Context, msg *protos.BindBackendMsg
 //	@return *protos.Response
 //	@return error
 func (s *Sys) KickBackend(ctx context.Context, msg *protos.BindBackendMsg) (*protos.Response, error) {
-	// 不能是网关收到
+	// 若是网关收到 说明是同步数据的请求
 	if s.server.Frontend {
-		return nil, constants.ErrDeveloperLogicFatal
+		sess := s.sessionPool.GetSessionByUID(msg.Uid)
+		if sess == nil {
+			return nil, protos.ErrSessionNotFound().WithMessage("session is nil on bind backend push to frontend").WithMetadata(map[string]string{"uid": msg.Uid, "bid": msg.Bid, "btype": msg.Btype}).WithStack()
+		}
+		sess.RemoveBackendID(msg.Btype)
+		err := sess.FlushBackendData()
+		if err != nil {
+			return nil, err
+		}
+		return &protos.Response{}, nil
 	}
 	// 当前服不是目标服 报错
 	if msg.Btype != s.server.Type || msg.Bid != s.server.ID {
@@ -494,7 +517,21 @@ func (s *Sys) SessionBoundBackendFork(ctx context.Context, msg *protos.BindBacke
 	}
 	return &protos.Response{Data: []byte("ack")}, nil
 }
+
+// SessionBoundBackend 所有服务收到backend已绑定通知
+//
+//	@receiver s
+//	@param ctx
+//	@param msg
+//	@return *protos.Response
+//	@return error
 func (s *Sys) SessionBoundBackend(ctx context.Context, msg *protos.BindBackendMsg) (*protos.Response, error) {
+	if !s.server.Frontend {
+		sess := s.sessionPool.GetSessionByUID(msg.Uid)
+		if sess != nil {
+			sess.SetBackendID(msg.Btype, msg.Bid)
+		}
+	}
 	for _, r := range s.remote.GetRemoteSessionListener() {
 		co.GoByUID(msg.Uid, func() {
 			r.OnUserBoundBackend(ctx, msg.Uid, msg.Btype, msg.Bid, msg.Metadata)
@@ -503,7 +540,21 @@ func (s *Sys) SessionBoundBackend(ctx context.Context, msg *protos.BindBackendMs
 	return &protos.Response{Data: []byte("ack")}, nil
 
 }
+
+// SessionKickedBackend 所有服务收到backend已解绑通知
+//
+//	@receiver s
+//	@param ctx
+//	@param msg
+//	@return *protos.Response
+//	@return error
 func (s *Sys) SessionKickedBackend(ctx context.Context, msg *protos.BindBackendMsg) (*protos.Response, error) {
+	if !s.server.Frontend {
+		sess := s.sessionPool.GetSessionByUID(msg.Uid)
+		if sess != nil {
+			sess.RemoveBackendID(msg.Btype)
+		}
+	}
 	for _, r := range s.remote.GetRemoteSessionListener() {
 		co.GoByUID(msg.Uid, func() {
 			r.OnUserUnboundBackend(ctx, msg.Uid, msg.Btype, msg.Bid, msg.Metadata)

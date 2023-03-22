@@ -42,7 +42,9 @@ func NewCluster(
 		rpcClient:        rpcClient,
 		serviceDiscovery: serviceDiscovery,
 	}
-	s, err := sessionPool.ImperfectSessionFromCluster(uid, a)
+	s, _ := sessionPool.NewSession(a, false, uid)
+	// cluster类型session的数据来源为云端缓存
+	err := s.ObtainFromCluster()
 	if err != nil {
 		return nil, err
 	}
@@ -102,5 +104,5 @@ func (a *Cluster) SendRequest(ctx context.Context, serverID, reqRoute string, v 
 	if err != nil {
 		return nil, err
 	}
-	return a.rpcClient.Call(ctx, protos.RPCType_User, r, nil, msg, server)
+	return a.rpcClient.Call(ctx, protos.RPCType_User, r, a.Session, msg, server)
 }

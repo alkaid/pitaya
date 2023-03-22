@@ -565,6 +565,7 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 				req.FrontendID,
 				r.messageEncoder,
 				r.sessionPool,
+				req.Type,
 			)
 			if err != nil {
 				logger.Log.Warn("pitaya/handler: cannot instantiate remote agent")
@@ -665,6 +666,7 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 			req.FrontendID,
 			r.messageEncoder,
 			r.sessionPool,
+			req.Type,
 		)
 		if err != nil {
 			logger.Log.Warn("pitaya/handler: cannot instantiate remote agent")
@@ -787,6 +789,7 @@ func (r *RemoteService) handleRPCSys(ctx context.Context, req *protos.Request, r
 		req.FrontendID,
 		r.messageEncoder,
 		r.sessionPool,
+		req.Type,
 	)
 	if err != nil {
 		logger.Log.Warn("pitaya/handler: cannot instantiate remote agent")
