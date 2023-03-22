@@ -104,5 +104,5 @@ func (a *Cluster) SendRequest(ctx context.Context, serverID, reqRoute string, v 
 	if err != nil {
 		return nil, err
 	}
-	return a.rpcClient.Call(ctx, protos.RPCType_User, r, a.Session, msg, server)
+	return a.rpcClient.Call(ctx, protos.RPCType_User, r, nil, msg, server)
 }

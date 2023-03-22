@@ -263,5 +263,5 @@ func (a *Remote) SendRequest(ctx context.Context, serverID, reqRoute string, v i
 	if err != nil {
 		return nil, err
 	}
-	return a.rpcClient.Call(ctx, protos.RPCType_User, r, a.Session, msg, server)
+	return a.rpcClient.Call(ctx, protos.RPCType_User, r, nil, msg, server)
 }
