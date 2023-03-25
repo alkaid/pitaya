@@ -89,11 +89,13 @@ type sessionPoolImpl struct {
 	sessionsByID          sync.Map
 	sessionIDSvc          *sessionIDService
 	// SessionCount keeps the current number of sessions
-	SessionCount         int64
-	UserCount            int64
-	storage              CacheInterface
-	bindBackendCallbacks []OnSessionBindBackendFunc
-	kickBackendCallbacks []OnSessionKickBackendFunc
+	SessionCount              int64
+	UserCount                 int64
+	storage                   CacheInterface
+	bindBackendCallbacks      []OnSessionBindBackendFunc
+	kickBackendCallbacks      []OnSessionKickBackendFunc
+	afterBindBackendCallbacks []OnSessionBindBackendFunc
+	afterKickBackendCallbacks []OnSessionKickBackendFunc
 }
 
 // SessionPool centralizes all sessions within a Pitaya app
@@ -111,6 +113,8 @@ type SessionPool interface {
 	OnSessionClose(f OnSessionCloseFunc)
 	OnBindBackend(f OnSessionBindBackendFunc)
 	OnKickBackend(f OnSessionKickBackendFunc)
+	OnAfterBindBackend(f OnSessionBindBackendFunc)
+	OnAfterKickBackend(f OnSessionKickBackendFunc)
 	CloseAll()
 	EncodeSessionData(data map[string]interface{}) ([]byte, error)
 	DecodeSessionData(encodedData []byte) (map[string]interface{}, error)
@@ -398,12 +402,14 @@ func (pool *sessionPoolImpl) NewSession(entity networkentity.NetworkEntity, fron
 // NewSessionPool returns a new session pool instance
 func NewSessionPool() SessionPool {
 	return &sessionPoolImpl{
-		sessionBindCallbacks:  make([]OnSessionBindFunc, 0),
-		afterBindCallbacks:    make([]OnSessionBindFunc, 0),
-		SessionCloseCallbacks: make([]OnSessionCloseFunc, 0),
-		sessionIDSvc:          newSessionIDService(),
-		bindBackendCallbacks:  make([]OnSessionBindBackendFunc, 0),
-		kickBackendCallbacks:  make([]OnSessionKickBackendFunc, 0),
+		sessionBindCallbacks:      make([]OnSessionBindFunc, 0),
+		afterBindCallbacks:        make([]OnSessionBindFunc, 0),
+		SessionCloseCallbacks:     make([]OnSessionCloseFunc, 0),
+		sessionIDSvc:              newSessionIDService(),
+		bindBackendCallbacks:      make([]OnSessionBindBackendFunc, 0),
+		kickBackendCallbacks:      make([]OnSessionKickBackendFunc, 0),
+		afterBindBackendCallbacks: make([]OnSessionBindBackendFunc, 0),
+		afterKickBackendCallbacks: make([]OnSessionKickBackendFunc, 0),
 	}
 }
 
@@ -460,6 +466,17 @@ func (pool *sessionPoolImpl) OnBindBackend(f OnSessionBindBackendFunc) {
 	}
 	pool.bindBackendCallbacks = append(pool.bindBackendCallbacks, f)
 }
+func (pool *sessionPoolImpl) OnAfterBindBackend(f OnSessionBindBackendFunc) {
+	// Prevents the same function to be added twice in onSessionBind
+	sf1 := reflect.ValueOf(f)
+	for _, fun := range pool.afterBindBackendCallbacks {
+		sf2 := reflect.ValueOf(fun)
+		if sf1.Pointer() == sf2.Pointer() {
+			return
+		}
+	}
+	pool.afterBindBackendCallbacks = append(pool.afterBindBackendCallbacks, f)
+}
 func (pool *sessionPoolImpl) OnKickBackend(f OnSessionKickBackendFunc) {
 	// Prevents the same function to be added twice in onSessionBind
 	sf1 := reflect.ValueOf(f)
@@ -470,6 +487,17 @@ func (pool *sessionPoolImpl) OnKickBackend(f OnSessionKickBackendFunc) {
 		}
 	}
 	pool.kickBackendCallbacks = append(pool.kickBackendCallbacks, f)
+}
+func (pool *sessionPoolImpl) OnAfterKickBackend(f OnSessionKickBackendFunc) {
+	// Prevents the same function to be added twice in onSessionBind
+	sf1 := reflect.ValueOf(f)
+	for _, fun := range pool.afterKickBackendCallbacks {
+		sf2 := reflect.ValueOf(fun)
+		if sf1.Pointer() == sf2.Pointer() {
+			return
+		}
+	}
+	pool.afterKickBackendCallbacks = append(pool.afterKickBackendCallbacks, f)
 }
 
 // OnAfterSessionBind adds a method to be called when session is bound and after all sessionBind callbacks
@@ -795,6 +823,12 @@ func (s *sessionImpl) BindBackend(ctx context.Context, targetServerType string, 
 		s.RemoveBackendID(targetServerType)
 		return err
 	}
+	for _, cb := range s.pool.afterBindBackendCallbacks {
+		err = cb(ctx, s, targetServerType, targetServerID, callback)
+		if err != nil {
+			break
+		}
+	}
 	return nil
 }
 
@@ -804,10 +838,9 @@ func (s *sessionImpl) Kick(ctx context.Context, callback map[string]string, reas
 	if err != nil {
 		return err
 	}
-	// TODO 这里理应调用session.close(),不知道为什么原来是这样，测试时注意下是否有问题
-	// return s.entity.Close(callback, reason...)
-	s.Close(callback, reason...)
-	return nil
+	s.online = false
+	// 不能调用s.Close(),因为s.entity.Close()后handler.go的Handle()的defer里自然会session.close().会导致重复调用
+	return s.entity.Close(callback, reason...)
 }
 
 // KickBackend
@@ -844,6 +877,13 @@ func (s *sessionImpl) KickBackend(ctx context.Context, targetServerType string, 
 		// 回滚
 		s.SetBackendID(targetServerType, backendID)
 		return err
+	}
+	for _, cb := range s.pool.afterKickBackendCallbacks {
+		err := cb(ctx, s, targetServerType, backendID, callback, rea)
+		if err != nil {
+			s.uid = ""
+			return err
+		}
 	}
 	return nil
 }
@@ -889,6 +929,7 @@ func (s *sessionImpl) Close(callback map[string]string, reason ...CloseReason) {
 			}
 		}
 	}
+	// 不能返回error,因为这里可能是kick后重复调用了entity.Close
 	s.entity.Close(callback, reason...)
 }
 

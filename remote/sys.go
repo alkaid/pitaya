@@ -135,10 +135,12 @@ func (sys *Sys) Init() {
 		}
 		logW := logger.Zap.With(zap.Int64("sid", s.ID()), zap.String("uid", s.UID()))
 		// 与stateful backend不同,frontend的绑定数据无须清除
-		err := s.FlushOnline()
-		if err != nil {
-			logW.Error("", zap.Error(err))
-			return
+		if s.UID() != "" {
+			err := s.FlushOnline()
+			if err != nil {
+				logW.Error("session on close error", zap.Error(err))
+				return
+			}
 		}
 		// 通知所有 server
 		r, err := route.Decode(constants.SessionClosedRoute)

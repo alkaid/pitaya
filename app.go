@@ -82,6 +82,10 @@ type Pitaya interface {
 	SetHeartbeatTime(interval time.Duration)
 	GetServerID() string
 	GetMetricsReporters() []metrics.Reporter
+	// GetMetricsReporterMgr GetMetricsReporters
+	//  集合的包装,各接口方法内部自动迭代集合 注意永远不会返回error
+	//  @return metrics.Reporter
+	GetMetricsReporterMgr() metrics.Reporter
 	GetServer() *cluster.Server
 	GetServerByID(id string) (*cluster.Server, error)
 	GetServersByType(t string) (map[string]*cluster.Server, error)
@@ -338,41 +342,51 @@ type Pitaya interface {
 	// @param uid
 	// @return session.SessPublic
 	GetLocalSessionByUid(ctx context.Context, uid string) session.SessPublic
-	// OnLocalSessionCloseBefore 设置本地session关闭前的回调
+	// OnSessionClose 设置本地session关闭后的回调
 	//
 	// @receiver app
 	// @param f
-	OnLocalSessionCloseBefore(f session.OnSessionCloseFunc)
+	OnSessionClose(f session.OnSessionCloseFunc)
+	// OnAfterSessionBind 设置本地session bind后的回调
+	//  @param f
+	OnAfterSessionBind(f session.OnSessionBindFunc)
+	// OnAfterBindBackend 设置本地session bind backend后的回调
+	//  @param f
+	OnAfterBindBackend(f session.OnSessionBindBackendFunc)
+	// OnAfterKickBackend 设置本地session 解绑 backend后的回调
+	//  @param f
+	OnAfterKickBackend(f session.OnSessionKickBackendFunc)
 }
 
 // App is the base app struct
 type App struct {
-	acceptors        []acceptor.Acceptor
-	config           config.PitayaConfig
-	dieChan          chan bool
-	heartbeat        time.Duration
-	router           *router.Router
-	rpcClient        cluster.RPCClient
-	rpcServer        cluster.RPCServer
-	metricsReporters []metrics.Reporter
-	running          bool
-	serializer       serialize.Serializer
-	server           *cluster.Server
-	serverMode       ServerMode
-	serviceDiscovery cluster.ServiceDiscovery
-	startAt          time.Time
-	worker           *worker.Worker
-	remoteService    *service.RemoteService
-	handlerService   *service.HandlerService
-	handlerComp      []regComp
-	remoteComp       []regComp
-	modulesMap       map[string]interfaces.Module
-	modulesArr       []moduleWrapper
-	groups           groups.GroupService
-	sessionPool      session.SessionPool
-	redis            redis.Cmdable
-	conf             *config.Config
-	onStarted        func()
+	acceptors          []acceptor.Acceptor
+	config             config.PitayaConfig
+	dieChan            chan bool
+	heartbeat          time.Duration
+	router             *router.Router
+	rpcClient          cluster.RPCClient
+	rpcServer          cluster.RPCServer
+	metricsReporters   []metrics.Reporter
+	metricsReporterMgr metrics.Reporter
+	running            bool
+	serializer         serialize.Serializer
+	server             *cluster.Server
+	serverMode         ServerMode
+	serviceDiscovery   cluster.ServiceDiscovery
+	startAt            time.Time
+	worker             *worker.Worker
+	remoteService      *service.RemoteService
+	handlerService     *service.HandlerService
+	handlerComp        []regComp
+	remoteComp         []regComp
+	modulesMap         map[string]interfaces.Module
+	modulesArr         []moduleWrapper
+	groups             groups.GroupService
+	sessionPool        session.SessionPool
+	redis              redis.Cmdable
+	conf               *config.Config
+	onStarted          func()
 }
 
 // NewApp is the base constructor for a pitaya app instance
@@ -421,6 +435,7 @@ func NewApp(
 	if app.heartbeat == time.Duration(0) {
 		app.heartbeat = config.Heartbeat.Interval
 	}
+	app.metricsReporterMgr = metrics.NewReporterMgr(metricsReporters)
 
 	app.initSysRemotes()
 	return app
@@ -444,6 +459,10 @@ func (app *App) GetServerID() string {
 // GetMetricsReporters gets registered metrics reporters
 func (app *App) GetMetricsReporters() []metrics.Reporter {
 	return app.metricsReporters
+}
+
+func (app *App) GetMetricsReporterMgr() metrics.Reporter {
+	return app.metricsReporterMgr
 }
 
 // GetServer gets the local server instance
@@ -595,12 +614,17 @@ func (app *App) GetLocalSessionByUid(ctx context.Context, uid string) session.Se
 	return app.sessionPool.GetSessionByUID(uid)
 }
 
-// OnLocalSessionCloseBefore 设置本地session关闭前的回调
-//
-// @receiver app
-// @param f
-func (app *App) OnLocalSessionCloseBefore(f session.OnSessionCloseFunc) {
+func (app *App) OnSessionClose(f session.OnSessionCloseFunc) {
 	app.sessionPool.OnSessionClose(f)
+}
+func (app *App) OnAfterSessionBind(f session.OnSessionBindFunc) {
+	app.sessionPool.OnAfterSessionBind(f)
+}
+func (app *App) OnAfterBindBackend(f session.OnSessionBindBackendFunc) {
+	app.sessionPool.OnAfterBindBackend(f)
+}
+func (app *App) OnAfterKickBackend(f session.OnSessionKickBackendFunc) {
+	app.sessionPool.OnAfterKickBackend(f)
 }
 
 func (app *App) initSysRemotes() {

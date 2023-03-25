@@ -390,7 +390,7 @@ func (a *agentImpl) Close(callback map[string]string, reason ...session.CloseRea
 		close(a.chDie)
 		a.onSessionClosed(a.Session, callback, reason...)
 	}
-
+	// 若是被kick的因为是先agent.close()再session.close(),会造成瞬时不准确,但下一次report时就能准确
 	metrics.ReportNumberOfConnectedClients(a.metricsReporters, a.sessionPool.GetSessionCount())
 	// 若是websocket 且是被踢的 返回自定义reason
 	if wsConn, ok := a.conn.(*acceptor.WSConn); ok && closeReason > session.CloseReasonKickMin {
