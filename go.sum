@@ -410,8 +410,8 @@ github.com/alkaid/ants/v2 v2.5.101 h1:2X6wMcSr/b/zSsrL3ARToh8KD9YhYca6BvX2UFkOLM
 github.com/alkaid/ants/v2 v2.5.101/go.mod h1:cU93usDlihJZ5CfRGNDYsiBYvoilLvBF5Qp/BT2GNRE=
 github.com/alkaid/go-workers v1.0.101 h1:zyrrX4SMESDDdNej2VZKz/R8iLlUX/tQPpTy5cFFUJE=
 github.com/alkaid/go-workers v1.0.101/go.mod h1:srjSHOPc9e1RIlUW6XfiGwSu6ceqqCxAVlsItNLJiwg=
-github.com/alkaid/goerrors v1.0.15 h1:TMqOhtte4JkmvVn6bMKar1LJRsi3WAQ0M5Gx5WrX4eM=
-github.com/alkaid/goerrors v1.0.15/go.mod h1:uqFTqtzD9+jABI7mbQUrn0ruVJgdJF11SLPvmKJSAEs=
+github.com/alkaid/goerrors v1.0.16 h1:Ps0Ec9SYa/zeb1rylLec+uEIqLDltXLGY1JuuOutfto=
+github.com/alkaid/goerrors v1.0.16/go.mod h1:uqFTqtzD9+jABI7mbQUrn0ruVJgdJF11SLPvmKJSAEs=
 github.com/alkaid/viper v1.13.103 h1:g4zIq0mx3UZWvdBF3nMJa1rfyUluPehfEILic113qDc=
 github.com/alkaid/viper v1.13.103/go.mod h1:Hp2DdAIk4vUDWQNsLofJadjwLroTUAu/CeadnPzmPKA=
 github.com/antihax/optional v1.0.0/go.mod h1:uupD/76wgC+ih3iEmQUL+0Ugr19nfwCT1kdvxnR2qWY=

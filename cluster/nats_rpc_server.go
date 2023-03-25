@@ -334,8 +334,9 @@ func (ns *NatsRPCServer) processMessages(threadID int) {
 			co.GoByID(goID, func() {
 				resp, err := ns.pitayaServer.Call(ctx, req)
 				if err != nil {
-					logger.Zap.Error("rpc error calling pitayaServer", zap.String("route", req.Msg.Route),
-						zap.Int("goID", goID), zap.Error(err))
+					// pitayaServer.Call已有打印error,这里不再重复
+					logger.Zap.Info("rpc error calling pitayaServer", zap.String("route", req.Msg.Route),
+						zap.Int("goID", goID), zap.String("cause", err.Error()))
 				}
 				if req.GetMsg().Type != protos.MsgType_MsgNotify {
 					p, err := ns.marshalResponse(resp)

@@ -5,7 +5,7 @@ go 1.19
 require (
 	github.com/DataDog/datadog-go v4.8.3+incompatible
 	github.com/alkaid/go-workers v1.0.101
-	github.com/alkaid/goerrors v1.0.15
+	github.com/alkaid/goerrors v1.0.16
 	github.com/go-playground/validator/v10 v10.11.2
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/golang/mock v1.6.0

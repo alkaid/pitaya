@@ -168,6 +168,22 @@ func (r *RemoteService) GetRemoteBindingListener() []cluster.RemoteBindingListen
 //
 //	@implement protos.PitayaServer
 func (r *RemoteService) Call(ctx context.Context, req *protos.Request) (*protos.Response, error) {
+	var res *protos.Response
+	var err error
+	defer func() {
+		if err != nil {
+			code := http.StatusInternalServerError
+			if res != nil {
+				code = int(res.Status.Code)
+			}
+			logFun := lo.If(code >= http.StatusInternalServerError, logger.Zap.Error).Else(logger.Zap.Warn)
+			// 这里由于error转换了两次stack trace会丢失,详细log堆栈必须业务层打印
+			logFun("error calling rpc service,upstream must print stacktrace",
+				zap.String("uid", lo.If(req.Session == nil, "").ElseF(func() string { return req.Session.Uid })),
+				zap.String("route", req.GetMsg().GetRoute()),
+				zap.Error(err))
+		}
+	}()
 	rt, err := route.Decode(req.GetMsg().GetRoute())
 	if err != nil {
 		return nil, err
@@ -180,7 +196,6 @@ func (r *RemoteService) Call(ctx context.Context, req *protos.Request) (*protos.
 	c, err := util.GetContextFromRequest(req, r.server.ID)
 	c = tracing.RPCStartSpan(c, spanInfo)
 	defer tracing.FinishSpan(c, err)
-	var res *protos.Response
 
 	if err == nil {
 		// 这里不能和官方一样单独线程,调用方已经用co.GoByID包装.
