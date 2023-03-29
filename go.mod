@@ -5,7 +5,7 @@ go 1.19
 require (
 	github.com/DataDog/datadog-go v4.8.3+incompatible
 	github.com/alkaid/go-workers v1.0.101
-	github.com/alkaid/goerrors v1.0.16
+	github.com/alkaid/goerrors v1.0.17
 	github.com/go-playground/validator/v10 v10.11.2
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/golang/mock v1.6.0
@@ -18,7 +18,7 @@ require (
 	github.com/nats-io/nats.go v1.24.0
 	github.com/nats-io/nuid v1.0.1
 	github.com/opentracing/opentracing-go v1.2.0
-	github.com/panjf2000/ants/v2 v2.5.0
+	github.com/panjf2000/ants/v2 v2.6.0
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/client_golang v1.14.0
 	github.com/samber/lo v1.37.0
@@ -48,6 +48,7 @@ require (
 	cloud.google.com/go/firestore v1.9.0 // indirect
 	cloud.google.com/go/longrunning v0.4.1 // indirect
 	github.com/Microsoft/go-winio v0.6.0 // indirect
+	github.com/alkaid/crypt v0.9.10 // indirect
 	github.com/armon/go-metrics v0.4.1 // indirect
 	github.com/benbjohnson/clock v1.1.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -107,7 +108,6 @@ require (
 	github.com/prometheus/client_model v0.3.0 // indirect
 	github.com/prometheus/common v0.41.0 // indirect
 	github.com/prometheus/procfs v0.9.0 // indirect
-	github.com/sagikazarmark/crypt v0.9.0 // indirect
 	github.com/soheilhy/cmux v0.1.5 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
 	github.com/spf13/afero v1.9.4 // indirect
@@ -150,10 +150,10 @@ require (
 	sigs.k8s.io/yaml v1.2.0 // indirect
 )
 
-replace github.com/panjf2000/ants/v2 v2.5.0 => github.com/alkaid/ants/v2 v2.5.101
+replace github.com/panjf2000/ants/v2 v2.6.0 => github.com/alkaid/ants/v2 v2.6.100
 
 //replace github.com/panjf2000/ants/v2 => ../ants
 
-replace github.com/spf13/viper v1.13.0 => github.com/alkaid/viper v1.13.103
+replace github.com/spf13/viper v1.13.0 => github.com/alkaid/viper v1.13.110
 
 //replace github.com/spf13/viper => ../viper

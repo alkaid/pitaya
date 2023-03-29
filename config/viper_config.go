@@ -21,6 +21,7 @@
 package config
 
 import (
+	"context"
 	"strings"
 	"time"
 
@@ -68,7 +69,6 @@ func (l LoaderFactory) Provide() (key string, confStruct interface{}) {
 type Config struct {
 	config    *viper.Viper
 	loaders   []ConfLoader
-	onWatch   chan struct{}
 	pitayaAll *PitayaAll
 	inited    bool
 }
@@ -87,7 +87,6 @@ func NewConfig(cfgs ...*viper.Viper) *Config {
 	c := &Config{
 		config:    cfg,
 		pitayaAll: &PitayaAll{},
-		onWatch:   make(chan struct{}, 20),
 	}
 	c.fillDefaultValues()
 	c.AddLoader(c)
@@ -305,18 +304,24 @@ func (c *Config) watch() error {
 	if err != nil {
 		return err
 	}
-	if len(cnf.FilePath) > 0 {
-		c.config.WatchConfig()
-	}
+	// if len(cnf.FilePath) > 0 {
+	// 	c.config.WatchConfig()
+	// }
+	watchChan := make(chan *viper.RemoteResponse, 20)
 	if len(cnf.Etcd.Keys) > 0 && len(cnf.Etcd.Endpoints) > 0 {
-		_, err = c.config.WatchRemoteConfigWithChannel(c.onWatch, true)
+		err = c.config.WatchRemoteConfigWithChannel(context.Background(), watchChan, true)
 		if err != nil {
 			return err
 		}
 	}
 	co.Go(func() {
 		for {
-			<-c.onWatch
+			w, ok := <-watchChan
+			if !ok || w.Error != nil {
+				time.Sleep(10 * time.Second)
+				c.watch()
+				return
+			}
 			util.SafeCall(nil, func() {
 				c.reloadAll()
 			})
