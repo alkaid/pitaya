@@ -587,7 +587,7 @@ func (a *agentImpl) SendHeartbeatResponse(unixMillTime int64) error {
 		binary.BigEndian.PutUint64(bs, uint64(unixMillTime))
 		hbAckData, err = a.encoder.Encode(packet.HandshakeAck, bs)
 		if err != nil {
-			logger.Zap.Error("encode hearbeat ack error ")
+			logger.Zap.Error("encode heartbeat ack error ")
 			hbAckData = hbAck
 		}
 	}

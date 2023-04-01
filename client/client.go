@@ -33,7 +33,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/topfreegames/pitaya/v2/util"
+	"github.com/topfreegames/pitaya/v2/logger"
 
 	"github.com/alkaid/goerrors/apierrors"
 	"go.uber.org/zap"
@@ -84,6 +84,8 @@ type Client struct {
 	clientHandshakeData *session.HandshakeData
 	onDisconnected      func(reason CloseReason)
 	writeMutex          sync.Mutex
+	lastAt              time.Time
+	closeMutex          sync.Mutex
 }
 
 // MsgChannel return the incoming message channel
@@ -149,6 +151,7 @@ func (c *Client) sendHandshakeRequest() error {
 }
 
 func (c *Client) handleHandshakeResponse() error {
+	c.lastAt = time.Now()
 	buf := bytes.NewBuffer(nil)
 	packets, err := c.readPackets(buf)
 	if err != nil {
@@ -302,6 +305,7 @@ func (c *Client) handleServerMessages() {
 			Log.Error("", zap.Error(err))
 			break
 		}
+		c.lastAt = time.Now()
 
 		for _, p := range packets {
 			c.packetChan <- p
@@ -311,6 +315,7 @@ func (c *Client) handleServerMessages() {
 
 func (c *Client) sendHeartbeats(interval int) {
 	t := time.NewTicker(time.Duration(interval) * time.Second)
+	heartbeatTimeout := time.Duration(interval) * time.Second * 2
 	defer func() {
 		t.Stop()
 		c.Disconnect(CloseReasonError)
@@ -318,6 +323,12 @@ func (c *Client) sendHeartbeats(interval int) {
 	for {
 		select {
 		case <-t.C:
+			deadline := time.Now().Add(-heartbeatTimeout)
+			if c.lastAt.Before(deadline) {
+				logger.Zap.Debug("Session heartbeat timeout", zap.Time("LastTime", c.lastAt), zap.Time("Deadline", deadline))
+				return
+			}
+
 			p, _ := c.packetEncoder.Encode(packet.Heartbeat, []byte{})
 			_, err := c.SafeWrite(p)
 			if err != nil {
@@ -332,16 +343,15 @@ func (c *Client) sendHeartbeats(interval int) {
 
 // Disconnect disconnects the client
 func (c *Client) Disconnect(reason CloseReason) {
+	c.closeMutex.Lock()
+	defer c.closeMutex.Unlock()
 	if c.Connected {
 		c.Connected = false
-		// TODO 测试时发现有概率 panic: close of closed channel。 原因未知,有时间再看. 这里是粗鲁的安全关闭，并不是一个好的实现。
-		util.SafeCall(nil, func() {
-			close(c.closeChan)
-			c.conn.Close()
-			if c.onDisconnected != nil {
-				c.onDisconnected(reason)
-			}
-		})
+		close(c.closeChan)
+		c.conn.Close()
+		if c.onDisconnected != nil {
+			c.onDisconnected(reason)
+		}
 	}
 }
 
