@@ -394,8 +394,10 @@ func (a *agentImpl) Close(callback map[string]string, reason ...session.CloseRea
 	metrics.ReportNumberOfConnectedClients(a.metricsReporters, a.sessionPool.GetSessionCount())
 	// 若是websocket 且是被踢的 返回自定义reason
 	if wsConn, ok := a.conn.(*acceptor.WSConn); ok && closeReason > session.CloseReasonKickMin {
-		err := wsConn.InnerConn().WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, strconv.Itoa(closeReason)), time.Time{})
-		logger.Zap.Warn("write close control message by kick reason error", zap.Error(err))
+		err := wsConn.InnerConn().WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, strconv.Itoa(closeReason)), time.Now().Add(3*time.Second))
+		if err != nil {
+			logger.Zap.Warn("write close control message by kick reason error", zap.Int64("ID", a.Session.ID()), zap.String("UID", a.Session.UID()), zap.Error(err))
+		}
 	}
 	return a.conn.Close()
 }
@@ -708,7 +710,7 @@ func (a *agentImpl) reportChannelSize() {
 	}
 	for _, mr := range a.metricsReporters {
 		if err := mr.ReportGauge(metrics.ChannelCapacity, map[string]string{"channel": "agent_chsend"}, float64(chSendCapacity)); err != nil {
-			logger.Zap.Warn("failed to report chSend channel capaacity", zap.Error(err))
+			logger.Zap.Warn("failed to report chSend channel capacity", zap.Error(err))
 		}
 	}
 }

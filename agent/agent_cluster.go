@@ -72,7 +72,8 @@ func (a *Cluster) ResponseMID(ctx context.Context, mid uint, v interface{}, isEr
 
 // Close closes the remote
 func (a *Cluster) Close(callback map[string]string, reason ...session.CloseReason) error {
-	logger.Zap.Error("not support in cluster session!", zap.Error(constants.ErrNotImplemented))
+	// logger.Zap.Error("not support in cluster session!", zap.Error(constants.ErrNotImplemented))
+	logger.Zap.Debug("do nothing in cluster session")
 	return nil
 }
 

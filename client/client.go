@@ -85,7 +85,7 @@ type Client struct {
 	onDisconnected      func(reason CloseReason)
 	writeMutex          sync.Mutex
 	lastAt              time.Time
-	closeMutex          sync.Mutex
+	connMutex           sync.Mutex
 }
 
 // MsgChannel return the incoming message channel
@@ -343,8 +343,8 @@ func (c *Client) sendHeartbeats(interval int) {
 
 // Disconnect disconnects the client
 func (c *Client) Disconnect(reason CloseReason) {
-	c.closeMutex.Lock()
-	defer c.closeMutex.Unlock()
+	c.connMutex.Lock()
+	defer c.connMutex.Unlock()
 	if c.Connected {
 		c.Connected = false
 		close(c.closeChan)
@@ -375,6 +375,8 @@ func (c *Client) ConnectTo(uri string, tlsConfig ...*tls.Config) error {
 	} else {
 		tlsCfg = &tls.Config{}
 	}
+	c.connMutex.Lock()
+	defer c.connMutex.Unlock()
 	switch u.Scheme {
 	case "wss":
 		tlsCfg.InsecureSkipVerify = true
