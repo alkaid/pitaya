@@ -438,7 +438,7 @@ func (a *agentImpl) Kick(ctx context.Context, reason ...session.CloseReason) err
 	if err != nil {
 		return errors.WithStack(err)
 	}
-	_, err = a.conn.Write(p)
+	_, err = a.connWriteWithDeadline(p)
 	return errors.WithStack(err)
 }
 
@@ -578,7 +578,7 @@ func (a *agentImpl) onSessionClosed(s session.Session, callback map[string]strin
 
 // SendHandshakeResponse sends a handshake response
 func (a *agentImpl) SendHandshakeResponse() error {
-	_, err := a.conn.Write(hrd)
+	_, err := a.connWriteWithDeadline(hrd)
 	return err
 }
 func (a *agentImpl) SendHeartbeatResponse(unixMillTime int64) error {
@@ -617,7 +617,7 @@ func (a *agentImpl) write() {
 		select {
 		case pWrite := <-a.chSend:
 			// close agent if low-level Conn broken
-			if _, err := a.conn.Write(pWrite.data); err != nil {
+			if _, err := a.connWriteWithDeadline(pWrite.data); err != nil {
 				tracing.FinishSpan(pWrite.ctx, err)
 				metrics.ReportTimingFromCtx(pWrite.ctx, a.metricsReporters, handlerType, err)
 				logger.Log.Errorf("Failed to write in conn: %s", err.Error())
@@ -630,6 +630,17 @@ func (a *agentImpl) write() {
 			return
 		}
 	}
+}
+func (a *agentImpl) connWriteWithDeadline(b []byte) (int, error) {
+	err := a.conn.SetWriteDeadline(time.Now().Add(time.Second * 5))
+	if err != nil {
+		return 0, err
+	}
+	n, err := a.conn.Write(b)
+	if err != nil {
+		return n, err
+	}
+	return n, nil
 }
 
 // SendRequest sends a request to a server
@@ -706,7 +717,7 @@ func hbdEncode(heartbeatTimeout time.Duration, packetEncoder codec.PacketEncoder
 func (a *agentImpl) reportChannelSize() {
 	chSendCapacity := a.messagesBufferSize - len(a.chSend)
 	if chSendCapacity == 0 {
-		logger.Zap.Warn("chSend is at maximum capacity")
+		logger.Zap.Warn("chSend is at maximum capacity", zap.Int64("sid", a.Session.ID()), zap.String("uid", a.Session.UID()))
 	}
 	for _, mr := range a.metricsReporters {
 		if err := mr.ReportGauge(metrics.ChannelCapacity, map[string]string{"channel": "agent_chsend"}, float64(chSendCapacity)); err != nil {

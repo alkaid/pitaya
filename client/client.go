@@ -146,7 +146,7 @@ func (c *Client) sendHandshakeRequest() error {
 		return err
 	}
 
-	_, err = c.conn.Write(p)
+	_, err = c.connWriteWithDeadline(p)
 	return err
 }
 
@@ -185,7 +185,7 @@ func (c *Client) handleHandshakeResponse() error {
 	if err != nil {
 		return err
 	}
-	_, err = c.conn.Write(p)
+	_, err = c.connWriteWithDeadline(p)
 	if err != nil {
 		return err
 	}
@@ -198,6 +198,17 @@ func (c *Client) handleHandshakeResponse() error {
 	go c.pendingRequestsReaper()
 
 	return nil
+}
+func (c *Client) connWriteWithDeadline(b []byte) (int, error) {
+	err := c.conn.SetWriteDeadline(time.Now().Add(time.Second * 5))
+	if err != nil {
+		return 0, err
+	}
+	n, err := c.conn.Write(b)
+	if err != nil {
+		return n, err
+	}
+	return n, nil
 }
 
 // pendingRequestsReaper delete timedout requests
@@ -483,5 +494,5 @@ func (c *Client) sendMsg(msgType message.Type, route string, data []byte) (uint,
 func (c *Client) SafeWrite(b []byte) (n int, err error) {
 	c.writeMutex.Lock()
 	defer c.writeMutex.Unlock()
-	return c.conn.Write(b)
+	return c.connWriteWithDeadline(b)
 }
