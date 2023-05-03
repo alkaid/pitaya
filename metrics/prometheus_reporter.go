@@ -153,6 +153,17 @@ func (p *PrometheusReporter) registerMetrics(
 		append([]string{"route", "status", "type", "code"}, additionalLabelsKeys...),
 	)
 
+	p.countReportersMap[PoolGoDeadlines] = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace:   "pitaya",
+			Subsystem:   "gopool",
+			Name:        PoolGoDeadlines,
+			Help:        "the number of goroutines by exceeded timeout",
+			ConstLabels: constLabels,
+		},
+		append([]string{"route", "pool", "second"}, additionalLabelsKeys...),
+	)
+
 	// ProcessDelay summary
 	p.summaryReportersMap[ProcessDelay] = prometheus.NewSummaryVec(
 		prometheus.SummaryOpts{

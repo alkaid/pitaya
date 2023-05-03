@@ -60,6 +60,7 @@ type PitayaAll struct {
 	Storage struct {
 		Redis RedisConfig
 	}
+	GoPools []GoPool
 }
 
 // PitayaConfig provides configuration for a pitaya app
@@ -102,13 +103,9 @@ type PitayaConfig struct {
 		Development bool   // 是否开发模式
 		Level       string // 日志等级
 	}
-	Coroutine CoroutineConfig
+	GoPools map[string]GoPool // 有状态线程池配置
 }
 
-type CoroutineConfig struct {
-	Nums    int
-	Buffers int
-}
 type ConfSource struct {
 	FilePath []string // 配置文件路径,不为空表明使用本地文件配置
 	Etcd     struct {
@@ -118,6 +115,14 @@ type ConfSource struct {
 	}
 	Interval  time.Duration // 重载间隔
 	Formatter string        // 配置格式 必须为 viper.SupportedRemoteProviders
+}
+
+type GoPool struct {
+	Name                string          // 线程池名
+	Expire              time.Duration   // 线程池回收不使用的goroutine的间隔时长
+	TaskBuffer          int             // 每个worker的队列长度
+	DisableTimeoutWatch bool            // 是否禁用监控超时
+	TimeoutBuckets      []time.Duration // 监控项
 }
 
 // NewDefaultPitayaConfig provides default configuration for Pitaya App
@@ -175,12 +180,12 @@ func NewDefaultPitayaConfig() *PitayaConfig {
 			CacheTTL time.Duration
 		}{
 			Unique:   true,
-			CacheTTL: time.Duration(time.Hour * 24 * 3),
+			CacheTTL: time.Hour * 24 * 3,
 		},
 		Metrics: struct {
 			Period time.Duration
 		}{
-			Period: time.Duration(15 * time.Second),
+			Period: 15 * time.Second,
 		},
 		Acceptor: struct {
 			ProxyProtocol bool
@@ -188,12 +193,13 @@ func NewDefaultPitayaConfig() *PitayaConfig {
 			ProxyProtocol: false,
 		},
 		ConfSource: ConfSource{
-			Interval: time.Duration(5 * time.Minute),
+			Interval: 5 * time.Minute,
 		},
 		Log: struct {
 			Development bool
 			Level       string
 		}{Development: false, Level: "ERROR"},
+		GoPools: map[string]GoPool{},
 	}
 }
 
@@ -352,6 +358,7 @@ type NatsRPCServerConfig struct {
 	}
 	Services          int
 	ConnectionTimeout time.Duration
+	RequestTimeout    time.Duration
 }
 
 // NewDefaultNatsRPCServerConfig provides default nats server configuration
@@ -368,6 +375,7 @@ func NewDefaultNatsRPCServerConfig() *NatsRPCServerConfig {
 		},
 		Services:          30,
 		ConnectionTimeout: time.Duration(2 * time.Second),
+		RequestTimeout:    time.Duration(5 * time.Second),
 	}
 }
 

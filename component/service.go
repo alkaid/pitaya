@@ -69,7 +69,6 @@ type (
 	// Interceptor 拦截分发器,优先级别高于 Handler 或 Remote
 	Interceptor struct {
 		InterceptorFun
-		EnableReactor bool // 启用单线程reactor模型
 	}
 )
 

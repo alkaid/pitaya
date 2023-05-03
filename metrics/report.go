@@ -67,6 +67,26 @@ func ReportTimingFromCtx(ctx context.Context, reporters []Reporter, typ string, 
 	}
 }
 
+func ReportPoolGoDeadlines(ctx context.Context, poolName string, second int, reporters []Reporter) {
+	if ctx == nil {
+		return
+	}
+	if len(reporters) > 0 {
+		route := pcontext.GetFromPropagateCtx(ctx, constants.RouteKey)
+		if route == nil {
+			route = "nil"
+		}
+		tags := getTags(ctx, map[string]string{
+			"route":  route.(string),
+			"second": strconv.Itoa(second),
+			"pool":   poolName,
+		})
+		for _, r := range reporters {
+			r.ReportCount(PoolGoDeadlines, tags, 1)
+		}
+	}
+}
+
 // ReportMessageProcessDelayFromCtx reports the delay to process the messages
 func ReportMessageProcessDelayFromCtx(ctx context.Context, reporters []Reporter, typ string) {
 	if len(reporters) > 0 {

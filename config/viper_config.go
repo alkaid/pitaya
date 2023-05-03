@@ -32,7 +32,6 @@ import (
 
 	"github.com/spf13/viper"
 	_ "github.com/spf13/viper/remote"
-	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/logger"
 )
 
@@ -133,6 +132,7 @@ func (c *Config) fillDefaultValues() {
 		"pitaya.cluster.rpc.server.nats.services":               natsRPCServerConfig.Services,
 		"pitaya.cluster.rpc.server.nats.buffer.messages":        natsRPCServerConfig.Buffer.Messages,
 		"pitaya.cluster.rpc.server.nats.buffer.push":            natsRPCServerConfig.Buffer.Push,
+		"pitaya.cluster.rpc.server.nats.requesttimeout":         natsRPCServerConfig.RequestTimeout,
 		"pitaya.cluster.sd.etcd.dialtimeout":                    etcdSDConfig.DialTimeout,
 		"pitaya.cluster.sd.etcd.endpoints":                      etcdSDConfig.Endpoints,
 		"pitaya.cluster.sd.etcd.prefix":                         etcdSDConfig.Prefix,
@@ -314,7 +314,7 @@ func (c *Config) watch() error {
 			return err
 		}
 	}
-	co.Go(func() {
+	go func() {
 		for {
 			w, ok := <-watchChan
 			if !ok || w.Error != nil {
@@ -326,7 +326,7 @@ func (c *Config) watch() error {
 				c.reloadAll()
 			})
 		}
-	})
+	}()
 	return nil
 }
 

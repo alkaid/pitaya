@@ -24,6 +24,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"net"
 	"net/netip"
 	"reflect"
@@ -152,6 +153,7 @@ type sessionImpl struct {
 	sync.RWMutex                                  // protect data
 	id                int64                       // session global unique id
 	uid               string                      // binding user id
+	uidInt            int64                       // uid as number
 	lastTime          int64                       // last heartbeat time
 	entity            networkentity.NetworkEntity // low-level network entity
 	data              map[string]any              // session data store 用户自定义数据
@@ -183,6 +185,7 @@ type SessPublic interface {
 	Push(route string, v interface{}) error
 	ID() int64
 	UID() string
+	UIDInt() int64
 	// Online 是否在线,用于cluster类型session的在线判断
 	//  @return bool
 	Online() bool
@@ -258,10 +261,10 @@ type SessPublic interface {
 	//  @param svrType
 	//  @return string
 	GetBackendID(svrType string) string
-	// GoBySession 根据session派发线程
-	//  @see co.GoByUID or co.GoByID
+	// Go 派发到该session独立线程,若已绑定uid则派发到user独立线程
+	//  @see co.GoWithUser
 	//  @param task
-	GoBySession(task func())
+	Go(ctx context.Context, task func(ctx context.Context))
 }
 
 // Session represents a client session, which can store data during the connection.
@@ -395,6 +398,7 @@ func (pool *sessionPoolImpl) NewSession(entity networkentity.NetworkEntity, fron
 	}
 	if len(UID) > 0 {
 		s.uid = UID[0]
+		s.uidInt = util.ForceIdStrToInt(s.uid)
 	}
 	return s, true
 }
@@ -693,6 +697,9 @@ func (s *sessionImpl) ID() int64 {
 // UID returns uid that bind to current session
 func (s *sessionImpl) UID() string {
 	return s.uid
+}
+func (s *sessionImpl) UIDInt() int64 {
+	return s.uidInt
 }
 
 // GetData gets the data
@@ -1275,6 +1282,7 @@ func (s *sessionImpl) Clear() {
 	defer s.Unlock()
 
 	s.uid = ""
+	s.uidInt = 0
 	s.data = map[string]interface{}{}
 	s.updateEncodedData()
 }
@@ -1309,6 +1317,9 @@ func (s *sessionImpl) SendRequest(ctx context.Context, serverID, route string, m
 	return s.entity.SendRequest(ctx, serverID, route, b)
 }
 func (s *sessionImpl) SendRequestToFrontend(ctx context.Context, route string, msg proto.Message) (*protos.Response, error) {
+	if s.frontendID == "" {
+		return nil, errors.New(fmt.Sprintf("frontendID is nil.sid=%d,uid=%s,online=%b,agent=%s,route=%s", s.ID(), s.uid, s.online, s.entity.NetworkEntityName(), route))
+	}
 	return s.SendRequest(ctx, s.frontendID, route, msg)
 }
 
@@ -1481,20 +1492,17 @@ func (s *sessionImpl) InitialFromCluster() error {
 	}
 	return nil
 }
+func FrontendSessHash(frontendID string, sid int64) int64 {
+	return int64(crc32.ChecksumIEEE([]byte(fmt.Sprintf("%s-%d", frontendID, sid))))
+}
 
-// GoBySession 根据session数据决策派发任务线程
-//
-//	@param task
-func (s *sessionImpl) GoBySession(task func()) {
-	if s.UID() != "" {
-		co.GoByUID(s.UID(), task)
+func (s *sessionImpl) Go(ctx context.Context, task func(ctx context.Context)) {
+	if s.uidInt != 0 {
+		co.GoWithUser(ctx, s.uidInt, task)
 		return
 	}
-	goID := 0
-	if s.ID() > 0 {
-		goID = int(s.ID())
-	}
-	co.GoByID(goID, task)
+	sid := lo.If(s.IsFrontend, s.id).Else(FrontendSessHash(s.frontendID, s.frontendSessionID))
+	co.GoWithPool(ctx, co.SessionGoPoolName, sid, task)
 }
 
 func (s *sessionImpl) HasRequestsInFlight() bool {

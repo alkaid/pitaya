@@ -23,6 +23,7 @@ package util
 import (
 	"context"
 	"fmt"
+	"hash/crc32"
 	"os"
 	"reflect"
 	"runtime/debug"
@@ -62,6 +63,14 @@ func getLoggerFromArgs(args []reflect.Value) *zap.Logger {
 		}
 	}
 	return logger.Zap
+}
+
+func GetLoggerFromCtx(ctx context.Context) *zap.Logger {
+	l, ok := ctx.Value(constants.LoggerCtxKey).(*zap.Logger)
+	if !ok {
+		l = logger.Zap
+	}
+	return l
 }
 
 // SafeCall 安全调用方法,会 recover() 并打印 runtime error
@@ -199,20 +208,22 @@ func ConvertProtoToMessageType(protoMsgType protos.MsgType) message.Type {
 // Otherwise the pitaya logger will be used as it is.
 func CtxWithDefaultLogger(ctx context.Context, route, userID string) context.Context {
 	requestID := pcontext.GetFromPropagateCtx(ctx, constants.RequestIDKey)
-	if rID, ok := requestID.(string); ok {
+	var rID string
+	var ok bool
+	if rID, ok = requestID.(string); ok {
 		if rID == "" {
-			requestID = nuid.New()
+			rID = nuid.Next()
 		}
 	} else {
-		requestID = nuid.New()
+		rID = nuid.Next()
 	}
-	defaultLogger := logger.Zap.With(zap.String("route", route), zap.Any("reqId", requestID), zap.String("userId", userID))
+	defaultLogger := logger.Zap.With(zap.String("route", route), zap.String("reqId", rID), zap.String("userId", userID))
 
 	return context.WithValue(ctx, constants.LoggerCtxKey, defaultLogger)
 }
 
 // GetContextFromRequest gets the context from a request
-func GetContextFromRequest(req *protos.Request, serverID string) (context.Context, error) {
+func GetContextFromRequest(req *protos.Request, serverID string, uid string) (context.Context, error) {
 	ctx, err := pcontext.Decode(req.GetMetadata())
 	if err != nil {
 		return nil, err
@@ -220,7 +231,7 @@ func GetContextFromRequest(req *protos.Request, serverID string) (context.Contex
 	if ctx == nil {
 		return nil, errors.WithStack(constants.ErrNoContextFound)
 	}
-	ctx = CtxWithDefaultLogger(ctx, req.GetMsg().GetRoute(), "")
+	ctx = CtxWithDefaultLogger(ctx, req.GetMsg().GetRoute(), uid)
 	return ctx, nil
 }
 
@@ -239,6 +250,18 @@ func MapStrInter2MapStrStr(in map[string]interface{}) map[string]string {
 		}
 	}
 	return result
+}
+
+func ForceIdStrToInt(id string) int64 {
+	if id == "" {
+		return 0
+	}
+	idInt, err := strconv.ParseInt(id, 10, 64)
+	if err == nil {
+		return idInt
+	}
+	idInt = int64(crc32.ChecksumIEEE([]byte(id)))
+	return idInt
 }
 
 const defaultNanoIDLen = 16

@@ -758,12 +758,9 @@ func (app *App) listen() {
 	}
 	// 注册配置重载回调
 	app.RegisterModuleBefore(config.NewConfigModule(app.conf), "configLoader")
-	coConf := co.CoroutineConfig{
-		Nums:    app.config.Coroutine.Nums,
-		Buffers: app.config.Coroutine.Buffers,
-	}
-	coHolder := co.NewHolder(coConf)
-	app.RegisterModuleBefore(coHolder, "CoroutineHolder")
+	statefulGoPool := co.NewStatefulPoolsModule(app.config.GoPools, app.metricsReporters)
+
+	app.RegisterModuleBefore(statefulGoPool, "statefulGoPool")
 
 	app.startModules()
 

@@ -234,6 +234,10 @@ func newAgent(
 	return a
 }
 
+func (a *agentImpl) NetworkEntityName() string {
+	return "Agent"
+}
+
 func (a *agentImpl) getMessageFromPendingMessage(pm pendingMessage) (*message.Message, error) {
 	payload, err := util.SerializeOrRaw(a.serializer, pm.payload)
 	if err != nil {

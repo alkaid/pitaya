@@ -10,6 +10,7 @@ import (
 
 // NetworkEntity represent low-level network instance
 type NetworkEntity interface {
+	NetworkEntityName() string
 	Push(route string, v interface{}) error
 	ResponseMID(ctx context.Context, mid uint, v interface{}, isError ...bool) error
 	Close(callback map[string]string, reason ...int) error

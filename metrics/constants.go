@@ -28,4 +28,6 @@ var (
 	// ExceededRateLimiting reports the number of requests made in a connection
 	// after the rate limit was exceeded
 	ExceededRateLimiting = "exceeded_rate_limiting"
+	// PoolGoDeadlines 线程池中超时goroutine的数量
+	PoolGoDeadlines = "pool_go_deadlines"
 )
