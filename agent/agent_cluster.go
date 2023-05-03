@@ -52,6 +52,10 @@ func NewCluster(
 	return a, nil
 }
 
+func (a *Cluster) NetworkEntityName() string {
+	return "Cluster"
+}
+
 // Kick kicks the user
 func (a *Cluster) Kick(ctx context.Context, reason ...session.CloseReason) error {
 	logger.Zap.Error("not support in cluster session!", zap.Error(constants.ErrNotImplemented))

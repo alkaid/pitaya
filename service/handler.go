@@ -26,9 +26,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
+	"github.com/nats-io/nuid"
 	"go.uber.org/zap"
 
 	"github.com/alkaid/goerrors/apierrors"
@@ -63,9 +63,7 @@ type (
 	// HandlerService service
 	HandlerService struct {
 		baseService
-		chLocalProcess   chan unhandledMessage // channel of messages that will be processed locally
-		chRemoteProcess  chan unhandledMessage // channel of messages that will be processed remotely
-		decoder          codec.PacketDecoder   // binary decoder
+		decoder          codec.PacketDecoder // binary decoder
 		remoteService    *RemoteService
 		serializer       serialize.Serializer          // message serializer
 		server           *cluster.Server               // server obj
@@ -99,8 +97,6 @@ func NewHandlerService(
 ) *HandlerService {
 	h := &HandlerService{
 		services:         make(map[string]*component.Service),
-		chLocalProcess:   make(chan unhandledMessage, localProcessBufferSize),
-		chRemoteProcess:  make(chan unhandledMessage, remoteProcessBufferSize),
 		decoder:          packetDecoder,
 		serializer:       serializer,
 		server:           server,
@@ -124,30 +120,6 @@ func (h *HandlerService) Dispatch(thread int) {
 	for {
 		// Calls to remote servers block calls to local server
 		select {
-		case lm := <-h.chLocalProcess:
-			metrics.ReportMessageProcessDelayFromCtx(lm.ctx, h.metricsReporters, "local")
-			// 派发给session独立线程避免互相影响
-			if lm.agent != nil && lm.agent.GetSession() != nil {
-				lmCp := lm
-				lm.agent.GetSession().GoBySession(func() {
-					h.localProcess(lmCp.ctx, lmCp.agent, lmCp.route, lmCp.msg)
-				})
-			} else {
-				h.localProcess(lm.ctx, lm.agent, lm.route, lm.msg)
-			}
-
-		case rm := <-h.chRemoteProcess:
-			metrics.ReportMessageProcessDelayFromCtx(rm.ctx, h.metricsReporters, "remote")
-			// 派发给session独立线程避免互相影响
-			if rm.agent != nil && rm.agent.GetSession() != nil {
-				rmCp := rm
-				rm.agent.GetSession().GoBySession(func() {
-					h.remoteService.remoteProcess(rmCp.ctx, nil, rmCp.agent, rmCp.route, rmCp.msg)
-				})
-			} else {
-				h.remoteService.remoteProcess(rm.ctx, nil, rm.agent, rm.route, rm.msg)
-			}
-
 		case <-timer.GlobalTicker.C: // execute cron task
 			timer.Cron()
 
@@ -311,7 +283,8 @@ func (h *HandlerService) processPacket(a agent.Agent, p *packet.Packet) error {
 }
 
 func (h *HandlerService) processMessage(a agent.Agent, msg *message.Message) {
-	requestID := strconv.Itoa(int(msg.ID))
+	// request id 不能用msg.id,msg.id不同客户端会重复
+	requestID := nuid.Next()
 	ctx := pcontext.AddListToPropagateCtx(context.Background(), constants.StartTimeKey, time.Now().UnixNano(), constants.RouteKey, msg.Route, constants.RequestIDKey, requestID)
 	ctx = context.WithValue(ctx, constants.SessionCtxKey, a.GetSession())
 
@@ -337,17 +310,18 @@ func (h *HandlerService) processMessage(a agent.Agent, msg *message.Message) {
 		r.SvType = h.server.Type
 	}
 
-	message := unhandledMessage{
-		ctx:   ctx,
-		agent: a,
-		route: r,
-		msg:   msg,
-	}
 	if r.SvType == h.server.Type {
-		h.chLocalProcess <- message
+		// 派发给session独立线程避免互相影响
+		a.GetSession().Go(ctx, func(ctx context.Context) {
+			metrics.ReportMessageProcessDelayFromCtx(ctx, h.metricsReporters, "local")
+			h.localProcess(ctx, a, r, msg)
+		})
 	} else {
 		if h.remoteService != nil {
-			h.chRemoteProcess <- message
+			a.GetSession().Go(ctx, func(ctx context.Context) {
+				metrics.ReportMessageProcessDelayFromCtx(ctx, h.metricsReporters, "remote")
+				h.remoteService.remoteProcess(ctx, nil, a, r, msg)
+			})
 		} else {
 			logger.Log.Warnf("request made to another server type but no remoteService running")
 		}

@@ -103,6 +103,10 @@ func NewRemote(
 	return a, nil
 }
 
+func (a *Remote) NetworkEntityName() string {
+	return "Remote"
+}
+
 // Kick kicks the user
 func (a *Remote) Kick(ctx context.Context, reason ...session.CloseReason) error {
 	if a.Session.UID() == "" {

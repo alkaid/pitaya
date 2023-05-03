@@ -24,13 +24,12 @@ import "context"
 
 type (
 	options struct {
-		name             string                                 // component name
-		nameFunc         func(string) string                    // rename handler name
-		Subscriber       bool                                   // 是否订阅者
-		SubscriberGroup  string                                 // 订阅消费组
-		EnableReactor    bool                                   // 启用单线程reactor模型
-		ReceiverProvider func(ctx context.Context) Component    // 延迟绑定的receiver实例
-		TaskGoProvider   func(ctx context.Context, task func()) // 异步任务派发线程提供者
+		name             string                                                    // component name
+		nameFunc         func(string) string                                       // rename handler name
+		Subscriber       bool                                                      // 是否订阅者
+		SubscriberGroup  string                                                    // 订阅消费组
+		ReceiverProvider func(ctx context.Context) Component                       // 延迟绑定的receiver实例
+		TaskGoProvider   func(ctx context.Context, task func(ctx context.Context)) // 异步任务派发线程提供者
 	}
 
 	// Option used to customize handler
@@ -72,12 +71,6 @@ func WithSubscriberGroup(group string) Option {
 	}
 }
 
-func WithEnableReactor(enableReactor bool) Option {
-	return func(opt *options) {
-		opt.EnableReactor = enableReactor
-	}
-}
-
 // WithReceiverProvider 注册延迟动态绑定 receiver 的函数
 //
 //	@param ReceiverProvider
@@ -92,7 +85,7 @@ func WithReceiverProvider(receiverProvider func(ctx context.Context) Component) 
 //
 //	@param taskGoProvider
 //	@return Option
-func WithTaskGoProvider(taskGoProvider func(ctx context.Context, task func())) Option {
+func WithTaskGoProvider(taskGoProvider func(ctx context.Context, task func(ctx context.Context))) Option {
 	return func(opt *options) {
 		opt.TaskGoProvider = taskGoProvider
 	}

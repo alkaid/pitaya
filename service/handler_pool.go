@@ -10,7 +10,6 @@ import (
 
 	"github.com/alkaid/goerrors/apierrors"
 
-	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/component"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
@@ -81,14 +80,7 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		// logger := ctx.Value(constants.LoggerCtxKey).(*zap.Logger)
 		// logger.Debug("SID=%d, Data=%s", session.ID(), data)
 		var resp any
-		// 若启用了单线程反应堆模型,则派发到全局Looper单例
-		if interceptor.EnableReactor {
-			resp, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
-				return interceptor.InterceptorFun(ctx, *rt, data)
-			}).Wait(ctx)
-		} else {
-			resp, err = interceptor.InterceptorFun(ctx, *rt, data)
-		}
+		resp, err = interceptor.InterceptorFun(ctx, *rt, data)
 		if err != nil {
 			return nil, err
 		}
@@ -132,14 +124,7 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		return nil, apierrors.BadRequest("", "process handle message error", "").WithCause(err)
 	}
 
-	if handler.Options.EnableReactor {
-		arg, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
-			ctx, arg, err = handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)
-			return arg, err
-		}).Wait(ctx)
-	} else {
-		ctx, arg, err = handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)
-	}
+	ctx, arg, err = handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)
 	if err != nil {
 		return nil, err
 	}
@@ -159,16 +144,12 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		args = append(args, reflect.ValueOf(arg))
 	}
 	var resp any
-	// 若启用了单线程反应堆模型,则派发到全局Looper单例
-	if handler.Options.EnableReactor {
-		resp, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
-			return util.Pcall(handler.Method, args)
-		}).Wait(ctx)
-	} else if handler.Options.TaskGoProvider != nil {
+	if handler.Options.TaskGoProvider != nil {
 		// 若提供了自定义派发线程
 		var wg sync.WaitGroup
 		wg.Add(1)
-		handler.Options.TaskGoProvider(ctx, func() {
+		handler.Options.TaskGoProvider(ctx, func(ctx context.Context) {
+			args[1] = reflect.ValueOf(ctx)
 			resp, err = util.Pcall(handler.Method, args)
 			wg.Done()
 		})
@@ -186,13 +167,7 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		resp = []byte("ack")
 	}
 
-	if handler.Options.EnableReactor {
-		resp, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
-			return handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, rt, arg, resp, err)
-		}).Wait(ctx)
-	} else {
-		resp, err = handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, rt, arg, resp, err)
-	}
+	resp, err = handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, rt, arg, resp, err)
 	if err != nil {
 		return nil, err
 	}

@@ -24,6 +24,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/conn/message"
 	"github.com/topfreegames/pitaya/v2/constants"
 	pcontext "github.com/topfreegames/pitaya/v2/context"
@@ -31,6 +32,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/protos"
 	"github.com/topfreegames/pitaya/v2/route"
 	"github.com/topfreegames/pitaya/v2/session"
+	"github.com/topfreegames/pitaya/v2/util"
 )
 
 // RPCServer interface
@@ -173,4 +175,20 @@ func buildRequest(
 		}
 	}
 	return req, nil
+}
+
+func GoWithRequest(ctx context.Context, req *protos.Request, task func(ctx context.Context)) {
+	if req == nil || req.Session == nil {
+		co.Go(func() {
+			task(ctx)
+		})
+		return
+	}
+	if req.Session.Uid != "" {
+		uidInt := util.ForceIdStrToInt(req.Session.Uid)
+		co.GoWithUser(ctx, uidInt, task)
+		return
+	}
+	sid := session.FrontendSessHash(req.FrontendID, req.Session.Id)
+	co.GoWithPool(ctx, co.SessionGoPoolName, sid, task)
 }

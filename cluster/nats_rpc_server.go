@@ -23,9 +23,7 @@ package cluster
 import (
 	"context"
 	"fmt"
-	"hash/crc32"
 	"math"
-	"strconv"
 	"time"
 
 	"github.com/alkaid/goerrors/apierrors"
@@ -72,6 +70,7 @@ type NatsRPCServer struct {
 	metricsReporters       []metrics.Reporter
 	sessionPool            session.SessionPool
 	appDieChan             chan bool
+	reqTimeout             time.Duration
 }
 
 // NewNatsRPCServer ctor
@@ -126,6 +125,7 @@ func (ns *NatsRPCServer) configure(config config.NatsRPCServerConfig) error {
 	ns.userKickCh = make(chan *protos.KickMsg, ns.messagesBufferSize)
 	ns.responses = make([]*protos.Response, ns.service)
 	ns.requests = make([]*protos.Request, ns.service)
+	ns.reqTimeout = config.RequestTimeout
 	return nil
 }
 
@@ -298,8 +298,13 @@ func (ns *NatsRPCServer) marshalResponse(res *protos.Response) ([]byte, error) {
 
 func (ns *NatsRPCServer) processMessages(threadID int) {
 	for ns.requests[threadID] = range ns.GetUnhandledRequestsChannel() {
-		logger.Log.Debugf("(%d) processing message %v", threadID, ns.requests[threadID].GetMsg().GetId())
-		ctx, err := util.GetContextFromRequest(ns.requests[threadID], ns.server.ID)
+		req := ns.requests[threadID] // 拷贝一个给线程避免闭包问题
+		logger.Log.Debugf("(%d) processing message %v", threadID, req.GetMsg().GetId())
+		uid := ""
+		if req.Session != nil {
+			uid = req.Session.Uid
+		}
+		ctx, err := util.GetContextFromRequest(ns.requests[threadID], ns.server.ID, uid)
 		if err != nil {
 			ns.responses[threadID] = &protos.Response{
 				Status: &apierrors.FromError(err).Status,
@@ -311,42 +316,24 @@ func (ns *NatsRPCServer) processMessages(threadID int) {
 					logger.Zap.Error("error sending message response")
 				}
 			}
-		} else {
-			sess := ns.requests[threadID].Session
-			// 根据session数据决策派发线程id,有uid的用uid,没有的如果是frontend转发的用frontendid+session做线程id
-			goID := 0
-			if sess != nil {
-				if sess.Uid != "" {
-					goID, err = strconv.Atoi(sess.Uid)
-					if err != nil {
-						logger.Zap.Warn("can't atoi uid", zap.String("uid", sess.Uid), zap.Error(err))
-						goID = int(crc32.ChecksumIEEE([]byte(sess.Uid)))
-					}
-				} else if ns.requests[threadID].FrontendID != "" && sess.Id > 0 {
-					goID = int(crc32.ChecksumIEEE([]byte(fmt.Sprintf("%s%d", ns.requests[threadID].FrontendID, sess.Id))))
+			continue
+		}
+		logg := util.GetLoggerFromCtx(ctx)
+		logg.Debug("rpcsv processing msg")
+		GoWithRequest(ctx, req, func(ctx context.Context) {
+			resp, err := ns.pitayaServer.Call(ctx, req)
+			if err != nil {
+				// pitayaServer.Call已有打印error,这里不再重复
+				logg.Info("rpc error calling pitayaServer", zap.String("cause", err.Error()))
+			}
+			if req.GetMsg().Type != protos.MsgType_MsgNotify {
+				p, err := ns.marshalResponse(resp)
+				err = ns.conn.Publish(req.GetMsg().GetReply(), p)
+				if err != nil {
+					logg.Error("error sending message response")
 				}
 			}
-			logger.Zap.Debug("rpcsv processing msg",
-				zap.String("route", ns.requests[threadID].Msg.Route),
-				zap.Int("goID", goID))
-			// 有session派发到session绑定线程,没有session 随机派发
-			req := ns.requests[threadID] // 拷贝一个给线程避免闭包问题
-			co.GoByID(goID, func() {
-				resp, err := ns.pitayaServer.Call(ctx, req)
-				if err != nil {
-					// pitayaServer.Call已有打印error,这里不再重复
-					logger.Zap.Info("rpc error calling pitayaServer", zap.String("route", req.Msg.Route),
-						zap.Int("goID", goID), zap.String("cause", err.Error()))
-				}
-				if req.GetMsg().Type != protos.MsgType_MsgNotify {
-					p, err := ns.marshalResponse(resp)
-					err = ns.conn.Publish(req.GetMsg().GetReply(), p)
-					if err != nil {
-						logger.Zap.Error("error sending message response")
-					}
-				}
-			})
-		}
+		})
 	}
 }
 

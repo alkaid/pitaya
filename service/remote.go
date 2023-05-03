@@ -176,12 +176,10 @@ func (r *RemoteService) Call(ctx context.Context, req *protos.Request) (*protos.
 			if res != nil {
 				code = int(res.Status.Code)
 			}
-			logFun := lo.If(code >= http.StatusInternalServerError, logger.Zap.Error).Else(logger.Zap.Warn)
+			logg := util.GetLoggerFromCtx(ctx)
+			logFun := lo.If(code >= http.StatusInternalServerError, logg.Error).Else(logg.Warn)
 			// 这里由于error转换了两次stack trace会丢失,详细log堆栈必须业务层打印
-			logFun("error calling rpc service,upstream must print stacktrace",
-				zap.String("uid", lo.If(req.Session == nil, "").ElseF(func() string { return req.Session.Uid })),
-				zap.String("route", req.GetMsg().GetRoute()),
-				zap.Error(err))
+			logFun("error calling rpc service,upstream must print stacktrace", zap.String("cause", err.Error()))
 		}
 	}()
 	rt, err := route.Decode(req.GetMsg().GetRoute())
@@ -193,8 +191,9 @@ func (r *RemoteService) Call(ctx context.Context, req *protos.Request) (*protos.
 	spanInfo.Route = rt
 	spanInfo.LocalID = r.server.ID
 	spanInfo.LocalType = r.server.Type
-	c, err := util.GetContextFromRequest(req, r.server.ID)
-	c = tracing.RPCStartSpan(c, spanInfo)
+	// 上层nats_rpc_server已经调用过,无需重复
+	// c, err := util.GetContextFromRequest(req, r.server.ID)
+	c := tracing.RPCStartSpan(ctx, spanInfo)
 	defer tracing.FinishSpan(c, err)
 
 	if err == nil {
@@ -597,14 +596,7 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 			ctx = util.CtxWithDefaultLogger(ctx, rt.String(), sess.UID())
 		}
 		var ret any
-		// 若启用了单线程反应堆模型,则派发到全局Looper单例
-		if interceptor.EnableReactor {
-			ret, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
-				return interceptor.InterceptorFun(ctx, *rt, req.GetMsg().GetData())
-			}).Wait(ctx)
-		} else {
-			ret, err = interceptor.InterceptorFun(ctx, *rt, req.GetMsg().GetData())
-		}
+		ret, err = interceptor.InterceptorFun(ctx, *rt, req.GetMsg().GetData())
 		if err != nil {
 			response := &protos.Response{
 				Status: &apierrors.FromError(err).Status,
@@ -716,14 +708,7 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 	}
 	// 和 handlerPool.ProcessHandlerMessage 一样加入hook处理
 	var arg2 any
-	if remote.Options.EnableReactor {
-		arg2, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
-			ctx, arg2, err = r.handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)
-			return arg2, err
-		}).Wait(ctx)
-	} else {
-		ctx, arg2, err = r.handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)
-	}
+	ctx, arg2, err = r.handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)
 	if err != nil {
 		response := &protos.Response{
 			Status: &apierrors.FromError(err).Status,
@@ -732,16 +717,12 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 	}
 	arg = arg2.(proto.Message)
 	var ret any
-	// 若启用了单线程反应堆模型,则派发到全局Looper单例
-	if remote.Options.EnableReactor {
-		ret, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
-			return util.Pcall(remote.Method, params)
-		}).Wait(ctx)
-	} else if remote.Options.TaskGoProvider != nil {
+	if remote.Options.TaskGoProvider != nil {
 		// 若提供了自定义派发线程
 		var wg sync.WaitGroup
 		wg.Add(1)
-		remote.Options.TaskGoProvider(ctx, func() {
+		remote.Options.TaskGoProvider(ctx, func(ctx context.Context) {
+			params[1] = reflect.ValueOf(ctx)
 			ret, err = util.Pcall(remote.Method, params)
 			wg.Done()
 		})
@@ -755,13 +736,7 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 		}
 		return response
 	}
-	if remote.Options.EnableReactor {
-		ret, err = co.LooperInstance.Async(ctx, func(ctx context.Context, coroutine co.Coroutine) (any, error) {
-			return r.handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, rt, arg, ret, err)
-		}).Wait(ctx)
-	} else {
-		ret, err = r.handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, rt, arg, ret, err)
-	}
+	ret, err = r.handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, rt, arg, ret, err)
 	if err != nil {
 		response := &protos.Response{
 			Status: &apierrors.FromError(err).Status,
@@ -848,11 +823,12 @@ func (r *RemoteService) remoteCall(
 
 	res, err := r.rpcClient.Call(ctx, rpcType, route, session, msg, target)
 	if err != nil {
+		logg := util.GetLoggerFromCtx(ctx)
 		code := apierrors.Code(err)
-		logFun := lo.If(code >= http.StatusInternalServerError, logger.Zap.Error).Else(logger.Zap.Warn)
+		logFun := lo.If(code >= http.StatusInternalServerError, logg.Error).Else(logg.Warn)
 		logFun("error making call to target",
-			zap.String("uid", lo.If(session == nil, "").ElseF(func() string { return session.UID() })),
-			zap.Stringer("route", route), zap.String("host", target.Hostname), zap.String("svID", target.ID),
+			zap.String("targetUid", lo.If(session == nil, "").ElseF(func() string { return session.UID() })),
+			zap.Stringer("targetRoute", route), zap.String("host", target.Hostname), zap.String("svID", target.ID),
 			zap.Error(err))
 		return nil, err
 	}

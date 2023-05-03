@@ -1,80 +1,104 @@
-// Package co 协程包
+// Package co 线程池
 package co
 
 import (
-	"runtime"
+	"context"
+
+	"github.com/panjf2000/ants/v2"
+	"github.com/topfreegames/pitaya/v2/logger"
+	"github.com/topfreegames/pitaya/v2/util"
+	"go.uber.org/zap"
 )
 
-const defaultCoBuffers = 100000
-
-type CoroutineConfig struct {
-	Nums    int
-	Buffers int
+// GoWithPool 根据指定的线程池及goroutineID派发线程
+//
+//	@param ctx
+//	@param poolName 指定线程池
+//	@param goID 线程ID
+//	@param task
+func GoWithPool[T int | int32 | int64](ctx context.Context, poolName string, goID T, task func(ctx context.Context)) (done chan struct{}) {
+	return instance.pools[poolName].Go(ctx, int(goID), task)
 }
 
-// // RegNewGroupWithConfig 创建 cointf.Coroutine 所在线程的分组,并注册到系统
-// //  @param id
-// //  @param config
-// //  @return error
-// func RegNewGroupWithConfig(id string, config *CoroutineConfig) ([]*Looper, error) {
-// 	if holder.Died {
-// 		return nil, constants.ErrClosedGroup
-// 	}
-// 	if _, ok := holder.groups[id]; ok {
-// 		return nil, constants.ErrGroupAlreadyExists
-// 	}
-// 	applyDefault(config)
-// 	var list []*Looper
-// 	for i := 0; i < config.Nums; i++ {
-// 		list = append(list, NewLooper(i, config.Buffers))
-// 	}
-// 	holder.groups[id] = list
-// 	return list, nil
-// }
+// WaitWithPool 根据指定的线程池及goroutineID派发线程并阻塞等待
 //
-// // RegNewGroup 使用默认配置创建 cointf.Coroutine 所在线程的分组,并注册到系统
-// //  @param id
-// //  @return error
-// func RegNewGroup(id string) ([]*Looper, error) {
-// 	return RegNewGroupWithConfig(id, &CoroutineConfig{})
-// }
-
-// applyDefault 默认配置
-//
-//	@param config
-func applyDefault(config *CoroutineConfig) {
-	if config.Nums <= 0 {
-		config.Nums = runtime.GOMAXPROCS(0)
-	}
-	if config.Buffers <= 0 {
-		config.Buffers = defaultCoBuffers
-	}
+//	@param ctx
+//	@param poolName 指定线程池
+//	@param goID 线程ID
+//	@param task
+func WaitWithPool[T int | int32 | int64](ctx context.Context, poolName string, goID T, task func(ctx context.Context)) {
+	instance.pools[poolName].Wait(ctx, int(goID), task)
 }
 
+// GoWithID 根据指定goroutineID派发到默认线程池
 //
-// // AsyncWithHash 在全局默认线程组的对应线程上启动一个 Coroutine
-// //  @param ctx
-// //  @param hash 指定hash,会按该值取模后分发给全局默认线程组的对应线程执行
-// //  @param task
-// func AsyncWithHash(ctx context.Context, hash int, task AsyncFun) {
-// 	node := hash % len(holder.pitayaGroup)
-// 	sch := holder.pitayaGroup[node]
-// 	sch.Async(ctx, task)
-// }
+//	@param ctx
+//	@param goID 线程ID
+//	@param task
+func GoWithID[T int | int32 | int64](ctx context.Context, goID T, task func(ctx context.Context)) (done chan struct{}) {
+	return instance.pools[DefaultGoPoolName].Go(ctx, int(goID), task)
+}
 
+// WaitWithID 根据指定的goroutineID派发到默认线程池并阻塞等待
 //
-// // AsyncWithGroup 在指定分组的的线程上启动一个 Coroutine
-// //  @param ctx
-// //  @param groupId 分组id,用该id寻找所在线程分组
-// //  @param hash 指定hash,会按该值取模后分发给groupId对应的Group的对应线程执行
-// //  @param task
-// func AsyncWithGroup(ctx context.Context, groupId string, hash int, task AsyncFun) {
-// 	group, ok := holder.groups[groupId]
-// 	if !ok {
-// 		logger.Zap.Error("", zap.Error(constants.ErrGroupNotFound))
-// 		return
-// 	}
-// 	node := hash % len(group)
-// 	sch := group[node]
-// 	sch.Async(ctx, task)
-// }
+//	@param ctx
+//	@param goID 线程ID
+//	@param task
+func WaitWithID[T int | int32 | int64](ctx context.Context, goID T, task func(ctx context.Context)) {
+	instance.pools[DefaultGoPoolName].Wait(ctx, int(goID), task)
+}
+
+// GoWithUser 派发到用户线程
+//
+//	@param ctx
+//	@param uid
+//	@param task
+func GoWithUser(ctx context.Context, uid int64, task func(ctx context.Context)) (done chan struct{}) {
+	if uid <= 0 {
+		util.GetLoggerFromCtx(ctx).Error("uid invalid", zap.Int64("uid", uid))
+		return
+	}
+	return instance.pools[UserGoPoolName].Go(ctx, int(uid), task)
+}
+
+// WaitWithUser 派发到用户线程并阻塞等待
+//
+//	@param ctx
+//	@param uid
+//	@param task
+func WaitWithUser(ctx context.Context, uid int64, task func(ctx context.Context)) {
+	if uid <= 0 {
+		util.GetLoggerFromCtx(ctx).Error("uid invalid", zap.Int64("uid", uid))
+		return
+	}
+	instance.pools[UserGoPoolName].Wait(ctx, int(uid), task)
+}
+
+// GoMain 根据派发到默认线程池的主线程,线程id为 MainThreadID
+//
+//	@param ctx
+//	@param goID 线程ID
+//	@param task
+func GoMain(ctx context.Context, task func(ctx context.Context)) (done chan struct{}) {
+	return instance.pools[DefaultGoPoolName].Go(ctx, MainThreadID, task)
+}
+
+// WaitMain 派发到默认线程池的主线程并阻塞等待,线程id为 MainThreadID
+//
+//	@param ctx
+//	@param goID 线程ID
+//	@param task
+func WaitMain(ctx context.Context, task func(ctx context.Context)) {
+	instance.pools[DefaultGoPoolName].Wait(ctx, MainThreadID, task)
+}
+
+// Go 从无状态线程池获取一个goroutine并派发任务
+//
+//	@param task
+func Go(task func()) {
+	err := ants.Submit(task)
+	if err != nil {
+		logger.Zap.Error("submit task error", zap.Error(err))
+		return
+	}
+}
