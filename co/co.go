@@ -17,7 +17,7 @@ import (
 //	@param goID 线程ID
 //	@param task
 func GoWithPool[T int | int32 | int64](ctx context.Context, poolName string, goID T, task func(ctx context.Context)) (done chan struct{}) {
-	return instance.pools[poolName].Go(ctx, int(goID), task)
+	return instance.pools[poolName].Go(ctx, int(goID), task, false)
 }
 
 // WaitWithPool 根据指定的线程池及goroutineID派发线程并阻塞等待
@@ -27,7 +27,27 @@ func GoWithPool[T int | int32 | int64](ctx context.Context, poolName string, goI
 //	@param goID 线程ID
 //	@param task
 func WaitWithPool[T int | int32 | int64](ctx context.Context, poolName string, goID T, task func(ctx context.Context)) {
-	instance.pools[poolName].Wait(ctx, int(goID), task)
+	instance.pools[poolName].Wait(ctx, int(goID), task, false)
+}
+
+// GoWithPoolWithoutWatch 根据指定的线程池及goroutineID派发线程,不带超时监控
+//
+//	@param ctx
+//	@param poolName 指定线程池
+//	@param goID 线程ID
+//	@param task
+func GoWithPoolWithoutWatch[T int | int32 | int64](ctx context.Context, poolName string, goID T, task func(ctx context.Context)) (done chan struct{}) {
+	return instance.pools[poolName].Go(ctx, int(goID), task, true)
+}
+
+// WaitWithPoolWithoutWatch 根据指定的线程池及goroutineID派发线程并阻塞等待,不带超时监控
+//
+//	@param ctx
+//	@param poolName 指定线程池
+//	@param goID 线程ID
+//	@param task
+func WaitWithPoolWithoutWatch[T int | int32 | int64](ctx context.Context, poolName string, goID T, task func(ctx context.Context)) {
+	instance.pools[poolName].Wait(ctx, int(goID), task, true)
 }
 
 // GoWithID 根据指定goroutineID派发到默认线程池
@@ -36,16 +56,34 @@ func WaitWithPool[T int | int32 | int64](ctx context.Context, poolName string, g
 //	@param goID 线程ID
 //	@param task
 func GoWithID[T int | int32 | int64](ctx context.Context, goID T, task func(ctx context.Context)) (done chan struct{}) {
-	return instance.pools[DefaultGoPoolName].Go(ctx, int(goID), task)
+	return instance.pools[DefaultGoPoolName].Go(ctx, int(goID), task, false)
 }
 
-// WaitWithID 根据指定的goroutineID派发到默认线程池并阻塞等待
+// WaitWithID 根据指定的goroutineID派发到默认线程池并阻塞等待,不带超时监控
 //
 //	@param ctx
 //	@param goID 线程ID
 //	@param task
 func WaitWithID[T int | int32 | int64](ctx context.Context, goID T, task func(ctx context.Context)) {
-	instance.pools[DefaultGoPoolName].Wait(ctx, int(goID), task)
+	instance.pools[DefaultGoPoolName].Wait(ctx, int(goID), task, false)
+}
+
+// GoWithIDWithoutWatch 根据指定goroutineID派发到默认线程池,不带超时监控
+//
+//	@param ctx
+//	@param goID 线程ID
+//	@param task
+func GoWithIDWithoutWatch[T int | int32 | int64](ctx context.Context, goID T, task func(ctx context.Context)) (done chan struct{}) {
+	return instance.pools[DefaultGoPoolName].Go(ctx, int(goID), task, true)
+}
+
+// WaitWithIDWithoutWatch 根据指定的goroutineID派发到默认线程池并阻塞等待,不带超时监控
+//
+//	@param ctx
+//	@param goID 线程ID
+//	@param task
+func WaitWithIDWithoutWatch[T int | int32 | int64](ctx context.Context, goID T, task func(ctx context.Context)) {
+	instance.pools[DefaultGoPoolName].Wait(ctx, int(goID), task, true)
 }
 
 // GoWithUser 派发到用户线程
@@ -58,7 +96,7 @@ func GoWithUser(ctx context.Context, uid int64, task func(ctx context.Context)) 
 		util.GetLoggerFromCtx(ctx).Error("uid invalid", zap.Int64("uid", uid))
 		return
 	}
-	return instance.pools[UserGoPoolName].Go(ctx, int(uid), task)
+	return instance.pools[UserGoPoolName].Go(ctx, int(uid), task, false)
 }
 
 // WaitWithUser 派发到用户线程并阻塞等待
@@ -71,7 +109,7 @@ func WaitWithUser(ctx context.Context, uid int64, task func(ctx context.Context)
 		util.GetLoggerFromCtx(ctx).Error("uid invalid", zap.Int64("uid", uid))
 		return
 	}
-	instance.pools[UserGoPoolName].Wait(ctx, int(uid), task)
+	instance.pools[UserGoPoolName].Wait(ctx, int(uid), task, false)
 }
 
 // GoMain 根据派发到默认线程池的主线程,线程id为 MainThreadID
@@ -80,7 +118,7 @@ func WaitWithUser(ctx context.Context, uid int64, task func(ctx context.Context)
 //	@param goID 线程ID
 //	@param task
 func GoMain(ctx context.Context, task func(ctx context.Context)) (done chan struct{}) {
-	return instance.pools[DefaultGoPoolName].Go(ctx, MainThreadID, task)
+	return instance.pools[DefaultGoPoolName].Go(ctx, MainThreadID, task, false)
 }
 
 // WaitMain 派发到默认线程池的主线程并阻塞等待,线程id为 MainThreadID
@@ -89,7 +127,7 @@ func GoMain(ctx context.Context, task func(ctx context.Context)) (done chan stru
 //	@param goID 线程ID
 //	@param task
 func WaitMain(ctx context.Context, task func(ctx context.Context)) {
-	instance.pools[DefaultGoPoolName].Wait(ctx, MainThreadID, task)
+	instance.pools[DefaultGoPoolName].Wait(ctx, MainThreadID, task, false)
 }
 
 // Go 从无状态线程池获取一个goroutine并派发任务

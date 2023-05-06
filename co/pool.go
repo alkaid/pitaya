@@ -60,7 +60,7 @@ func (s *StatefulPool) Name() string {
 //	@receiver h
 //	@param goID 若>0,派发到指定线程,否则随机派发
 //	@param task
-func (s *StatefulPool) Go(ctx context.Context, goID int, task func(ctx context.Context)) (done chan struct{}) {
+func (s *StatefulPool) Go(ctx context.Context, goID int, task func(ctx context.Context), disableTimeoutWatch bool) (done chan struct{}) {
 	done = make(chan struct{})
 	logg := util.GetLoggerFromCtx(ctx).With(zap.String("pool", s.Name())).With(zap.Int("goID", goID))
 	ctx = context.WithValue(ctx, constants.LoggerCtxKey, logg)
@@ -68,7 +68,7 @@ func (s *StatefulPool) Go(ctx context.Context, goID int, task func(ctx context.C
 		task(ctx)
 		close(done)
 	}
-	if !s.config.DisableTimeoutWatch {
+	if !s.config.DisableTimeoutWatch && !disableTimeoutWatch {
 		timeoutErr := errors.NewWithStack("goroutine timeout")
 		Go(func() {
 			for _, timeout := range s.config.TimeoutBuckets {
@@ -93,8 +93,8 @@ func (s *StatefulPool) Go(ctx context.Context, goID int, task func(ctx context.C
 	return done
 }
 
-func (s *StatefulPool) Wait(ctx context.Context, goID int, task func(ctx context.Context)) {
-	done := s.Go(ctx, goID, task)
+func (s *StatefulPool) Wait(ctx context.Context, goID int, task func(ctx context.Context), disableTimeoutWatch bool) {
+	done := s.Go(ctx, goID, task, disableTimeoutWatch)
 	select {
 	case <-done:
 	case <-ctx.Done():
