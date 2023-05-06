@@ -68,8 +68,8 @@ func (s *StatefulPool) Go(ctx context.Context, goID int, task func(ctx context.C
 		task(ctx)
 		close(done)
 	}
-
 	if !s.config.DisableTimeoutWatch {
+		timeoutErr := errors.NewWithStack("goroutine timeout")
 		Go(func() {
 			for _, timeout := range s.config.TimeoutBuckets {
 				select {
@@ -78,7 +78,7 @@ func (s *StatefulPool) Go(ctx context.Context, goID int, task func(ctx context.C
 				case <-ctx.Done():
 					return
 				case <-time.After(timeout):
-					logg.Error("goroutine timeout", zap.Duration("timeout", timeout))
+					logg.Error("", zap.Duration("timeout", timeout), zap.Error(timeoutErr))
 					metrics.ReportPoolGoDeadlines(ctx, s.Name(), int(timeout/time.Second), s.reporters)
 				}
 			}
