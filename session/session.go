@@ -761,10 +761,12 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, callback map[string]
 	}
 
 	s.uid = uid
+	s.uidInt = util.ForceIdStrToInt(s.uid)
 	for _, cb := range s.pool.sessionBindCallbacks {
 		err = cb(ctx, s, callback)
 		if err != nil {
 			s.uid = ""
+			s.uidInt = 0
 			return err
 		}
 	}
@@ -772,6 +774,7 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, callback map[string]
 		err = cb(ctx, s, callback)
 		if err != nil {
 			s.uid = ""
+			s.uidInt = 0
 			return err
 		}
 	}
@@ -787,6 +790,7 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, callback map[string]
 		if err != nil {
 			logger.Zap.Error("error while trying to push session to front", zap.Error(err))
 			s.uid = ""
+			s.uidInt = 0
 			return err
 		}
 
@@ -875,7 +879,6 @@ func (s *sessionImpl) KickBackend(ctx context.Context, targetServerType string, 
 	for _, cb := range s.pool.kickBackendCallbacks {
 		err := cb(ctx, s, targetServerType, backendID, callback, rea)
 		if err != nil {
-			s.uid = ""
 			return err
 		}
 	}
@@ -888,7 +891,6 @@ func (s *sessionImpl) KickBackend(ctx context.Context, targetServerType string, 
 	for _, cb := range s.pool.afterKickBackendCallbacks {
 		err := cb(ctx, s, targetServerType, backendID, callback, rea)
 		if err != nil {
-			s.uid = ""
 			return err
 		}
 	}
