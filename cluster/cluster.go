@@ -190,5 +190,5 @@ func GoWithRequest(ctx context.Context, req *protos.Request, task func(ctx conte
 		return
 	}
 	sid := session.FrontendSessHash(req.FrontendID, req.Session.Id)
-	co.GoWithPool(ctx, co.SessionGoPoolName, sid, task)
+	co.GoWithID(ctx, sid, task, co.WithPoolName(co.SessionGoPoolName))
 }

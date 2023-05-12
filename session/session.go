@@ -1504,7 +1504,7 @@ func (s *sessionImpl) Go(ctx context.Context, task func(ctx context.Context)) {
 		return
 	}
 	sid := lo.If(s.IsFrontend, s.id).Else(FrontendSessHash(s.frontendID, s.frontendSessionID))
-	co.GoWithPool(ctx, co.SessionGoPoolName, sid, task)
+	co.GoWithID(ctx, sid, task, co.WithPoolName(co.SessionGoPoolName))
 }
 
 func (s *sessionImpl) HasRequestsInFlight() bool {

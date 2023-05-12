@@ -2,6 +2,7 @@ package co
 
 import (
 	"math"
+	"time"
 
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/interfaces"
@@ -16,8 +17,13 @@ const (
 	SessionGoPoolName = "session"   // session线程池,仅框架内部使用
 	UserGoPoolName    = "user"      // user线程池,仅框架内部使用
 	DefaultGoPoolName = "default"   // 默认线程池,仅框架内部使用
+	PersistGoPoolName = "persist"   // 常驻线程池,池子里的线程(运行时)常驻不销毁
 	MainThreadID      = math.MaxInt // 主线程ID
 )
+
+var builtinPool = []string{
+	SessionGoPoolName, UserGoPoolName, DefaultGoPoolName, PersistGoPoolName,
+}
 
 type StatefulPoolsModule struct {
 	reporters []metrics.Reporter
@@ -40,21 +46,14 @@ func NewStatefulPoolsModule(poolsCfg map[string]config.GoPool, reporters []metri
 	if module.cfgMap == nil {
 		module.cfgMap = map[string]config.GoPool{}
 	}
-	// 若没有配置session线程池,要加上
-	_, ok := module.cfgMap[SessionGoPoolName]
-	if !ok {
-		module.cfgMap[SessionGoPoolName] = config.GoPool{Name: SessionGoPoolName}
+	// 若没有配置内建线程池,要加上
+	for _, name := range builtinPool {
+		_, ok := module.cfgMap[name]
+		if !ok {
+			module.cfgMap[name] = config.GoPool{Name: name}
+		}
 	}
-	// 若没有配置user线程池,要加上
-	_, ok = module.cfgMap[UserGoPoolName]
-	if !ok {
-		module.cfgMap[UserGoPoolName] = config.GoPool{Name: UserGoPoolName}
-	}
-	// 若没有配置默认线程池,要加上
-	_, ok = module.cfgMap[DefaultGoPoolName]
-	if !ok {
-		module.cfgMap[DefaultGoPoolName] = config.GoPool{Name: DefaultGoPoolName}
-	}
+	module.cfgMap[PersistGoPoolName] = config.GoPool{Name: PersistGoPoolName, DisablePurgeRunning: true, Expire: time.Hour}
 	instance = &module
 	return &module
 }

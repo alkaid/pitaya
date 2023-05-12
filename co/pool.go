@@ -11,6 +11,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/metrics"
 	"github.com/topfreegames/pitaya/v2/util"
 	"go.uber.org/zap"
+	"golang.org/x/exp/slices"
 )
 
 const (
@@ -22,12 +23,12 @@ var DefaultStatefulPoolTimeoutBuckets = []time.Duration{5 * time.Second, 10 * ti
 
 // StatefulPool 带状态的线程池
 type StatefulPool struct {
-	pool      *ants.Pool
+	pool      *ants.PoolWithID
 	config    config.GoPool
 	reporters []metrics.Reporter
 }
 
-func NewStatefulPool(config config.GoPool, reporters []metrics.Reporter) (*StatefulPool, error) {
+func NewStatefulPool(config config.GoPool, reporters []metrics.Reporter, options ...ants.Option) (*StatefulPool, error) {
 	if config.Name == "" {
 		return nil, errors.New("stateful pool name cannot be nil")
 	}
@@ -40,10 +41,16 @@ func NewStatefulPool(config config.GoPool, reporters []metrics.Reporter) (*State
 	if len(config.TimeoutBuckets) == 0 {
 		config.TimeoutBuckets = DefaultStatefulPoolTimeoutBuckets
 	}
-	p, err := ants.NewPool(ants.DefaultAntsPoolSize, ants.WithTaskBuffer(config.TaskBuffer), ants.WithExpiryDuration(config.Expire))
+	options = append(options,
+		ants.WithTaskBuffer(config.TaskBuffer),
+		ants.WithExpiryDuration(config.Expire),
+		ants.WithDisablePurgeRunning(config.DisablePurgeRunning),
+		ants.WithDisablePurge(config.DisablePurge))
+	p, err := ants.NewPoolWithID(ants.DefaultAntsPoolSize, options...)
 	if err != nil {
 		return nil, err
 	}
+	slices.Sort(config.TimeoutBuckets)
 	return &StatefulPool{
 		config:    config,
 		reporters: reporters,
@@ -58,7 +65,7 @@ func (s *StatefulPool) Name() string {
 // Go 根据指定的goroutineID派发线程
 //
 //	@receiver h
-//	@param goID 若>0,派发到指定线程,否则随机派发
+//	@param goID
 //	@param task
 func (s *StatefulPool) Go(ctx context.Context, goID int, task func(ctx context.Context), disableTimeoutWatch bool) (done chan struct{}) {
 	done = make(chan struct{})
@@ -68,6 +75,7 @@ func (s *StatefulPool) Go(ctx context.Context, goID int, task func(ctx context.C
 		task(ctx)
 		close(done)
 	}
+	submitted := false
 	if !s.config.DisableTimeoutWatch && !disableTimeoutWatch {
 		timeoutErr := errors.NewWithStack("goroutine timeout")
 		Go(func() {
@@ -78,18 +86,19 @@ func (s *StatefulPool) Go(ctx context.Context, goID int, task func(ctx context.C
 				case <-ctx.Done():
 					return
 				case <-time.After(timeout):
-					logg.Error("", zap.Duration("timeout", timeout), zap.Error(timeoutErr))
+					logg.Error("", zap.Duration("timeout", timeout), zap.Bool("submitted", submitted), zap.Error(timeoutErr))
 					metrics.ReportPoolGoDeadlines(ctx, s.Name(), int(timeout/time.Second), s.reporters)
 				}
 			}
 		})
 	}
 	logg.Debug("submit")
-	err := s.pool.SubmitWithID(goID, taskWithDone)
+	err := s.pool.Submit(goID, taskWithDone)
 	if err != nil {
 		logg.Error("submit task with id error", zap.Error(err))
 		return
 	}
+	submitted = true
 	return done
 }
 
