@@ -55,7 +55,7 @@ func NewLogger(cfg zap.Config, opts ...Option) *Logger {
 	for _, opt := range opts {
 		opt(options)
 	}
-	if options.StackWithFmtFormatter {
+	if cfg.Encoding == "console" && options.StackWithFmtFormatter {
 		log = log.WithOptions(zap.WrapCore(WrapCore))
 	}
 	return &Logger{
@@ -125,7 +125,7 @@ func (l *Logger) SetDevelopment(enable bool) {
 		l.Sugar.Errorf("uber/zap build error: %w", err)
 		return
 	}
-	if l.options.StackWithFmtFormatter {
+	if cfg.Encoding == "console" && l.options.StackWithFmtFormatter {
 		log = log.WithOptions(zap.WrapCore(WrapCore))
 	}
 	l.Log = log
