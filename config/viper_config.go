@@ -22,6 +22,7 @@ package config
 
 import (
 	"context"
+	"github.com/topfreegames/pitaya/v2/util/viperx"
 	"strings"
 	"time"
 
@@ -66,7 +67,7 @@ func (l LoaderFactory) Provide() (key string, confStruct interface{}) {
 
 // Config is a wrapper around a viper config
 type Config struct {
-	config    *viper.Viper
+	config    *viperx.Viperx
 	loaders   []ConfLoader
 	pitayaAll *PitayaAll
 	inited    bool
@@ -74,11 +75,11 @@ type Config struct {
 
 // NewConfig creates a new config with a given viper config if given
 func NewConfig(cfgs ...*viper.Viper) *Config {
-	var cfg *viper.Viper
+	var cfg *viperx.Viperx
 	if len(cfgs) > 0 {
-		cfg = cfgs[0]
+		cfg = &viperx.Viperx{Viper: cfgs[0]}
 	} else {
-		cfg = viper.New()
+		cfg = viperx.NewViperx()
 	}
 
 	cfg.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
@@ -217,7 +218,7 @@ func (c *Config) fillDefaultValues() {
 func (c *Config) PitayaAll() PitayaAll {
 	return *c.pitayaAll
 }
-func (c *Config) Viper() *viper.Viper {
+func (c *Config) Viper() *viperx.Viperx {
 	return c.config
 }
 
