@@ -26,6 +26,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"google.golang.org/protobuf/proto"
 	"net"
 	"net/url"
 	"strings"
@@ -227,7 +228,7 @@ func (c *Client) pendingRequestsReaper() {
 			}
 			for _, pendingReq := range toDelete {
 				err := apierrors.GatewayTimeout("", "request timeout", "")
-				errMarshalled, _ := json.Marshal(err)
+				errMarshalled, _ := proto.Marshal(&err.Status)
 				// send a timeout to incoming msg chan
 				m := &message.Message{
 					Type:  message.Response,
