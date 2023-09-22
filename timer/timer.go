@@ -145,9 +145,9 @@ func pexec(id int64, fn Func) {
 	defer func() {
 		if err := recover(); err != nil {
 			if err_, ok := err.(error); ok {
-				logger.Zap.Error("Call timer function error, TimerID=%d, Error=%v", zap.Int64("TimerID", id), zap.Error(err_))
+				logger.Zap.DPanic("Call timer function error, TimerID=%d, Error=%v", zap.Int64("TimerID", id), zap.Error(err_))
 			} else {
-				logger.Zap.Error("Call timer function error, TimerID=%d, Error=%v", zap.Int64("TimerID", id), zap.Any("recover", err))
+				logger.Zap.DPanic("Call timer function error, TimerID=%d, Error=%v", zap.Int64("TimerID", id), zap.Any("recover", err))
 			}
 		}
 	}()

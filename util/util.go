@@ -83,7 +83,7 @@ func SafeCall(onRecovered func(rec any), method func()) {
 			// Try to use logger from context here to help trace error cause
 			stackTrace := debug.Stack()
 			stackTraceAsRawStringLiteral := strconv.Quote(string(stackTrace))
-			logger.Zap.Error("panic - pitaya method", zap.Any("panicData", rec), zap.String("stack", stackTraceAsRawStringLiteral))
+			logger.Zap.DPanic("panic - pitaya method", zap.Any("panicData", rec), zap.String("stack", stackTraceAsRawStringLiteral))
 			if onRecovered == nil {
 				return
 			}
@@ -101,7 +101,7 @@ func Pcall(method reflect.Method, args []reflect.Value) (rets interface{}, err e
 			stackTrace := debug.Stack()
 			stackTraceAsRawStringLiteral := strconv.Quote(string(stackTrace))
 			log := getLoggerFromArgs(args)
-			log.Error("panic - pitaya/dispatch", zap.String("methodName", method.Name), zap.Any("panicData", rec), zap.String("stack", stackTraceAsRawStringLiteral))
+			log.DPanic("panic - pitaya/dispatch", zap.String("methodName", method.Name), zap.Any("panicData", rec), zap.String("stack", stackTraceAsRawStringLiteral))
 
 			if s, ok := rec.(string); ok {
 				err = errors.New(s)
