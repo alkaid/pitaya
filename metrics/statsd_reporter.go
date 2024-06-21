@@ -22,6 +22,7 @@ package metrics
 
 import (
 	"fmt"
+
 	"github.com/topfreegames/pitaya/v2/constants"
 
 	"go.uber.org/zap"
@@ -49,7 +50,7 @@ type StatsdReporter struct {
 // NewStatsdReporter returns an instance of statsd reportar and an
 // error if something fails
 func NewStatsdReporter(
-	config config.StatsdConfig,
+	config config.MetricsConfig,
 	serverType string,
 	clientOrNil ...Client,
 ) (*StatsdReporter, error) {
@@ -57,7 +58,7 @@ func NewStatsdReporter(
 }
 
 func newStatsdReporter(
-	config config.StatsdConfig,
+	config config.MetricsConfig,
 	serverType string,
 	clientOrNil ...Client) (*StatsdReporter, error) {
 	sr := &StatsdReporter{

@@ -26,6 +26,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nuid"
@@ -181,8 +183,13 @@ func (h *HandlerService) Handle(conn acceptor.PlayerConn) {
 		msg, err := conn.GetNextMessage()
 
 		if err != nil {
-			if !errors.Is(err, constants.ErrConnectionClosed) {
-				logger.Zap.Warn("Error reading next available message", zap.Error(err))
+			// Check if this is an expected error due to connection being closed
+			if errors.Is(err, net.ErrClosed) {
+				logger.Zap.Debug("Connection no longer available while reading next available message:", err.Error())
+			} else if errors.Is(err, constants.ErrConnectionClosed) {
+				logger.Zap.Debugf("Connection no longer available while reading next available message:", err.Error())
+			} else {
+				logger.Zap.Warn("Error reading next available message:", err.Error())
 			}
 
 			return
@@ -213,29 +220,46 @@ func (h *HandlerService) processPacket(a agent.Agent, p *packet.Packet) error {
 	switch p.Type {
 	case packet.Handshake:
 		logger.Log.Debug("Received handshake packet")
+
+		// Parse the json sent with the handshake by the client
+		handshakeData := &session.HandshakeData{}
+		if err := json.Unmarshal(p.Data, handshakeData); err != nil {
+			defer a.Close()
+			logger.Zap.Error("Failed to unmarshal handshake data", zap.Error(err))
+			if serr := a.SendHandshakeErrorResponse(); serr != nil {
+				logger.Zap.Error("Error sending handshake error response", zap.Error(err))
+				return err
+			}
+
+			return fmt.Errorf("invalid handshake data. Id=%d", a.GetSession().ID())
+		}
+
+		if err := a.GetSession().ValidateHandshake(handshakeData); err != nil {
+			defer a.Close()
+			logger.Log.Errorf("Handshake validation failed: %s", err.Error())
+			if serr := a.SendHandshakeErrorResponse(); serr != nil {
+				logger.Zap.Error("Error sending handshake error response", zap.Error(err))
+				return err
+			}
+
+			return fmt.Errorf("handshake validation failed: %w. SessionId=%d", err, a.GetSession().ID())
+		}
+
 		if err := a.SendHandshakeResponse(); err != nil {
 			logger.Zap.Error("Error sending handshake response", zap.Error(err))
 			return err
 		}
 		logger.Log.Debugf("Session handshake Id=%d, Remote=%s", a.GetSession().ID(), a.RemoteAddr())
 
-		// Parse the json sent with the handshake by the client
-		handshakeData := &session.HandshakeData{}
-		err := json.Unmarshal(p.Data, handshakeData)
-		if err != nil {
-			a.SetStatus(constants.StatusClosed)
-			return fmt.Errorf("Invalid handshake data. Id=%d", a.GetSession().ID())
-		}
-
 		a.GetSession().SetHandshakeData(handshakeData)
 		a.SetStatus(constants.StatusHandshake)
 		// ipversion 暂时用不到
-		// err = a.GetSession().Set(constants.IPVersionKey, a.IPVersion())
-		// if err != nil {
-		// 	logger.Log.Warnf("failed to save ip version on session: %q\n", err)
-		// }
+		//err := a.GetSession().Set(constants.IPVersionKey, a.IPVersion())
+		//if err != nil {
+		//	logger.Log.Warnf("failed to save ip version on session: %q\n", err)
+		//}
 
-		logger.Log.Debug("Successfully saved handshake data")
+		logger.Zap.Debug("Successfully saved handshake data")
 
 	case packet.HandshakeAck:
 		a.SetStatus(constants.StatusWorking)
@@ -336,6 +360,7 @@ func (h *HandlerService) localProcess(ctx context.Context, a agent.Agent, route 
 	case message.Notify:
 		mid = 0
 	}
+
 	ret, err := h.handlerPool.ProcessHandlerMessage(ctx, route, h.serializer, h.handlerHooks, a.GetSession(), msg.Data, msg.Type, false)
 	if msg.Type != message.Notify {
 		if err != nil {

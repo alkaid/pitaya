@@ -84,7 +84,7 @@ func TestNewAgent(t *testing.T) {
 		func(typ packet.Type, d []byte) {
 			// cannot compare inside the expect because they are equivalent but not equal
 			assert.EqualValues(t, packet.Handshake, typ)
-		})
+		}).Times(2)
 	mockEncoder.EXPECT().Encode(gomock.Any(), gomock.Nil()).Do(
 		func(typ packet.Type, d []byte) {
 			assert.EqualValues(t, packet.Heartbeat, typ)
@@ -219,7 +219,7 @@ func TestAgentSendSerializeErr(t *testing.T) {
 	sessionPool := session.NewSessionPool()
 	ag := &agentImpl{ // avoid heartbeat and handshake to fully test serialize
 		conn:             mockConn,
-		chSend:           make(chan pendingWrite, 1),
+		chSend:           make(chan pendingWrite, 10),
 		encoder:          mockEncoder,
 		heartbeatTimeout: time.Second,
 		lastAt:           time.Now().Unix(),
@@ -1020,7 +1020,7 @@ func TestAgentWriteChSend(t *testing.T) {
 	mockMetricsReporters := []metrics.Reporter{mockMetricsReporter}
 	ag := &agentImpl{ // avoid heartbeat and handshake to fully test serialize
 		conn:             mockConn,
-		chSend:           make(chan pendingWrite, 1),
+		chSend:           make(chan pendingWrite, 10),
 		encoder:          mockEncoder,
 		heartbeatTimeout: time.Second,
 		lastAt:           time.Now().Unix(),
@@ -1036,6 +1036,7 @@ func TestAgentWriteChSend(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	mockConn.EXPECT().Write(expectedPacket).Do(func(b []byte) {
+		time.Sleep(10 * time.Millisecond)
 		wg.Done()
 	})
 	go ag.write()
@@ -1057,7 +1058,6 @@ func TestAgentHandle(t *testing.T) {
 	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, 1*time.Second, 1, nil, messageEncoder, nil, sessionPool).(*agentImpl)
 	assert.NotNil(t, ag)
 
-	go ag.Handle()
 	expectedBytes := []byte("bla")
 
 	// Sends two heartbeats and then times out
@@ -1083,6 +1083,8 @@ func TestAgentHandle(t *testing.T) {
 	mockConn.EXPECT().Close().MaxTimes(1)
 
 	ag.chSend <- pendingWrite{ctx: nil, data: expectedBytes, err: nil}
+
+	go ag.Handle()
 
 	wg.Wait()
 	helpers.ShouldEventuallyReturn(t, func() bool { return closed }, true, 50*time.Millisecond, 5*time.Second)

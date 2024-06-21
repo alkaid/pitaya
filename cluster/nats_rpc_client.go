@@ -208,7 +208,14 @@ func (ns *NatsRPCClient) Publish(
 		m, err := sub.NextMsg(timeoutPerReply)
 		if err != nil {
 			if errors.Is(err, nats.ErrTimeout) {
-				err = fmt.Errorf("%w:%s", constants.ErrRPCTimeout, nats.ErrTimeout.Error())
+				err = errors.NewError(constants.ErrRPCRequestTimeout, "PIT-408", map[string]string{
+					"timeout": timeout.String(),
+					"route":   route.String(),
+					"server":  ns.server.ID,
+					"peer.id": server.ID,
+					"reason":  nats.ErrTimeout.Error(),
+				})
+				//err = fmt.Errorf("%w:%s", constants.ErrRPCTimeout, nats.ErrTimeout.Error())
 				return responses, errors.WithStack(err)
 			} else if errors.Is(err, nats.ErrNoResponders) {
 				// 读完最后一个
@@ -230,7 +237,7 @@ func (ns *NatsRPCClient) Publish(
 	return responses, nil
 }
 
-// Call calls a method remotelly
+// Call calls a method remotely
 func (ns *NatsRPCClient) Call(
 	ctx context.Context,
 	rpcType protos.RPCType,
@@ -269,10 +276,14 @@ func (ns *NatsRPCClient) Call(
 		defer session.SetRequestInFlight(requestID, "", false)
 	}
 
-	logger.Log.Debugf("[rpc_client] sending remote nats request for route %s with timeout of %s", route, ns.reqTimeout)
+	reqTimeout := pcontext.GetFromPropagateCtx(ctx, constants.RequestTimeout)
+	if reqTimeout == nil {
+		reqTimeout = ns.reqTimeout.String()
+		ctx = pcontext.AddToPropagateCtx(ctx, constants.RequestTimeout, reqTimeout)
+	}
+	logger.Log.Debugf("[rpc_client] sending remote nats request for route %s with timeout of %s", route, reqTimeout)
 
-	ctx = pcontext.AddToPropagateCtx(ctx, constants.RequestTimeout, ns.reqTimeout.String())
-	req, err := buildRequest(ctx, rpcType, route.String(), session, msg, ns.server)
+	req, err := buildRequest(ctx, rpcType, route, session, msg, ns.server)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -301,11 +312,17 @@ func (ns *NatsRPCClient) Call(
 		return &protos.Response{}, nil
 	}
 
-	m, err = ns.conn.Request(getChannel(server.Type, server.ID), marshalledData, ns.reqTimeout)
+	var timeout time.Duration
+	timeout, _ = time.ParseDuration(reqTimeout.(string))
+	m, err = ns.conn.Request(getChannel(server.Type, server.ID), marshalledData, timeout)
 	if err != nil {
-		// 针对超时封装一层error便于上层判断
-		if errors.Is(err, nats.ErrTimeout) {
-			err = constants.ErrRPCTimeout
+		if err == nats.ErrTimeout {
+			err = errors.NewError(constants.ErrRPCRequestTimeout, "PIT-408", map[string]string{
+				"timeout": timeout.String(),
+				"route":   route.String(),
+				"server":  ns.server.ID,
+				"peer.id": server.ID,
+			})
 		}
 		return nil, errors.WithStack(err)
 	}

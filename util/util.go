@@ -231,7 +231,16 @@ func GetContextFromRequest(req *protos.Request, serverID string, uid string) (co
 	if ctx == nil {
 		return nil, errors.WithStack(constants.ErrNoContextFound)
 	}
-	ctx = CtxWithDefaultLogger(ctx, req.GetMsg().GetRoute(), uid)
+
+	requestID := pcontext.GetFromPropagateCtx(ctx, constants.RequestIDKey)
+	if rID, ok := requestID.(string); !ok || (ok && rID == "") {
+		requestID = nuid.New().Next()
+		ctx = pcontext.AddToPropagateCtx(ctx, constants.RequestIDKey, requestID)
+	}
+
+	route := req.GetMsg().GetRoute()
+	ctx = pcontext.AddToPropagateCtx(ctx, constants.RouteKey, route)
+	ctx = CtxWithDefaultLogger(ctx, route, "")
 	return ctx, nil
 }
 

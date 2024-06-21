@@ -67,10 +67,11 @@ type RemoteService struct {
 	router                 *router.Router
 	messageEncoder         message.Encoder
 	server                 *cluster.Server // server obj
+	remoteBindingListeners []cluster.RemoteBindingListener
+	remoteHooks            *pipeline.RemoteHooks
 	sessionPool            session.SessionPool
 	handlerPool            *HandlerPool
 	remotes                map[string]*component.Remote      // all remote method
-	remoteBindingListeners []cluster.RemoteBindingListener   // 绑定发生时的回调，内部使用，仅用于相同serverType间的广播
 	remoteSessionListeners []cluster.RemoteSessionListener   // session生命周期监听
 	interceptors           map[string]*component.Interceptor // 所有拦截分发器,优先级别高于 remotes
 	sysHandlerHooks        *pipeline.HandlerHooks            // 客户端api hook
@@ -87,6 +88,7 @@ func NewRemoteService(
 	messageEncoder message.Encoder,
 	server *cluster.Server,
 	sessionPool session.SessionPool,
+	remoteHooks *pipeline.RemoteHooks,
 	handlerHooks *pipeline.HandlerHooks,
 	sysHandlerHooks *pipeline.HandlerHooks,
 	handlerPool *HandlerPool,
@@ -102,15 +104,16 @@ func NewRemoteService(
 		router:                 router,
 		messageEncoder:         messageEncoder,
 		server:                 server,
+		remoteBindingListeners: make([]cluster.RemoteBindingListener, 0),
 		sessionPool:            sessionPool,
 		handlerPool:            handlerPool,
 		remotes:                make(map[string]*component.Remote),
-		remoteBindingListeners: make([]cluster.RemoteBindingListener, 0),
 		remoteSessionListeners: make([]cluster.RemoteSessionListener, 0),
 		interceptors:           make(map[string]*component.Interceptor),
 		sysHandlerHooks:        sysHandlerHooks,
 	}
 
+	remote.remoteHooks = remoteHooks
 	remote.handlerHooks = handlerHooks
 
 	return remote
@@ -211,7 +214,6 @@ func (r *RemoteService) Call(ctx context.Context, req *protos.Request) (*protos.
 		err = apierrors.FromStatus(res.Status)
 	}
 
-	defer tracing.FinishSpan(c, err)
 	return res, err
 }
 
@@ -661,6 +663,7 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 		}
 		receiver = reflect.ValueOf(rec)
 	}
+
 	var sess session.Session
 	if req.Session != nil {
 		a, err := agent.NewRemote(
@@ -689,7 +692,11 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 		ctx = context.WithValue(ctx, constants.SessionCtxKey, sess)
 		ctx = util.CtxWithDefaultLogger(ctx, rt.String(), sess.UID())
 	}
-	params := []reflect.Value{receiver, reflect.ValueOf(ctx)}
+
+	var ret interface{}
+	var arg interface{}
+	var err error
+
 	if remote.HasArgs {
 		arg, err = unmarshalRemoteArg(remote, req.GetMsg().GetData())
 		if err != nil {
@@ -704,19 +711,20 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 			}
 			return response
 		}
-		params = append(params, reflect.ValueOf(arg))
 	}
-	// 和 handlerPool.ProcessHandlerMessage 一样加入hook处理
-	var arg2 any
-	ctx, arg2, err = r.handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)
+
+	ctx, arg, err = r.remoteHooks.BeforeHandler.ExecuteBeforePipeline(ctx, arg)
 	if err != nil {
 		response := &protos.Response{
 			Status: &apierrors.FromError(err).Status,
 		}
 		return response
 	}
-	arg = arg2.(proto.Message)
-	var ret any
+
+	params := []reflect.Value{receiver, reflect.ValueOf(ctx)}
+	if remote.HasArgs {
+		params = append(params, reflect.ValueOf(arg))
+	}
 	if remote.Options.TaskGoProvider != nil {
 		// 若提供了自定义派发线程
 		var wg sync.WaitGroup
@@ -730,7 +738,9 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 	} else {
 		ret, err = util.Pcall(remote.Method, params)
 	}
-	ret, err = r.handlerHooks.AfterHandler.ExecuteAfterPipeline(ctx, rt, arg, ret, err)
+
+	arg = arg.(proto.Message)
+	ret, err = r.remoteHooks.AfterHandler.ExecuteAfterPipeline(ctx, ret, err)
 	if err != nil {
 		response := &protos.Response{
 			Status: &apierrors.FromError(err).Status,

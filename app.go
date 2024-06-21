@@ -382,6 +382,7 @@ type App struct {
 	remoteComp         []regComp
 	modulesMap         map[string]interfaces.Module
 	modulesArr         []moduleWrapper
+	sessionModulesArr  []sessionModuleWrapper
 	groups             groups.GroupService
 	sessionPool        session.SessionPool
 	redis              redis.Cmdable
@@ -409,28 +410,29 @@ func NewApp(
 	config config.PitayaConfig,
 ) *App {
 	app := &App{
-		server:           server,
-		config:           config,
-		rpcClient:        rpcClient,
-		rpcServer:        rpcServer,
-		worker:           worker,
-		serviceDiscovery: serviceDiscovery,
-		remoteService:    remoteService,
-		handlerService:   handlerService,
-		groups:           groups,
-		startAt:          time.Now(),
-		dieChan:          dieChan,
-		acceptors:        acceptors,
-		metricsReporters: metricsReporters,
-		serverMode:       serverMode,
-		running:          false,
-		serializer:       serializer,
-		router:           router,
-		handlerComp:      make([]regComp, 0),
-		remoteComp:       make([]regComp, 0),
-		modulesMap:       make(map[string]interfaces.Module),
-		modulesArr:       []moduleWrapper{},
-		sessionPool:      sessionPool,
+		server:            server,
+		config:            config,
+		rpcClient:         rpcClient,
+		rpcServer:         rpcServer,
+		worker:            worker,
+		serviceDiscovery:  serviceDiscovery,
+		remoteService:     remoteService,
+		handlerService:    handlerService,
+		groups:            groups,
+		startAt:           time.Now(),
+		dieChan:           dieChan,
+		acceptors:         acceptors,
+		metricsReporters:  metricsReporters,
+		serverMode:        serverMode,
+		running:           false,
+		serializer:        serializer,
+		router:            router,
+		handlerComp:       make([]regComp, 0),
+		remoteComp:        make([]regComp, 0),
+		modulesMap:        make(map[string]interfaces.Module),
+		modulesArr:        []moduleWrapper{},
+		sessionModulesArr: []sessionModuleWrapper{},
+		sessionPool:       sessionPool,
 	}
 	if app.heartbeat == time.Duration(0) {
 		app.heartbeat = config.Heartbeat.Interval
@@ -641,10 +643,10 @@ func (app *App) initSysRemotes() {
 
 func (app *App) periodicMetrics() {
 	period := app.config.Metrics.Period
-	co.Go(func() { metrics.ReportSysMetrics(app.metricsReporters, period) })
+	go metrics.ReportSysMetrics(app.metricsReporters, period)
 
 	if app.worker.Started() {
-		co.Go(func() { worker.Report(app.metricsReporters, period) })
+		go worker.Report(app.metricsReporters, period)
 	}
 }
 
@@ -655,11 +657,11 @@ func (app *App) OnStarted(fun func()) {
 // Start starts the app
 func (app *App) Start() {
 	if !app.server.Frontend && len(app.acceptors) > 0 {
-		logger.Zap.Fatal("acceptors are not allowed on backend servers")
+		logger.Log.Fatal("acceptors are not allowed on backend servers")
 	}
 
 	if app.server.Frontend && len(app.acceptors) == 0 {
-		logger.Zap.Fatal("frontend servers should have at least one configured acceptor")
+		logger.Log.Fatal("frontend servers should have at least one configured acceptor")
 	}
 
 	if app.serverMode == Cluster {
@@ -668,16 +670,16 @@ func (app *App) Start() {
 		}
 
 		if err := app.RegisterModuleBefore(app.rpcServer, "rpcServer"); err != nil {
-			logger.Zap.Fatal("failed to register rpc server module", zap.Error(err))
+			logger.Log.Fatal("failed to register rpc server module: %s", err.Error())
 		}
 		if err := app.RegisterModuleBefore(app.rpcClient, "rpcClient"); err != nil {
-			logger.Zap.Fatal("failed to register rpc client module: %s", zap.Error(err))
+			logger.Log.Fatal("failed to register rpc client module: %s", err.Error())
 		}
 		// set the service discovery as the last module to be started to ensure
 		// all modules have been properly initialized before the server starts
 		// receiving requests from other pitaya servers
 		if err := app.RegisterModuleAfter(app.serviceDiscovery, "serviceDiscovery"); err != nil {
-			logger.Zap.Fatal("failed to register service discovery module: %s", zap.Error(err))
+			logger.Log.Fatal("failed to register service discovery module: %s", err.Error())
 		}
 	}
 
@@ -700,12 +702,47 @@ func (app *App) Start() {
 	sg := make(chan os.Signal)
 	signal.Notify(sg, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGKILL, syscall.SIGTERM)
 
+	maxSessionCount := func() int64 {
+		count := app.sessionPool.GetSessionCount()
+		mc := app.maxModuleSessionCount()
+		if mc > count {
+			count = mc
+		}
+		return count
+	}
+
 	// stop server
 	select {
 	case <-app.dieChan:
 		logger.Zap.Warn("the app will shutdown in a few seconds")
 	case s := <-sg:
 		logger.Sugar.Warn("got signal: ", s, ", shutting down...")
+		logger.Sugar.Warn("got signal: ", s, ", shutting down...")
+		if app.config.Session.Drain.Enabled && s == syscall.SIGTERM {
+			logger.Sugar.Info("Session drain is enabled, draining all sessions before shutting down")
+			timeoutTimer := time.NewTimer(app.config.Session.Drain.Timeout)
+			app.startModuleSessionDraining()
+		loop:
+			for {
+				if maxSessionCount() == 0 {
+					logger.Sugar.Info("All sessions drained")
+					break loop
+				}
+				select {
+				case s := <-sg:
+					logger.Sugar.Warn("got signal: ", s)
+					if s == syscall.SIGINT {
+						logger.Log.Warnf("Bypassing session draing due to SIGINT. %d sessions will be immediately terminated", maxSessionCount())
+					}
+					break loop
+				case <-timeoutTimer.C:
+					logger.Sugar.Warnf("Session drain has reached maximum timeout. %d sessions will be immediately terminated", maxSessionCount())
+					break loop
+				case <-time.After(app.config.Session.Drain.Period):
+					logger.Sugar.Infof("Waiting for all sessions to finish: %d sessions remaining...", maxSessionCount())
+				}
+			}
+		}
 		close(app.dieChan)
 	}
 
@@ -732,21 +769,24 @@ func (app *App) listen() {
 		// TODO 池化效果待验证
 		co.Go(func() {
 			for conn := range a.GetConnChan() {
-				connV := conn // 避免闭包值拷贝问题
-				co.Go(func() { app.handlerService.Handle(connV) })
+				co.Go(func() { app.handlerService.Handle(conn) })
 			}
 		})
 		if app.config.Acceptor.ProxyProtocol {
-			logger.Log.Info("Enabling PROXY protocol for inbond connections")
+			logger.Zap.Info("Enabling PROXY protocol for inbound connections")
 			a.EnableProxyProtocol()
 		} else {
-			logger.Log.Debug("PROXY protocol is disabled for inbound connections")
+			logger.Zap.Debug("PROXY protocol is disabled for inbound connections")
 		}
 		co.Go(func() {
 			a.ListenAndServe()
 		})
+		logger.Sugar.Infof("Waiting for Acceptor %s to start on addr %s", reflect.TypeOf(a), a.GetConfiguredAddress())
 
-		logger.Sugar.Infof("listening with acceptor %s on addr %s", reflect.TypeOf(a), a.GetAddr())
+		for !a.IsRunning() {
+		}
+
+		logger.Sugar.Infof("Acceptor %s on addr %s is now accepting connections", reflect.TypeOf(a), a.GetAddr())
 	}
 
 	// 改为强制唯一session
@@ -834,7 +874,7 @@ func GetDefaultLoggerFromCtx(ctx context.Context) *zap.Logger {
 
 // AddMetricTagsToPropagateCtx adds a key and metric tags that will
 // be propagated through RPC calls. Use the same tags that are at
-// 'pitaya.metrics.additionalTags' config
+// 'pitaya.metrics.additionalLabels' config
 func AddMetricTagsToPropagateCtx(
 	ctx context.Context,
 	tags map[string]string,

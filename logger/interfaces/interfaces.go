@@ -1,9 +1,9 @@
 package interfaces
 
 // Logger
-//Deprecated:use log.Log instead
+// Deprecated:use log.Log instead
 //
-//interface for pitaya loggers
+// interface for pitaya loggers
 type Logger interface {
 	//Fatal
 	// Deprecated
@@ -93,4 +93,6 @@ type Logger interface {
 	//  @param err
 	//  @return Logger
 	WithError(err error) Logger
+
+	GetInternalLogger() any
 }

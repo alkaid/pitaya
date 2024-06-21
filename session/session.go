@@ -84,6 +84,7 @@ type BoundData struct {
 type sessionPoolImpl struct {
 	sessionBindCallbacks []OnSessionBindFunc
 	afterBindCallbacks   []OnSessionBindFunc
+	handshakeValidators  map[string]func(data *HandshakeData) error
 	// SessionCloseCallbacks contains global session close callbacks
 	SessionCloseCallbacks []OnSessionCloseFunc
 	sessionsByUID         sync.Map
@@ -117,6 +118,7 @@ type SessionPool interface {
 	OnAfterBindBackend(f OnSessionBindBackendFunc)
 	OnAfterKickBackend(f OnSessionKickBackendFunc)
 	CloseAll()
+	AddHandshakeValidator(name string, f func(data *HandshakeData) error)
 	EncodeSessionData(data map[string]interface{}) ([]byte, error)
 	DecodeSessionData(encodedData []byte) (map[string]interface{}, error)
 	// StoreSessionLocal 将session存储到本的缓存 session必须已经绑定过UID
@@ -150,26 +152,27 @@ type HandshakeData struct {
 }
 
 type sessionImpl struct {
-	sync.RWMutex                                  // protect data
-	id                int64                       // session global unique id
-	uid               string                      // binding user id
-	uidInt            int64                       // uid as number
-	lastTime          int64                       // last heartbeat time
-	entity            networkentity.NetworkEntity // low-level network entity
-	data              map[string]any              // session data store 用户自定义数据
-	handshakeData     *HandshakeData              // handshake data received by the client
-	encodedData       []byte                      // session data encoded as a byte array
-	OnCloseCallbacks  []func()                    // onClose callbacks
-	IsFrontend        bool                        // if session is a frontend session
-	frontendID        string                      // the id of the frontend that owns the session
-	frontendSessionID int64                       // the id of the session on the frontend server
-	online            bool                        // 是否在线,仅cluster session有效
-	backends          map[string]string           // 绑定的backends
-	bsMutex           sync.RWMutex                // backends 的mutex
-	ip                string                      // 远程客户端ip地址
-	Subscriptions     []*nats.Subscription        // subscription created on bind when using nats rpc server  // subscription created on bind when using nats rpc server
-	requestsInFlight  ReqInFlight
-	pool              *sessionPoolImpl
+	sync.RWMutex                                              // protect data
+	id                  int64                                 // session global unique id
+	uid                 string                                // binding user id
+	uidInt              int64                                 // uid as number
+	lastTime            int64                                 // last heartbeat time
+	entity              networkentity.NetworkEntity           // low-level network entity
+	data                map[string]any                        // session data store 用户自定义数据
+	handshakeData       *HandshakeData                        // handshake data received by the client
+	handshakeValidators map[string]func(*HandshakeData) error // validations to run on handshake
+	encodedData         []byte                                // session data encoded as a byte array
+	OnCloseCallbacks    []func()                              // onClose callbacks
+	IsFrontend          bool                                  // if session is a frontend session
+	frontendID          string                                // the id of the frontend that owns the session
+	frontendSessionID   int64                                 // the id of the session on the frontend server
+	online              bool                                  // 是否在线,仅cluster session有效
+	backends            map[string]string                     // 绑定的backends
+	bsMutex             sync.RWMutex                          // backends 的mutex
+	ip                  string                                // 远程客户端ip地址
+	Subscriptions       []*nats.Subscription                  // subscription created on bind when using nats rpc server  // subscription created on bind when using nats rpc server
+	requestsInFlight    ReqInFlight
+	pool                *sessionPoolImpl
 }
 
 type ReqInFlight struct {
@@ -318,6 +321,8 @@ type Session interface {
 	Clear()
 	SetHandshakeData(data *HandshakeData)
 	GetHandshakeData() *HandshakeData
+	ValidateHandshake(data *HandshakeData) error
+	GetHandshakeValidators() map[string]func(data *HandshakeData) error
 	// SendRequestToFrontend 发送请求到网关,会携带session数据
 	//  @param ctx
 	//  @param route
@@ -379,17 +384,18 @@ func (pool *sessionPoolImpl) NewSession(entity networkentity.NetworkEntity, fron
 		}
 	}
 	s := &sessionImpl{
-		id:               pool.sessionIDSvc.sessionID(),
-		entity:           entity,
-		data:             make(map[string]any),
-		handshakeData:    nil,
-		lastTime:         time.Now().Unix(),
-		OnCloseCallbacks: []func(){},
-		IsFrontend:       frontend,
-		pool:             pool,
-		requestsInFlight: ReqInFlight{m: make(map[string]string)},
-		backends:         map[string]string{},
-		online:           true,
+		id:                  pool.sessionIDSvc.sessionID(),
+		entity:              entity,
+		data:                make(map[string]any),
+		handshakeData:       nil,
+		handshakeValidators: pool.handshakeValidators,
+		lastTime:            time.Now().Unix(),
+		OnCloseCallbacks:    []func(){},
+		IsFrontend:          frontend,
+		pool:                pool,
+		requestsInFlight:    ReqInFlight{m: make(map[string]string)},
+		backends:            map[string]string{},
+		online:              true,
 	}
 	// sessionstick 的 backend，在 BindBackend()时保存,这里只处理 frontend
 	if frontend {
@@ -408,6 +414,7 @@ func NewSessionPool() SessionPool {
 	return &sessionPoolImpl{
 		sessionBindCallbacks:      make([]OnSessionBindFunc, 0),
 		afterBindCallbacks:        make([]OnSessionBindFunc, 0),
+		handshakeValidators:       make(map[string]func(data *HandshakeData) error, 0),
 		SessionCloseCallbacks:     make([]OnSessionCloseFunc, 0),
 		sessionIDSvc:              newSessionIDService(),
 		bindBackendCallbacks:      make([]OnSessionBindBackendFunc, 0),
@@ -554,6 +561,12 @@ func (pool *sessionPoolImpl) CloseAll() {
 		}
 	}
 	logger.Log.Info("finished closing sessions")
+}
+
+// AddHandshakeValidator allows adds validation functions that will run when
+// handshake packets are processed. Errors will be raised with the given name.
+func (pool *sessionPoolImpl) AddHandshakeValidator(name string, f func(data *HandshakeData) error) {
+	pool.handshakeValidators[name] = f
 }
 
 func (pool *sessionPoolImpl) EncodeSessionData(data map[string]interface{}) ([]byte, error) {
@@ -781,6 +794,11 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, callback map[string]
 
 	// if code running on frontend server
 	if s.IsFrontend {
+		// If a session with the same UID already exists in this frontend server, close it
+		if val, ok := s.pool.sessionsByUID.Load(uid); ok {
+			// 异地登录
+			val.(Session).Close()
+		}
 		s.pool.sessionsByUID.Store(uid, s)
 		atomic.AddInt64(&s.pool.UserCount, 1)
 	} else {
@@ -914,17 +932,14 @@ func (s *sessionImpl) Close(callback map[string]string, reason ...CloseReason) {
 	atomic.AddInt64(&s.pool.SessionCount, -1)
 	s.online = false
 	s.pool.sessionsByID.Delete(s.ID())
-	// 须校验存的session和要关闭的是否同一个session，相同才清uid-session map中的值。否则互相频繁顶号时会有误删的异步问题
-	oldSession := s.pool.GetSessionByUID(s.UID())
-	if oldSession != nil && oldSession.ID() == s.ID() {
-		s.pool.sessionsByUID.Delete(s.UID())
-		atomic.AddInt64(&s.pool.UserCount, -1)
-	} else {
-		var oldID int64
-		if oldSession != nil {
-			oldID = oldSession.ID()
+	// Only remove session by UID if the session ID matches the one being closed. This avoids problems with removing a valid session after the user has already reconnected before this session's heartbeat times out
+	if val, ok := s.pool.sessionsByUID.Load(s.UID()); ok {
+		if (val.(Session)).ID() == s.ID() {
+			s.pool.sessionsByUID.Delete(s.UID())
+		} else {
+			oldSession := val.(Session)
+			logger.Zap.Debug("stored session not equal current session,ignore delete stored session", zap.Int64("oldid", oldSession.ID()), zap.Int64("id", s.ID()), zap.String("uid", s.UID()))
 		}
-		logger.Zap.Debug("stored session not equal current session,ignore delete stored session", zap.Int64("oldid", oldID), zap.Int64("id", s.ID()), zap.String("uid", s.UID()))
 	}
 	// TODO: this logic should be moved to nats rpc server
 	if s.IsFrontend && s.Subscriptions != nil && len(s.Subscriptions) > 0 {
@@ -1300,6 +1315,21 @@ func (s *sessionImpl) SetHandshakeData(data *HandshakeData) {
 // GetHandshakeData gets the handshake data received by the client.
 func (s *sessionImpl) GetHandshakeData() *HandshakeData {
 	return s.handshakeData
+}
+
+// GetHandshakeValidators return the handshake validators associated with the session.
+func (s *sessionImpl) GetHandshakeValidators() map[string]func(data *HandshakeData) error {
+	return s.handshakeValidators
+}
+
+func (s *sessionImpl) ValidateHandshake(data *HandshakeData) error {
+	for name, fun := range s.handshakeValidators {
+		if err := fun(data); err != nil {
+			return fmt.Errorf("failed to run '%s' validator: %w. SessionId=%d", name, err, s.ID())
+		}
+	}
+
+	return nil
 }
 
 // SendRequest 发送数据到指定server,会携带网关数据

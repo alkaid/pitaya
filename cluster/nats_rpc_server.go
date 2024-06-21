@@ -283,7 +283,6 @@ func (ns *NatsRPCServer) getUserKickChannel() chan *protos.KickMsg {
 func (ns *NatsRPCServer) marshalResponse(res *protos.Response) ([]byte, error) {
 	p, err := proto.Marshal(res)
 	if err != nil {
-
 		res := &protos.Response{
 			Status: &apierrors.FromError(err).Status,
 		}
@@ -313,7 +312,7 @@ func (ns *NatsRPCServer) processMessages(threadID int) {
 				p, err := ns.marshalResponse(ns.responses[threadID])
 				err = ns.conn.Publish(ns.requests[threadID].GetMsg().GetReply(), p)
 				if err != nil {
-					logger.Zap.Error("error sending message response")
+					logger.Zap.Error("error sending message response", zap.Error(err))
 				}
 			}
 			continue
@@ -330,7 +329,7 @@ func (ns *NatsRPCServer) processMessages(threadID int) {
 				p, err := ns.marshalResponse(resp)
 				err = ns.conn.Publish(req.GetMsg().GetReply(), p)
 				if err != nil {
-					logg.Error("error sending message response")
+					logg.Error("error sending message response", zap.Error(err))
 				}
 			}
 		})
@@ -536,7 +535,7 @@ func (ns *NatsRPCServer) reportMetrics() {
 				logger.Log.Warn("userPushChan is at maximum capacity")
 			}
 			if err := mr.ReportGauge(metrics.ChannelCapacity, map[string]string{"channel": "rpc_server_userpushchan"}, float64(userPushChanCapacity)); err != nil {
-				logger.Zap.Warn("failed to report userPushCh capacity", zap.Error(err))
+				logger.Log.Warnf("failed to report userPushCh capacity: %s", err.Error())
 			}
 		}
 	}

@@ -51,21 +51,17 @@ func (mr *MockAgentMockRecorder) AnswerWithError(arg0, arg1, arg2 interface{}) *
 }
 
 // Close mocks base method.
-func (m *MockAgent) Close(arg0 ...int) error {
+func (m *MockAgent) Close() error {
 	m.ctrl.T.Helper()
-	varargs := []interface{}{}
-	for _, a := range arg0 {
-		varargs = append(varargs, a)
-	}
-	ret := m.ctrl.Call(m, "Close", varargs...)
+	ret := m.ctrl.Call(m, "Close")
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // Close indicates an expected call of Close.
-func (mr *MockAgentMockRecorder) Close(arg0 ...interface{}) *gomock.Call {
+func (mr *MockAgentMockRecorder) Close() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Close", reflect.TypeOf((*MockAgent)(nil).Close), arg0...)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Close", reflect.TypeOf((*MockAgent)(nil).Close))
 }
 
 // GetSession mocks base method.
@@ -183,6 +179,20 @@ func (mr *MockAgentMockRecorder) ResponseMID(arg0, arg1, arg2 interface{}, arg3 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ResponseMID", reflect.TypeOf((*MockAgent)(nil).ResponseMID), varargs...)
 }
 
+// SendHandshakeErrorResponse mocks base method.
+func (m *MockAgent) SendHandshakeErrorResponse() error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "SendHandshakeErrorResponse")
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// SendHandshakeErrorResponse indicates an expected call of SendHandshakeErrorResponse.
+func (mr *MockAgentMockRecorder) SendHandshakeErrorResponse() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendHandshakeErrorResponse", reflect.TypeOf((*MockAgent)(nil).SendHandshakeErrorResponse))
+}
+
 // SendHandshakeResponse mocks base method.
 func (m *MockAgent) SendHandshakeResponse() error {
 	m.ctrl.T.Helper()
@@ -195,20 +205,6 @@ func (m *MockAgent) SendHandshakeResponse() error {
 func (mr *MockAgentMockRecorder) SendHandshakeResponse() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendHandshakeResponse", reflect.TypeOf((*MockAgent)(nil).SendHandshakeResponse))
-}
-
-// SendHeartbeatResponse mocks base method.
-func (m *MockAgent) SendHeartbeatResponse() error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "SendHeartbeatResponse")
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-// SendHeartbeatResponse indicates an expected call of SendHeartbeatResponse.
-func (mr *MockAgentMockRecorder) SendHeartbeatResponse() *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SendHeartbeatResponse", reflect.TypeOf((*MockAgent)(nil).SendHeartbeatResponse))
 }
 
 // SendRequest mocks base method.

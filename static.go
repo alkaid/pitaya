@@ -20,6 +20,22 @@
 
 package pitaya
 
+//import (
+//	"context"
+//	"time"
+//
+//	"github.com/golang/protobuf/proto"
+//	"github.com/spf13/viper"
+//	"github.com/topfreegames/pitaya/v2/cluster"
+//	"github.com/topfreegames/pitaya/v2/component"
+//	"github.com/topfreegames/pitaya/v2/config"
+//	"github.com/topfreegames/pitaya/v2/constants"
+//	"github.com/topfreegames/pitaya/v2/interfaces"
+//	"github.com/topfreegames/pitaya/v2/metrics"
+//	"github.com/topfreegames/pitaya/v2/router"
+//	"github.com/topfreegames/pitaya/v2/session"
+//	"github.com/topfreegames/pitaya/v2/worker"
+//)
 //
 //var DefaultApp Pitaya
 //
@@ -79,7 +95,11 @@ package pitaya
 //}
 //
 //func GetSessionFromCtx(ctx context.Context) session.Session {
-//	return DefaultApp.GetSessionFromCtx(ctx)
+//	sessionVal := ctx.Value(constants.SessionCtxKey)
+//	if sessionVal == nil {
+//		return nil
+//	}
+//	return sessionVal.(session.Session)
 //}
 //
 //func Start() {
@@ -115,7 +135,7 @@ package pitaya
 //}
 //
 //func RPC(ctx context.Context, routeStr string, reply proto.Message, arg proto.Message) error {
-//	return DefaultApp.RPC(ctx, routeStr, reply, arg, "")
+//	return DefaultApp.RPC(ctx, routeStr, reply, arg)
 //}
 //
 //func RPCTo(ctx context.Context, serverID, routeStr string, reply proto.Message, arg proto.Message) error {

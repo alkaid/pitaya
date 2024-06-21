@@ -64,7 +64,9 @@ var (
 	// hbd contains the heartbeat ack packet data
 	hbAck []byte
 	// hrd contains the handshake response data
-	hrd  []byte
+	hrd []byte
+	// herd contains the handshake error response data
+	herd []byte
 	once sync.Once
 )
 
@@ -123,6 +125,7 @@ type (
 		Handle()
 		IPVersion() string
 		SendHandshakeResponse() error
+		SendHandshakeErrorResponse() error
 		SendHeartbeatResponse(unixMillTime int64) error
 		SendRequest(ctx context.Context, serverID, route string, v interface{}) (*protos.Response, error)
 		AnswerWithError(ctx context.Context, mid uint, err error)
@@ -198,6 +201,7 @@ func newAgent(
 
 	once.Do(func() {
 		hbdEncode(heartbeatTime, packetEncoder, messageEncoder.IsCompressionEnabled(), serializerName)
+		herdEncode(heartbeatTime, packetEncoder, messageEncoder.IsCompressionEnabled(), serializerName)
 	})
 
 	a := &agentImpl{
@@ -583,6 +587,12 @@ func (a *agentImpl) onSessionClosed(s session.Session, callback map[string]strin
 // SendHandshakeResponse sends a handshake response
 func (a *agentImpl) SendHandshakeResponse() error {
 	_, err := a.connWriteWithDeadline(hrd)
+
+	return err
+}
+func (a *agentImpl) SendHandshakeErrorResponse() error {
+	_, err := a.connWriteWithDeadline(herd)
+
 	return err
 }
 func (a *agentImpl) SendHeartbeatResponse(unixMillTime int64) error {
@@ -687,20 +697,10 @@ func hbdEncode(heartbeatTimeout time.Duration, packetEncoder codec.PacketEncoder
 			"serializer": serializerName,
 		},
 	}
-	data, err := gojson.Marshal(hData)
+
+	data, err := encodeAndCompress(hData, dataCompression)
 	if err != nil {
 		panic(err)
-	}
-
-	if dataCompression {
-		compressedData, err := compression.DeflateData(data)
-		if err != nil {
-			panic(err)
-		}
-
-		if len(compressedData) < len(data) {
-			data = compressedData
-		}
 	}
 
 	hrd, err = packetEncoder.Encode(packet.Handshake, data)
@@ -716,6 +716,46 @@ func hbdEncode(heartbeatTimeout time.Duration, packetEncoder codec.PacketEncoder
 	if err != nil {
 		panic(err)
 	}
+}
+
+func herdEncode(heartbeatTimeout time.Duration, packetEncoder codec.PacketEncoder, dataCompression bool, serializerName string) {
+	hErrData := map[string]interface{}{
+		"code": 400,
+		"sys": map[string]interface{}{
+			"heartbeat":  heartbeatTimeout.Seconds(),
+			"dict":       message.GetDictionary(),
+			"serializer": serializerName,
+		},
+	}
+
+	errData, err := encodeAndCompress(hErrData, dataCompression)
+	if err != nil {
+		panic(err)
+	}
+
+	herd, err = packetEncoder.Encode(packet.Handshake, errData)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func encodeAndCompress(data interface{}, dataCompression bool) ([]byte, error) {
+	encData, err := gojson.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+
+	if dataCompression {
+		compressedData, err := compression.DeflateData(encData)
+		if err != nil {
+			return nil, err
+		}
+
+		if len(compressedData) < len(encData) {
+			encData = compressedData
+		}
+	}
+	return encData, nil
 }
 
 func (a *agentImpl) reportChannelSize() {
