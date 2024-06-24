@@ -124,6 +124,7 @@ func DefaultToTimeHookFunc() mapstructure.DecodeHookFunc {
 //	@param d
 func DefaultDecoderOpts() viper.DecoderConfigOption {
 	return func(d *mapstructure.DecoderConfig) {
+		//d.WeaklyTypedInput = true
 		d.DecodeHook = DefaultHookFunc()
 	}
 }

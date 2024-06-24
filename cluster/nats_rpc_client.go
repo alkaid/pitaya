@@ -23,11 +23,11 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"github.com/alkaid/goerrors/errors"
 	"time"
 
 	"github.com/alkaid/goerrors/apierrors"
 	nats "github.com/nats-io/nats.go"
-	"github.com/pkg/errors"
 	"github.com/samber/lo"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/conn/message"
@@ -208,13 +208,11 @@ func (ns *NatsRPCClient) Publish(
 		m, err := sub.NextMsg(timeoutPerReply)
 		if err != nil {
 			if errors.Is(err, nats.ErrTimeout) {
-				err = errors.NewError(constants.ErrRPCRequestTimeout, "PIT-408", map[string]string{
-					"timeout": timeout.String(),
+				err = apierrors.GatewayTimeout(err.Error(), "PIT-408", "").WithMetadata(map[string]string{
+					"timeout": timeoutPerReply.String(),
 					"route":   route.String(),
 					"server":  ns.server.ID,
-					"peer.id": server.ID,
-					"reason":  nats.ErrTimeout.Error(),
-				})
+				}).WithCause(constants.ErrRPCRequestTimeout)
 				//err = fmt.Errorf("%w:%s", constants.ErrRPCTimeout, nats.ErrTimeout.Error())
 				return responses, errors.WithStack(err)
 			} else if errors.Is(err, nats.ErrNoResponders) {
@@ -283,7 +281,7 @@ func (ns *NatsRPCClient) Call(
 	}
 	logger.Log.Debugf("[rpc_client] sending remote nats request for route %s with timeout of %s", route, reqTimeout)
 
-	req, err := buildRequest(ctx, rpcType, route, session, msg, ns.server)
+	req, err := buildRequest(ctx, rpcType, route.String(), session, msg, ns.server)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -316,13 +314,13 @@ func (ns *NatsRPCClient) Call(
 	timeout, _ = time.ParseDuration(reqTimeout.(string))
 	m, err = ns.conn.Request(getChannel(server.Type, server.ID), marshalledData, timeout)
 	if err != nil {
-		if err == nats.ErrTimeout {
-			err = errors.NewError(constants.ErrRPCRequestTimeout, "PIT-408", map[string]string{
+		if errors.Is(err, nats.ErrTimeout) {
+			err = apierrors.GatewayTimeout(err.Error(), "PIT-408", "").WithMetadata(map[string]string{
 				"timeout": timeout.String(),
 				"route":   route.String(),
 				"server":  ns.server.ID,
 				"peer.id": server.ID,
-			})
+			}).WithCause(constants.ErrRPCRequestTimeout)
 		}
 		return nil, errors.WithStack(err)
 	}

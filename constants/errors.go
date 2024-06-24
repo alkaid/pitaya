@@ -92,7 +92,6 @@ var (
 	ErrConnectionClosed               = errors.New("client connection closed")
 
 	ErrDeveloperLogicFatal     = errors.New("developer logic fatal!!") // 不应该发生的致命错误,一定是开发者逻辑有误
-	ErrRPCTimeout              = errors.New("RPC timeout")
 	ErrIllegalBindBackendID    = errors.New("illegal backend id when bind in remote")
 	ErrSessionNotBoundBackend  = errors.New("session have not bound to backend")
 	ErrNotifyAllSvTypeNotEmpty = errors.New("NotifyAll must be to an empty server type")

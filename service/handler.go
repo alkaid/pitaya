@@ -27,7 +27,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 	"time"
 
 	"github.com/nats-io/nuid"
@@ -185,11 +184,11 @@ func (h *HandlerService) Handle(conn acceptor.PlayerConn) {
 		if err != nil {
 			// Check if this is an expected error due to connection being closed
 			if errors.Is(err, net.ErrClosed) {
-				logger.Zap.Debug("Connection no longer available while reading next available message:", err.Error())
+				logger.Zap.Debug("Connection no longer available while reading next available message", zap.Error(err))
 			} else if errors.Is(err, constants.ErrConnectionClosed) {
-				logger.Zap.Debugf("Connection no longer available while reading next available message:", err.Error())
+				logger.Zap.Debug("Connection no longer available while reading next available message", zap.Error(err))
 			} else {
-				logger.Zap.Warn("Error reading next available message:", err.Error())
+				logger.Zap.Warn("Error reading next available message", zap.Error(err))
 			}
 
 			return
@@ -224,7 +223,7 @@ func (h *HandlerService) processPacket(a agent.Agent, p *packet.Packet) error {
 		// Parse the json sent with the handshake by the client
 		handshakeData := &session.HandshakeData{}
 		if err := json.Unmarshal(p.Data, handshakeData); err != nil {
-			defer a.Close()
+			defer a.Close(nil)
 			logger.Zap.Error("Failed to unmarshal handshake data", zap.Error(err))
 			if serr := a.SendHandshakeErrorResponse(); serr != nil {
 				logger.Zap.Error("Error sending handshake error response", zap.Error(err))
@@ -235,7 +234,7 @@ func (h *HandlerService) processPacket(a agent.Agent, p *packet.Packet) error {
 		}
 
 		if err := a.GetSession().ValidateHandshake(handshakeData); err != nil {
-			defer a.Close()
+			defer a.Close(nil)
 			logger.Log.Errorf("Handshake validation failed: %s", err.Error())
 			if serr := a.SendHandshakeErrorResponse(); serr != nil {
 				logger.Zap.Error("Error sending handshake error response", zap.Error(err))

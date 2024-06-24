@@ -540,10 +540,10 @@ func (app *App) PushAfterHandleHook(afterFunc pipeline.AfterHandlerTempl) {
 	app.handlerService.GetHandleHooks().AfterHandler.PushBack(afterFunc)
 }
 func (app *App) PushBeforeRemoteHook(beforeFunc pipeline.HandlerTempl) {
-	app.remoteService.GetHandleHooks().BeforeHandler.PushBack(beforeFunc)
+	app.remoteService.GetRemoteHooks().BeforeHandler.PushBack(beforeFunc)
 }
 func (app *App) PushAfterRemoteHook(afterFunc pipeline.AfterHandlerTempl) {
-	app.remoteService.GetHandleHooks().AfterHandler.PushBack(afterFunc)
+	app.remoteService.GetRemoteHooks().AfterHandler.PushBack(afterFunc)
 }
 
 // IsRunning indicates if the Pitaya app has been initialized. Note: This

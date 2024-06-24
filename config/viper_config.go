@@ -23,11 +23,8 @@ package config
 import (
 	"context"
 	"github.com/topfreegames/pitaya/v2/util/viperx"
-	"reflect"
 	"strings"
 	"time"
-
-	"github.com/mitchellh/mapstructure"
 
 	"github.com/topfreegames/pitaya/v2/util"
 
@@ -71,9 +68,9 @@ func (l LoaderFactory) Provide() (key string, confStruct interface{}) {
 // Config is a wrapper around a viper config
 type Config struct {
 	viperx.Viperx
-	loaders   []ConfLoader
-	pitayaAll *PitayaAll
-	inited    bool
+	loaders      []ConfLoader
+	pitayaConfig *PitayaConfig
+	inited       bool
 }
 
 // NewConfig creates a new config with a given viper config if given
@@ -88,8 +85,8 @@ func NewConfig(cfgs ...*viper.Viper) *Config {
 	cfg.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	cfg.AutomaticEnv()
 	c := &Config{
-		Viperx:    *cfg,
-		pitayaAll: &PitayaAll{},
+		Viperx:       *cfg,
+		pitayaConfig: &PitayaConfig{},
 	}
 	c.fillDefaultValues()
 	c.AddLoader(c)
@@ -178,13 +175,13 @@ func (c *Config) fillDefaultValues() {
 		"pitaya.worker.retry.maxRandom":                    pitayaConfig.Worker.Retry.MaxRandom,
 		"pitaya.worker.retry.minDelay":                     pitayaConfig.Worker.Retry.MinDelay,
 
-		"pitaya.cluster.rpc.server.nats.requesttimeout": natsRPCServerConfig.RequestTimeout,
-		"pitaya.cluster.sd.etcd.election.enable":        etcdSDConfig.Election.Enable,
-		"pitaya.cluster.sd.etcd.election.name":          etcdSDConfig.Election.Name,
+		"pitaya.cluster.rpc.server.nats.requesttimeout": pitayaConfig.Cluster.RPC.Server.Nats.RequestTimeout,
+		"pitaya.cluster.sd.etcd.election.enable":        pitayaConfig.Cluster.SD.Etcd.Election.Enable,
+		"pitaya.cluster.sd.etcd.election.name":          pitayaConfig.Cluster.SD.Etcd.Election.Name,
 		"pitaya.session.cachettl":                       pitayaConfig.Session.CacheTTL,
-		"pitaya.storage.redis.addrs":                    redisConfig.Addrs,
-		"pitaya.storage.redis.username":                 redisConfig.Username,
-		"pitaya.storage.redis.password":                 redisConfig.Password,
+		"pitaya.storage.redis.addrs":                    pitayaConfig.Storage.Redis.Addrs,
+		"pitaya.storage.redis.username":                 pitayaConfig.Storage.Redis.Username,
+		"pitaya.storage.redis.password":                 pitayaConfig.Storage.Redis.Password,
 		"pitaya.log.development":                        pitayaConfig.Log.Development,
 		"pitaya.log.level":                              pitayaConfig.Log.Level,
 		// 配置的来源,比较特殊 由上层提供默认值
@@ -207,88 +204,12 @@ func (c *Config) fillDefaultValues() {
 	}
 }
 
-// UnmarshalKey unmarshals key into v
-func (c *Config) UnmarshalKey(s string, v interface{}) error {
-	return c.UnmarshalKey(s, v)
-}
-
-// UnmarshalKey unmarshals key into v
-func (c *Config) UnmarshalKey(key string, rawVal interface{}) error {
-	key = strings.ToLower(key)
-	delimiter := "."
-	prefix := key + delimiter
-
-	i := c.Get(key)
-	if i == nil {
-		return nil
-	}
-	if isStringMapInterface(i) {
-		val := i.(map[string]interface{})
-		keys := c.AllKeys()
-		for _, k := range keys {
-			if !strings.HasPrefix(k, prefix) {
-				continue
-			}
-			mk := strings.TrimPrefix(k, prefix)
-			mk = strings.Split(mk, delimiter)[0]
-			if _, exists := val[mk]; exists {
-				continue
-			}
-			mv := c.Get(key + delimiter + mk)
-			if mv == nil {
-				continue
-			}
-			val[mk] = mv
-		}
-		i = val
-	}
-	return decode(i, defaultDecoderConfig(rawVal))
-}
-
-func isStringMapInterface(val interface{}) bool {
-	vt := reflect.TypeOf(val)
-	return vt.Kind() == reflect.Map &&
-		vt.Key().Kind() == reflect.String &&
-		vt.Elem().Kind() == reflect.Interface
-}
-
-// A wrapper around mapstructure.Decode that mimics the WeakDecode functionality
-func decode(input interface{}, config *mapstructure.DecoderConfig) error {
-	decoder, err := mapstructure.NewDecoder(config)
-	if err != nil {
-		return err
-	}
-	return decoder.Decode(input)
-}
-
-// defaultDecoderConfig returns default mapstructure.DecoderConfig with support
-// of time.Duration values & string slices
-func defaultDecoderConfig(output interface{}, opts ...viper.DecoderConfigOption) *mapstructure.DecoderConfig {
-	c := &mapstructure.DecoderConfig{
-		Metadata:         nil,
-		Result:           output,
-		WeaklyTypedInput: true,
-		DecodeHook: mapstructure.ComposeDecodeHookFunc(
-			mapstructure.StringToTimeDurationHookFunc(),
-			mapstructure.StringToSliceHookFunc(","),
-		),
-	}
-	for _, opt := range opts {
-		opt(c)
-	}
-	return c
-
-}
-
-// PitayaAll 获取框架配置
+// PitayaConfig 获取框架配置
 //
 //	@receiver c
-//	@return PitayaAll
-func (c *Config) PitayaAll() PitayaAll {
-	return *c.pitayaAll
-}
-func (c *Config) Viper() *viperx.Viperx {
-	return c.config
+//	@return PitayaConfig
+func (c *Config) PitayaConfig() PitayaConfig {
+	return *c.pitayaConfig
 }
 
 func (c *Config) AddLoader(loader ConfLoader) {
@@ -320,7 +241,7 @@ func (c *Config) Reload(key string, confStruct interface{}) {
 	// cm:=confStruct.(*confMap)
 }
 func (c *Config) Provide() (key string, confStruct interface{}) {
-	return "pitaya", c.pitayaAll
+	return "pitaya", c.pitayaConfig
 }
 
 // InitLoad 初始化加载本地或远程配置.业务层创建App前调用,仅允许一次
@@ -331,31 +252,31 @@ func (c *Config) InitLoad() error {
 		return errors2.NewWithStack("config already inited")
 	}
 	c.inited = true
-	err := c.UnmarshalKey("pitaya", c.pitayaAll)
+	err := c.UnmarshalKey("pitaya", c.pitayaConfig)
 	if err != nil {
 		return err
 	}
-	cnf := c.pitayaAll.ConfSource
+	cnf := c.pitayaConfig.ConfSource
 	if len(cnf.FilePath) > 0 {
 		for _, fp := range cnf.FilePath {
-			c.config.AddConfigPath(fp)
+			c.AddConfigPath(fp)
 		}
-		err := c.config.ReadInConfig()
+		err := c.ReadInConfig()
 		if err != nil {
 			return errors2.WithStack(err)
 		}
 	}
 	if len(cnf.Etcd.Keys) > 0 && len(cnf.Etcd.Endpoints) > 0 {
 		if cnf.Formatter != "" {
-			c.config.SetConfigType(cnf.Formatter)
+			c.SetConfigType(cnf.Formatter)
 		}
 		for _, key := range cnf.Etcd.Keys {
-			err := c.config.AddRemoteProviderCluster("etcd3", cnf.Etcd.Endpoints, key)
+			err := c.AddRemoteProviderCluster("etcd3", cnf.Etcd.Endpoints, key)
 			if err != nil {
 				return errors2.WithStack(err)
 			}
 		}
-		err = c.config.ReadRemoteConfigWithMerged(true)
+		err = c.ReadRemoteConfigWithMerged(true)
 		if err != nil {
 			return errors2.WithStack(err)
 		}
@@ -379,7 +300,7 @@ func (c *Config) watch() error {
 	// }
 	watchChan := make(chan *viper.RemoteResponse, 20)
 	if len(cnf.Etcd.Keys) > 0 && len(cnf.Etcd.Endpoints) > 0 {
-		err = c.config.WatchRemoteConfigWithChannel(context.Background(), watchChan, true)
+		err = c.WatchRemoteConfigWithChannel(context.Background(), watchChan, true)
 		if err != nil {
 			return err
 		}
