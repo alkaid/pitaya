@@ -4,12 +4,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"github.com/topfreegames/pitaya/v2/session"
 	"os"
 
 	"strings"
 
-	"github.com/sirupsen/logrus"
-	"github.com/spf13/viper"
 	"github.com/topfreegames/pitaya/v2"
 	"github.com/topfreegames/pitaya/v2/acceptor"
 	"github.com/topfreegames/pitaya/v2/cluster"
@@ -18,8 +17,6 @@ import (
 	"github.com/topfreegames/pitaya/v2/examples/demo/cluster/services"
 	"github.com/topfreegames/pitaya/v2/groups"
 	"github.com/topfreegames/pitaya/v2/route"
-	"github.com/topfreegames/pitaya/v2/tracing/jaeger"
-	jaegercfg "github.com/uber/jaeger-client-go/config"
 )
 
 var app pitaya.Pitaya
@@ -53,6 +50,7 @@ func configureFrontend(port int) {
 		route *route.Route,
 		payload []byte,
 		servers map[string]*cluster.Server,
+		session session.Session,
 	) (*cluster.Server, error) {
 		// will return the first server
 		for k := range servers {
@@ -78,23 +76,23 @@ func configureFrontend(port int) {
 	}
 }
 
-func configureJaeger(config *viper.Viper, logger logrus.FieldLogger) {
-	cfg, err := jaegercfg.FromEnv()
-	if cfg.ServiceName == "" {
-		logger.Error("Could not init jaeger tracer without ServiceName, either set environment JAEGER_SERVICE_NAME or cfg.ServiceName = \"my-api\"")
-		return
-	}
-	if err != nil {
-		logger.Error("Could not parse Jaeger env vars: %s", err.Error())
-		return
-	}
-	options := jaeger.Options{
-		Disabled:    cfg.Disabled,
-		Probability: cfg.Sampler.Param,
-		ServiceName: cfg.ServiceName,
-	}
-	jaeger.Configure(options)
-}
+//func configureJaeger(config *viper.Viper, logger logrus.FieldLogger) {
+//	cfg, err := jaegercfg.FromEnv()
+//	if cfg.ServiceName == "" {
+//		logger.Error("Could not init jaeger tracer without ServiceName, either set environment JAEGER_SERVICE_NAME or cfg.ServiceName = \"my-api\"")
+//		return
+//	}
+//	if err != nil {
+//		logger.Error("Could not parse Jaeger env vars: %s", err.Error())
+//		return
+//	}
+//	options := jaeger.Options{
+//		Disabled:    cfg.Disabled,
+//		Probability: cfg.Sampler.Param,
+//		ServiceName: cfg.ServiceName,
+//	}
+//	jaeger.Configure(options)
+//}
 
 func main() {
 	port := flag.Int("port", 3250, "the port to listen")
@@ -104,7 +102,7 @@ func main() {
 	flag.Parse()
 
 	if os.Getenv("JAEGER_SERVICE_NAME") != "" {
-		configureJaeger(viper.GetViper(), logrus.New())
+		//configureJaeger(viper.GetViper(), logrus.New())
 	}
 
 	builder := pitaya.NewDefaultBuilder(*isFrontend, *svType, pitaya.Cluster, map[string]string{}, *config.NewDefaultPitayaConfig())

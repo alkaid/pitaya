@@ -28,7 +28,7 @@ import (
 
 	"go.uber.org/zap"
 
-	workers "github.com/alkaid/go-workers"
+	workers "github.com/topfreegames/go-workers"
 	"github.com/topfreegames/pitaya/v2/co"
 	"github.com/topfreegames/pitaya/v2/config"
 	"github.com/topfreegames/pitaya/v2/constants"

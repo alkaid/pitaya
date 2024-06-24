@@ -17,7 +17,6 @@ import (
 	"github.com/topfreegames/pitaya/v2/pipeline"
 	"github.com/topfreegames/pitaya/v2/router"
 	"github.com/topfreegames/pitaya/v2/serialize"
-	"github.com/topfreegames/pitaya/v2/serialize/json"
 	"github.com/topfreegames/pitaya/v2/service"
 	"github.com/topfreegames/pitaya/v2/session"
 	"github.com/topfreegames/pitaya/v2/util"
@@ -116,12 +115,12 @@ func NewBuilder(isFrontend bool,
 
 	// session 后端redis落地实例
 	var redisClient redis.Cmdable
-	if redisConfig.Type == "cluster" {
-		redisClient = redis.NewClusterClient(confPkg.ToRedisClusterOption(&redisConfig))
+	if config.Storage.Redis.Type == "cluster" {
+		redisClient = redis.NewClusterClient(confPkg.ToRedisClusterOption(&config.Storage.Redis))
 	} else {
-		redisClient = redis.NewClient(confPkg.ToRedisNodeConfig(&redisConfig))
+		redisClient = redis.NewClient(confPkg.ToRedisNodeConfig(&config.Storage.Redis))
 	}
-	sessionCache := session.NewRedisCache(redisClient, config.Pitaya.Session.CacheTTL)
+	sessionCache := session.NewRedisCache(redisClient, config.Session.CacheTTL)
 	sessionPool := session.NewSessionPool()
 	sessionPool.SetClusterCache(sessionCache)
 

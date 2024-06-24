@@ -783,21 +783,14 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, callback map[string]
 			return err
 		}
 	}
-	for _, cb := range s.pool.afterBindCallbacks {
-		err = cb(ctx, s, callback)
-		if err != nil {
-			s.uid = ""
-			s.uidInt = 0
-			return err
-		}
-	}
 
 	// if code running on frontend server
 	if s.IsFrontend {
 		// If a session with the same UID already exists in this frontend server, close it
 		if val, ok := s.pool.sessionsByUID.Load(uid); ok {
-			// 异地登录
-			val.(Session).Close()
+			logger.Zap.Warn("session already bind,closing", zap.String("uid", uid))
+			// 应标记为重新绑定使其他服务不执行关闭回调
+			val.(Session).Close(nil, CloseReasonKickRebind)
 		}
 		s.pool.sessionsByUID.Store(uid, s)
 		atomic.AddInt64(&s.pool.UserCount, 1)
@@ -817,6 +810,17 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, callback map[string]
 		if err != nil {
 			return err
 		}
+	}
+
+	// invoke after callbacks on session bound
+	for _, cb := range s.pool.afterBindCallbacks {
+		_ = cb(ctx, s, callback)
+		// 要处理error就应该解绑，不应该这么草率
+		//if err != nil {
+		//	s.uid = ""
+		//	s.uidInt = 0
+		//	return err
+		//}
 	}
 
 	return nil

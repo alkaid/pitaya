@@ -74,7 +74,6 @@ type RemoteService struct {
 	remotes                map[string]*component.Remote      // all remote method
 	remoteSessionListeners []cluster.RemoteSessionListener   // session生命周期监听
 	interceptors           map[string]*component.Interceptor // 所有拦截分发器,优先级别高于 remotes
-	sysHandlerHooks        *pipeline.HandlerHooks            // 客户端api hook
 }
 
 // NewRemoteService creates and return a new RemoteService
@@ -90,7 +89,6 @@ func NewRemoteService(
 	sessionPool session.SessionPool,
 	remoteHooks *pipeline.RemoteHooks,
 	handlerHooks *pipeline.HandlerHooks,
-	sysHandlerHooks *pipeline.HandlerHooks,
 	handlerPool *HandlerPool,
 ) *RemoteService {
 	remote := &RemoteService{
@@ -110,13 +108,20 @@ func NewRemoteService(
 		remotes:                make(map[string]*component.Remote),
 		remoteSessionListeners: make([]cluster.RemoteSessionListener, 0),
 		interceptors:           make(map[string]*component.Interceptor),
-		sysHandlerHooks:        sysHandlerHooks,
 	}
 
 	remote.remoteHooks = remoteHooks
 	remote.handlerHooks = handlerHooks
 
 	return remote
+}
+
+func (r *RemoteService) SetRemoteHooks(remoteHooks *pipeline.RemoteHooks) {
+	r.remoteHooks = remoteHooks
+}
+
+func (r *RemoteService) GetRemoteHooks() *pipeline.RemoteHooks {
+	return r.remoteHooks
 }
 
 func (r *RemoteService) remoteProcess(
@@ -643,8 +648,6 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 		}
 		return response
 	}
-	var arg interface{}
-	var err error
 	receiver := remote.Receiver
 	if remote.Options.ReceiverProvider != nil {
 		rec := remote.Options.ReceiverProvider(ctx)
@@ -713,7 +716,7 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 		}
 	}
 
-	ctx, arg, err = r.remoteHooks.BeforeHandler.ExecuteBeforePipeline(ctx, arg)
+	ctx, arg, err = r.remoteHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)
 	if err != nil {
 		response := &protos.Response{
 			Status: &apierrors.FromError(err).Status,
@@ -739,8 +742,7 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 		ret, err = util.Pcall(remote.Method, params)
 	}
 
-	arg = arg.(proto.Message)
-	ret, err = r.remoteHooks.AfterHandler.ExecuteAfterPipeline(ctx, ret, err)
+	ret, err = r.remoteHooks.AfterHandler.ExecuteAfterPipeline(ctx, rt, arg, ret, err)
 	if err != nil {
 		response := &protos.Response{
 			Status: &apierrors.FromError(err).Status,
@@ -799,7 +801,7 @@ func (r *RemoteService) handleRPCSys(ctx context.Context, req *protos.Request, r
 		return response
 	}
 
-	ret, err := r.handlerPool.ProcessHandlerMessage(ctx, rt, r.serializer, r.sysHandlerHooks, a.Session, req.GetMsg().GetData(), req.GetMsg().GetType(), true)
+	ret, err := r.handlerPool.ProcessHandlerMessage(ctx, rt, r.serializer, r.handlerHooks, a.Session, req.GetMsg().GetData(), req.GetMsg().GetType(), true)
 	if err != nil {
 		logger.Zap.Warn("", zap.Error(err))
 		response = &protos.Response{

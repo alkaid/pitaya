@@ -7,61 +7,6 @@ import (
 	"github.com/topfreegames/pitaya/v2/metrics/models"
 )
 
-type PitayaAll struct {
-	PitayaConfig `mapstructure:",squash"`
-	Cluster      struct {
-		Info InfoRetrieverConfig
-		Rpc  struct {
-			Client struct {
-				Grpc GRPCClientConfig
-				Nats NatsRPCClientConfig
-			}
-			Server struct {
-				Grpc GRPCServerConfig
-				Nats NatsRPCServerConfig
-			}
-		}
-		Sd struct {
-			Etcd EtcdServiceDiscoveryConfig
-		}
-	}
-	DefaultPipelines struct {
-		StructValidation struct {
-			Enabled bool
-		}
-	}
-	Groups struct {
-		Etcd   EtcdGroupServiceConfig
-		Memory MemoryGroupConfig
-	}
-	Metrics struct {
-		Prometheus struct {
-			PrometheusConfig `mapstructure:",squash"`
-			Enabled          bool
-		}
-		Statsd struct {
-			StatsdConfig `mapstructure:",squash"`
-			Enabled      bool
-		}
-	}
-	Modules struct {
-		BindingStorage struct {
-			Etcd ETCDBindingConfig
-		}
-	}
-	Conn struct {
-		RateLimiting RateLimitingConfig
-	}
-	Worker struct {
-		WorkerConfig `mapstructure:",squash"`
-		Retry        EnqueueOpts
-	}
-	Storage struct {
-		Redis RedisConfig
-	}
-	GoPools []GoPool
-}
-
 // PitayaConfig provides all the configuration for a pitaya app
 type PitayaConfig struct {
 	SerializerType   uint16 `mapstructure:"serializertype"`
@@ -97,7 +42,7 @@ type PitayaConfig struct {
 		Unique bool `mapstructure:"unique"`
 		// CacheTTL 缓存过期时间
 		CacheTTL time.Duration
-		Drain  struct {
+		Drain    struct {
 			Enabled bool          `mapstructure:"enabled"`
 			Timeout time.Duration `mapstructure:"timeout"`
 			Period  time.Duration `mapstructure:"period"`
@@ -110,16 +55,19 @@ type PitayaConfig struct {
 	Conn struct {
 		RateLimiting RateLimitingConfig `mapstructure:"rateLimiting"`
 	} `mapstructure:"conn"`
-	Metrics MetricsConfig `mapstructure:"metrics"`
-	Cluster ClusterConfig `mapstructure:"cluster"`
-	Groups  GroupsConfig  `mapstructure:"groups"`
-	Worker  WorkerConfig  `mapstructure:"worker"`
-	ConfSource ConfSource // 配置源
+	Metrics    MetricsConfig `mapstructure:"metrics"`
+	Cluster    ClusterConfig `mapstructure:"cluster"`
+	Groups     GroupsConfig  `mapstructure:"groups"`
+	Worker     WorkerConfig  `mapstructure:"worker"`
+	ConfSource ConfSource    // 配置源
 	Log        struct {
 		Development bool   // 是否开发模式
 		Level       string // 日志等级
 	}
 	GoPools map[string]GoPool // 有状态线程池配置
+	Storage struct {
+		Redis RedisConfig
+	}
 }
 type ConfSource struct {
 	FilePath []string // 配置文件路径,不为空表明使用本地文件配置
@@ -207,15 +155,15 @@ func NewDefaultPitayaConfig() *PitayaConfig {
 			},
 		},
 		Session: struct {
-			Unique bool `mapstructure:"unique"`
+			Unique   bool `mapstructure:"unique"`
 			CacheTTL time.Duration
-			Drain  struct {
+			Drain    struct {
 				Enabled bool          `mapstructure:"enabled"`
 				Timeout time.Duration `mapstructure:"timeout"`
 				Period  time.Duration `mapstructure:"period"`
 			} `mapstructure:"drain"`
 		}{
-			Unique: true,
+			Unique:   true,
 			CacheTTL: time.Hour * 24 * 3,
 			Drain: struct {
 				Enabled bool          `mapstructure:"enabled"`
@@ -250,6 +198,7 @@ func NewDefaultPitayaConfig() *PitayaConfig {
 			Level       string
 		}{Development: false, Level: "ERROR"},
 		GoPools: map[string]GoPool{},
+		Storage: struct{ Redis RedisConfig }{Redis: *newDefaultRedisConfig()},
 	}
 }
 
@@ -383,14 +332,6 @@ type EtcdServiceDiscoveryConfig struct {
 		Enable bool   // 是否开启
 		Name   string // 岗位名称
 	}
-		Delay time.Duration
-	}
-	ServerTypesBlacklist []string
-	// 选举
-	Election struct {
-		Enable bool   // 是否开启
-		Name   string // 岗位名称
-	}
 }
 
 type RedisConfig struct {
@@ -420,7 +361,7 @@ type RedisConfig struct {
 	CacheTTL        time.Duration // 过期时间
 }
 
-func NewDefaultRedisConfig() *RedisConfig {
+func newDefaultRedisConfig() *RedisConfig {
 	return &RedisConfig{
 		Addrs: []string{"localhost:6379"},
 	}
@@ -508,7 +449,7 @@ func ToRedisUniversalOptions(conf *RedisConfig) *redis.UniversalOptions {
 	return opts
 }
 func NewRedisConfig(config *Config) *RedisConfig {
-	conf := NewDefaultRedisConfig()
+	conf := newDefaultRedisConfig()
 	if err := config.UnmarshalKey("pitaya.storage.redis", &conf); err != nil {
 		panic(err)
 	}
