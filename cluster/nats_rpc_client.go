@@ -140,6 +140,7 @@ func (ns *NatsRPCClient) Publish(
 	route *route.Route,
 	session session.Session,
 	msg *message.Message,
+	observersCount int,
 	timeouts ...time.Duration,
 ) ([]*protos.Response, error) {
 	var err error
@@ -187,7 +188,12 @@ func (ns *NatsRPCClient) Publish(
 	if !ns.running {
 		return nil, constants.ErrRPCClientNotInitialized
 	}
-	reply := route.Method + session.UID() + util.NanoID(8)
+	uid := ""
+	if session != nil {
+		uid = "_" + session.UID()
+	}
+	reply := route.Method + uid + "_" + util.NanoID(16)
+	//reply := nats.NewInbox()
 	sub, err := ns.conn.SubscribeSync(reply)
 	if err != nil {
 		return nil, errors.WithStack(err)
@@ -204,7 +210,8 @@ func (ns *NatsRPCClient) Publish(
 	// Wait for a single response
 	var responses []*protos.Response
 	timeoutPerReply := lo.If(len(timeouts) == 0, ns.reqTimeout).ElseF(func() time.Duration { return timeouts[0] })
-	for {
+	// nats订阅端自己无法感知,需要外部传入订阅者数量，ErrNoResponders 并不能作为读完的依据,只能说明没有订阅者.
+	for i := 0; i < observersCount; i++ {
 		m, err := sub.NextMsg(timeoutPerReply)
 		if err != nil {
 			if errors.Is(err, nats.ErrTimeout) {
@@ -216,7 +223,7 @@ func (ns *NatsRPCClient) Publish(
 				//err = fmt.Errorf("%w:%s", constants.ErrRPCTimeout, nats.ErrTimeout.Error())
 				return responses, errors.WithStack(err)
 			} else if errors.Is(err, nats.ErrNoResponders) {
-				// 读完最后一个
+				// 没有订阅者
 				logger.Zap.Debug("",
 					zap.String("uid", lo.If(session == nil, "").ElseF(func() string { return session.UID() })),
 					zap.String("topic", route.String()),

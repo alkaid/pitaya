@@ -95,6 +95,7 @@ func (gs *GRPCClient) Publish(
 	route *route.Route,
 	session session.Session,
 	msg *message.Message,
+	observersCount int,
 	timeouts ...time.Duration,
 ) ([]*protos.Response, error) {
 	return nil, constants.ErrNotImplemented

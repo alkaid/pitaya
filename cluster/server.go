@@ -36,6 +36,7 @@ type Server struct {
 	Frontend          bool              `json:"frontend"`
 	Hostname          string            `json:"hostname"`
 	SessionStickiness bool              `json:"stickiness"` // 是否可以绑定session，绑定后将保持session粘连
+	Subscribe         map[string]string `json:"subscribe"`  // 订阅的topic,key为topic,value为group,同一group同时只有一个消费者.若为空则没有group.
 }
 
 // NewServer ctor
@@ -49,11 +50,12 @@ func NewServer(id, serverType string, frontend bool, metadata ...map[string]stri
 		d = metadata[0]
 	}
 	return &Server{
-		ID:       id,
-		Type:     serverType,
-		Metadata: d,
-		Frontend: frontend,
-		Hostname: h,
+		ID:        id,
+		Type:      serverType,
+		Metadata:  d,
+		Frontend:  frontend,
+		Hostname:  h,
+		Subscribe: map[string]string{},
 	}
 }
 
@@ -65,4 +67,7 @@ func (s *Server) AsJSONString() string {
 		return ""
 	}
 	return string(str)
+}
+func (s *Server) AddSubscribe(topic, group string) {
+	s.Subscribe[topic] = group
 }

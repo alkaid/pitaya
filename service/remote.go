@@ -349,8 +349,8 @@ func (r *RemoteService) DoFork(ctx context.Context, route *route.Route, protoDat
 	return nil
 }
 
-func (r *RemoteService) DoPublish(ctx context.Context, topic string, request bool, protoData []byte, session session.Session) ([]*protos.Response, error) {
-	topic = cluster.GetPublishTopic(topic)
+func (r *RemoteService) DoPublish(ctx context.Context, method string, request bool, protoData []byte, session session.Session) ([]*protos.Response, error) {
+	topic := cluster.GetPublishTopic(method)
 	route, err := route.Decode(topic)
 	if err != nil {
 		return nil, err
@@ -360,7 +360,33 @@ func (r *RemoteService) DoPublish(ctx context.Context, topic string, request boo
 		Route: route.Short(),
 		Data:  protoData,
 	}
-	responses, err := r.rpcClient.Publish(ctx, protos.RPCType_User, route, session, msg)
+	// 由于nats订阅端无法感知topic的订阅者数量，需要计算订阅者数量以使同步情况下能够正确阻塞等待
+	observersCount := 0
+	if request {
+		groups := map[string]struct{}{}
+		for _, s := range r.serviceDiscovery.GetServers() {
+			group, ok := s.Subscribe[method]
+			if !ok {
+				continue
+			}
+			if group == "" {
+				observersCount++
+			} else if s.Type == r.server.Type {
+				return nil, constants.ErrNonsenseRPC
+			} else {
+				groups[group] = struct{}{}
+			}
+		}
+		observersCount += len(groups)
+	}
+	if observersCount == 0 {
+		logger.Zap.Info("no observers",
+			zap.String("uid", lo.If(session == nil, "").ElseF(func() string { return session.UID() })),
+			zap.String("route", route.String()))
+		return nil, nil
+	}
+	// 以上订阅者数量没有考虑外部系统的数量，也就是说使用框架publish的topic仅限框架内使用才能正确计算
+	responses, err := r.rpcClient.Publish(ctx, protos.RPCType_User, route, session, msg, observersCount)
 	if err != nil {
 		logger.Zap.Error("error making publish",
 			zap.String("uid", lo.If(session == nil, "").ElseF(func() string { return session.UID() })),
@@ -488,16 +514,16 @@ func (r *RemoteService) Publish(ctx context.Context, topic string, request bool,
 }
 
 // Register registers components
-func (r *RemoteService) Register(comp component.Component, opts []component.Option) error {
+func (r *RemoteService) Register(comp component.Component, opts []component.Option) (*component.Service, error) {
 	s := component.NewService(comp, opts)
 	services := lo.If(s.Options.Subscriber, r.subscribers).Else(r.services)
 
 	if _, ok := services[s.Name]; ok {
-		return errors.WithStack(fmt.Errorf("remote: service already defined: %s", s.Name))
+		return nil, errors.WithStack(fmt.Errorf("remote: service already defined: %s", s.Name))
 	}
 
 	if err := s.ExtractRemote(); err != nil {
-		return err
+		return nil, err
 	}
 
 	services[s.Name] = s
@@ -507,7 +533,7 @@ func (r *RemoteService) Register(comp component.Component, opts []component.Opti
 		for name, remote := range s.Remotes {
 			r.remotes[fmt.Sprintf("%s.%s", s.Name, name)] = remote
 		}
-		return nil
+		return s, nil
 	}
 	var groups []string
 	if s.Options.SubscriberGroup != "" {
@@ -515,14 +541,14 @@ func (r *RemoteService) Register(comp component.Component, opts []component.Opti
 	}
 	// 注册订阅
 	for name, remote := range s.Remotes {
-		// 同一个服务器的不同subscriber之间订阅的topic不能相同
+		// 同一个服务器的不同subscriber之间订阅的topic不能相同,后者覆盖前者
 		r.remotes[fmt.Sprintf("%s.%s", cluster.PublishServiceName, name)] = remote
 		err := r.rpcServer.Subscribe(name, groups...)
 		if err != nil {
-			return err
+			return nil, err
 		}
 	}
-	return nil
+	return s, nil
 }
 
 // RegisterInterceptor 注册拦截分发器,优先级别高于 component.Remote

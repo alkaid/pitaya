@@ -191,12 +191,13 @@ type Pitaya interface {
 	NotifyAll(ctx context.Context, routeStr string, arg proto.Message, uid string) error
 	// Fork rpc调用同一类服务的所有实例,非阻塞.一般来说仅适用于目标服务为stateful类型时
 	//  若fork的服务类型和自己相同,则自己也会收到消息
+	//  若需要同步阻塞，则请自行遍历servers调用 RPCTo
 	//  @param ctx
 	//  @param routeStr
 	//  @param arg
 	//  @param uid 若不为空会携带session数据
 	Fork(ctx context.Context, routeStr string, arg proto.Message, uid string) error
-	// PublishRequest 发布一个topic,会阻塞等待请求返回
+	// PublishRequest 发布一个topic,会阻塞等待请求返回,注意订阅者不能包含自己
 	//  @param ctx
 	//  @param topic 主题,框架会自动加上 pitaya.publish. 的前缀,若topic中含有"."会自动转化为"_"
 	//  @param arg
@@ -204,9 +205,9 @@ type Pitaya interface {
 	//  @return []*protos.Response 自行判断status以及反序列化data,可以使用protoAny,switch typeUrl来解析
 	//  @return error
 	PublishRequest(ctx context.Context, topic string, arg proto.Message, uid string) ([]*protos.Response, error)
-	// Publish 发布一个topic,不会阻塞
+	// Publish 发布一个topic,不会阻塞,注意订阅者不能包含自己
 	//  @param ctx
-	//  @param topic
+	//  @param topic 主题,框架会自动加上 pitaya.publish. 的前缀,若topic中含有"."会自动转化为"_"
 	//  @param arg
 	//  @param uid
 	//  @return error

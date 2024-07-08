@@ -57,7 +57,7 @@ type RPCClient interface {
 	//  @param msg
 	//  @return error
 	Fork(ctx context.Context, route *route.Route, session session.Session, msg *message.Message) error
-	Publish(ctx context.Context, rpcType protos.RPCType, route *route.Route, session session.Session, msg *message.Message, timeouts ...time.Duration) ([]*protos.Response, error)
+	Publish(ctx context.Context, rpcType protos.RPCType, route *route.Route, session session.Session, msg *message.Message, observersCount int, timeouts ...time.Duration) ([]*protos.Response, error)
 	interfaces.Module
 }
 
@@ -179,6 +179,7 @@ func buildRequest(
 
 func GoWithRequest(ctx context.Context, req *protos.Request, task func(ctx context.Context)) {
 	if req == nil || req.Session == nil {
+		// TODO 限制并发数并提取配置
 		co.Go(func() {
 			task(ctx)
 		})
