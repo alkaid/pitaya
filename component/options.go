@@ -28,6 +28,7 @@ type (
 		nameFunc         func(string) string                                       // rename handler name
 		Subscriber       bool                                                      // 是否订阅者
 		SubscriberGroup  string                                                    // 订阅消费组
+		MethodPrefix     string                                                    // 路由方法前缀，注册时会自动拼在方法名前
 		ReceiverProvider func(ctx context.Context) Component                       // 延迟绑定的receiver实例
 		TaskGoProvider   func(ctx context.Context, task func(ctx context.Context)) // 异步任务派发线程提供者
 	}
@@ -68,6 +69,16 @@ func WithSubscriber() Option {
 func WithSubscriberGroup(group string) Option {
 	return func(opt *options) {
 		opt.SubscriberGroup = group
+	}
+}
+
+// WithMethodPrefix 路由方法前缀，注册时会自动拼在方法名前
+//
+//	@param prefix
+//	@return Option
+func WithMethodPrefix(prefix string) Option {
+	return func(opt *options) {
+		opt.MethodPrefix = prefix
 	}
 }
 

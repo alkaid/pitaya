@@ -531,7 +531,7 @@ func (r *RemoteService) Register(comp component.Component, opts []component.Opti
 	// 注册非订阅者的rpc remote
 	if !s.Options.Subscriber {
 		for name, remote := range s.Remotes {
-			r.remotes[fmt.Sprintf("%s.%s", s.Name, name)] = remote
+			r.remotes[fmt.Sprintf("%s.%s%s", s.Name, s.Options.MethodPrefix, name)] = remote
 		}
 		return s, nil
 	}
@@ -542,7 +542,7 @@ func (r *RemoteService) Register(comp component.Component, opts []component.Opti
 	// 注册订阅
 	for name, remote := range s.Remotes {
 		// 同一个服务器的不同subscriber之间订阅的topic不能相同,后者覆盖前者
-		r.remotes[fmt.Sprintf("%s.%s", cluster.PublishServiceName, name)] = remote
+		r.remotes[fmt.Sprintf("%s.%s%s", cluster.PublishServiceName, s.Options.MethodPrefix, name)] = remote
 		err := r.rpcServer.Subscribe(name, groups...)
 		if err != nil {
 			return nil, err
