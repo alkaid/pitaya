@@ -182,7 +182,7 @@ type Pitaya interface {
 	//  @param arg
 	//  @return error
 	NotifyTo(ctx context.Context, serverID, routeStr string, arg proto.Message) error
-	// NotifyAll 通知集群内所有服务，每种服务只有一个实例消费
+	// NotifyAll 通知集群内所有服务，每种服务只有一个实例消费，会排除当前服务
 	//  @param ctx
 	//  @param routeStr 不能带有serverType,否则报错
 	//  @param arg
@@ -190,28 +190,36 @@ type Pitaya interface {
 	//  @return error
 	NotifyAll(ctx context.Context, routeStr string, arg proto.Message, uid string) error
 	// Fork rpc调用同一类服务的所有实例,非阻塞.一般来说仅适用于目标服务为stateful类型时
-	//  若fork的服务类型和自己相同,则自己也会收到消息
-	//  若需要同步阻塞，则请自行遍历servers调用 RPCTo
+	//  会排除当前副本
 	//  @param ctx
 	//  @param routeStr
 	//  @param arg
 	//  @param uid 若不为空会携带session数据
 	Fork(ctx context.Context, routeStr string, arg proto.Message, uid string) error
-	// PublishRequest 发布一个topic,会阻塞等待请求返回,注意订阅者不能包含自己
+	// ForkRequest rpc调用同一类服务的所有实例,阻塞.一般来说仅适用于目标服务为stateful类型时
+	//  会排除当前副本
 	//  @param ctx
-	//  @param topic 主题,框架会自动加上 pitaya.publish. 的前缀,若topic中含有"."会自动转化为"_"
+	//  @param routeStr
+	//  @param arg
+	//  @param uid
+	//  @return []*protos.Response
+	//  @return error
+	ForkRequest(ctx context.Context, routeStr string, arg proto.Message, uid string) ([]*protos.Response, error)
+	// PublishRequest 发布一个topic,会阻塞等待请求返回,订阅参数fork为false时排除本服务,为true时排除本副本
+	//  @param ctx
+	//  @param routeStr 只需两位 如 publish.event
 	//  @param arg
 	//  @param uid
 	//  @return []*protos.Response 自行判断status以及反序列化data,可以使用protoAny,switch typeUrl来解析
 	//  @return error
-	PublishRequest(ctx context.Context, topic string, arg proto.Message, uid string) ([]*protos.Response, error)
-	// Publish 发布一个topic,不会阻塞,注意订阅者不能包含自己
+	PublishRequest(ctx context.Context, routeStr string, arg proto.Message, uid string) ([]*protos.Response, error)
+	// Publish 发布一个topic,不会阻塞,订阅参数fork为false时排除本服务,为true时排除本副本
 	//  @param ctx
-	//  @param topic 主题,框架会自动加上 pitaya.publish. 的前缀,若topic中含有"."会自动转化为"_"
+	//  @param routeStr 只需两位 如 publish.event
 	//  @param arg
 	//  @param uid
 	//  @return error
-	Publish(ctx context.Context, topic string, arg proto.Message, uid string) error
+	Publish(ctx context.Context, routeStr string, arg proto.Message, uid string) error
 	// RPC 根据route调用remote,会阻塞等待 reply 。如果uid不为空且目标服务器是stateful,则会路由到持有session引用的服
 	//  @param ctx
 	//  @param routeStr
@@ -289,14 +297,6 @@ type Pitaya interface {
 	//  @param options
 	//
 	RegisterSubscribe(c component.Component, options ...component.Option)
-	// LazyRegisterSubscribe 注册subscribe(publish的远端响应) 意系统不会回调该component的生命周期函数
-	//
-	// 若要使用消费组,请使用 component.WithSubscriberGroup
-	//
-	// 不同subscriber之间的方法名不能相同
-	//  @param c
-	//  @param options
-	LazyRegisterSubscribe(c component.Component, options ...component.Option)
 	// LazyRegister 延迟注册handle(终端api响应)
 	//  @param c 注意系统不会回调该component的生命周期函数
 	//  @param options

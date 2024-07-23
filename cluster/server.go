@@ -30,13 +30,16 @@ import (
 
 // Server struct
 type Server struct {
-	ID                string            `json:"id"`
-	Type              string            `json:"type"`
-	Metadata          map[string]string `json:"metadata"`
-	Frontend          bool              `json:"frontend"`
-	Hostname          string            `json:"hostname"`
-	SessionStickiness bool              `json:"stickiness"` // 是否可以绑定session，绑定后将保持session粘连
-	Subscribe         map[string]string `json:"subscribe"`  // 订阅的topic,key为topic,value为group,同一group同时只有一个消费者.若为空则没有group.
+	ID                string                    `json:"id"`
+	Type              string                    `json:"type"`
+	Metadata          map[string]string         `json:"metadata"`
+	Frontend          bool                      `json:"frontend"`
+	Hostname          string                    `json:"hostname"`
+	SessionStickiness bool                      `json:"stickiness"` // 是否可以绑定session，绑定后将保持session粘连
+	Subscribe         map[string]*SubscribeItem `json:"subscribe"`  // 订阅的topic,key为topic,value为fork,fork指同一服务是否所有实例都能消费
+}
+type SubscribeItem struct {
+	Fork bool `json:"fork"`
 }
 
 // NewServer ctor
@@ -55,7 +58,7 @@ func NewServer(id, serverType string, frontend bool, metadata ...map[string]stri
 		Metadata:  d,
 		Frontend:  frontend,
 		Hostname:  h,
-		Subscribe: map[string]string{},
+		Subscribe: map[string]*SubscribeItem{},
 	}
 }
 
@@ -68,6 +71,9 @@ func (s *Server) AsJSONString() string {
 	}
 	return string(str)
 }
-func (s *Server) AddSubscribe(topic, group string) {
-	s.Subscribe[topic] = group
+func (s *Server) AddSubscribe(service string, method string, fork bool) {
+	s.Subscribe[service+"-"+method] = &SubscribeItem{Fork: fork}
+}
+func (s *Server) GetSubscribe(service string, method string) *SubscribeItem {
+	return s.Subscribe[service+"-"+method]
 }

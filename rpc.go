@@ -22,11 +22,9 @@ package pitaya
 
 import (
 	"context"
-	"reflect"
-	"strings"
-
 	"github.com/alkaid/goerrors/apierrors"
 	"github.com/topfreegames/pitaya/v2/protos"
+	"reflect"
 
 	"github.com/topfreegames/pitaya/v2/logger"
 	"go.uber.org/zap"
@@ -70,15 +68,21 @@ func (app *App) NotifyAll(ctx context.Context, routeStr string, arg proto.Messag
 
 // Fork implement Pitaya.Fork
 func (app *App) Fork(ctx context.Context, routeStr string, arg proto.Message, uid string) error {
-	return app.doFork(ctx, routeStr, arg, uid)
+	_, err := app.doFork(ctx, true, routeStr, arg, uid)
+	return err
 }
 
-func (app *App) PublishRequest(ctx context.Context, topic string, arg proto.Message, uid string) ([]*protos.Response, error) {
-	return app.doPublish(ctx, topic, true, arg, uid)
+// ForkRequest implement Pitaya.ForkRequest
+func (app *App) ForkRequest(ctx context.Context, routeStr string, arg proto.Message, uid string) ([]*protos.Response, error) {
+	return app.doFork(ctx, false, routeStr, arg, uid)
 }
 
-func (app *App) Publish(ctx context.Context, topic string, arg proto.Message, uid string) error {
-	_, err := app.doPublish(ctx, topic, false, arg, uid)
+func (app *App) PublishRequest(ctx context.Context, routeStr string, arg proto.Message, uid string) ([]*protos.Response, error) {
+	return app.doPublish(ctx, routeStr, false, arg, uid)
+}
+
+func (app *App) Publish(ctx context.Context, routeStr string, arg proto.Message, uid string) error {
+	_, err := app.doPublish(ctx, routeStr, true, arg, uid)
 	return err
 }
 
@@ -194,7 +198,7 @@ func (app *App) doSendNotifyAll(ctx context.Context, routeStr string, arg proto.
 			return err
 		}
 	}
-	return app.remoteService.NotifyAll(ctx, r, app.server, arg, sess)
+	return app.remoteService.NotifyAll(ctx, r, arg, sess)
 }
 
 // doSendNotify only support nats,don't use grpc.(copy then modify from doSendRPC)
@@ -222,43 +226,45 @@ func (app *App) doSendNotify(ctx context.Context, serverID, routeStr string, arg
 	return app.remoteService.Notify(ctx, serverID, r, arg, sess)
 }
 
-func (app *App) doFork(ctx context.Context, routeStr string, arg proto.Message, uid string) error {
+func (app *App) doFork(ctx context.Context, notify bool, routeStr string, arg proto.Message, uid string) ([]*protos.Response, error) {
 	if app.rpcServer == nil {
-		return constants.ErrRPCServerNotInitialized
+		return nil, constants.ErrRPCServerNotInitialized
 	}
 
 	r, err := route.Decode(routeStr)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if r.SvType == "" {
-		return constants.ErrNoServerTypeChosenForRPC
+		return nil, constants.ErrNoServerTypeChosenForRPC
 	}
 	var sess session.Session = nil
-	if uid != "" {
-		sess, err = app.imperfectSessionForRPC(ctx, uid)
-		if err != nil {
-			return err
-		}
-	}
-	return app.remoteService.Fork(ctx, r, arg, sess)
-}
-
-func (app *App) doPublish(ctx context.Context, topic string, request bool, arg proto.Message, uid string) ([]*protos.Response, error) {
-	if app.rpcClient == nil {
-		return nil, constants.ErrRPCClientNotInitialized
-	}
-	topic = strings.ReplaceAll(topic, ".", "_")
-	var sess session.Session = nil
-	var err error
 	if uid != "" {
 		sess, err = app.imperfectSessionForRPC(ctx, uid)
 		if err != nil {
 			return nil, err
 		}
 	}
-	return app.remoteService.Publish(ctx, topic, request, arg, sess)
+	return app.remoteService.Fork(ctx, notify, r, arg, sess)
+}
+
+func (app *App) doPublish(ctx context.Context, routeStr string, notify bool, arg proto.Message, uid string) ([]*protos.Response, error) {
+	if app.rpcClient == nil {
+		return nil, constants.ErrRPCClientNotInitialized
+	}
+	r, err := route.Decode(routeStr)
+	if err != nil {
+		return nil, err
+	}
+	var sess session.Session = nil
+	if uid != "" {
+		sess, err = app.imperfectSessionForRPC(ctx, uid)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return app.remoteService.Publish(ctx, r, notify, arg, sess)
 }
 
 // imperfectSessionForRPC 为rpc调用获取一个可能不健全的session

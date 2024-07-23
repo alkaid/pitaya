@@ -105,7 +105,7 @@ func (sys *Sys) Init() {
 			return err
 		}
 		// 通知所有frontend实例
-		err = sys.remote.Fork(ctx, r, msg, s)
+		_, err = sys.remote.Fork(ctx, true, r, msg, s)
 		if err != nil {
 			logW.Warn("session bind fork error", zap.Error(err))
 			// 非致命异常 继续
@@ -116,7 +116,7 @@ func (sys *Sys) Init() {
 			logW.Warn("session bind notify error", zap.Error(err))
 			// 非致命异常 继续
 		}
-		err = sys.remote.NotifyAll(ctx, r, sys.server, msg, s)
+		err = sys.remote.NotifyAll(ctx, r, msg, s)
 		if err != nil {
 			logW.Warn("session bind notify error", zap.Error(err))
 			// 非致命异常 继续
@@ -153,7 +153,7 @@ func (sys *Sys) Init() {
 			UserId:   s.UID(),
 			Metadata: callback,
 		}
-		err = sys.remote.NotifyAll(context.Background(), r, sys.server, msg, s)
+		err = sys.remote.NotifyAll(context.Background(), r, msg, s)
 		if err != nil {
 			logW.Error("session on close error", zap.Error(err))
 			return
@@ -226,7 +226,7 @@ func (sys *Sys) Init() {
 			logErr(err)
 			return nil
 		}
-		err = sys.remote.Fork(ctx, r, msg, s)
+		_, err = sys.remote.Fork(ctx, true, r, msg, s)
 		if err != nil {
 			logErr(err)
 			return nil
@@ -236,7 +236,7 @@ func (sys *Sys) Init() {
 			logErr(err)
 			return nil
 		}
-		err = sys.remote.NotifyAll(ctx, r, sys.server, msg, s)
+		err = sys.remote.NotifyAll(ctx, r, msg, s)
 		if err != nil {
 			logErr(err)
 			return nil
@@ -304,7 +304,7 @@ func (sys *Sys) Init() {
 			logW.Error("session kick backend error,ignore", zap.Error(err))
 			return nil
 		}
-		err = sys.remote.NotifyAll(ctx, r, sys.server, msg, s)
+		err = sys.remote.NotifyAll(ctx, r, msg, s)
 		if err != nil {
 			logW.Error("session kick backend error,ignore", zap.Error(err))
 		}

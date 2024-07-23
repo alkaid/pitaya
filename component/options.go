@@ -26,9 +26,8 @@ type (
 	options struct {
 		name             string                                                    // component name
 		nameFunc         func(string) string                                       // rename handler name
-		Subscriber       bool                                                      // 是否订阅者
-		SubscriberGroup  string                                                    // 订阅消费组
-		MethodPrefix     string                                                    // 路由方法前缀，注册时会自动拼在方法名前
+		Subscriber       bool                                                      // 是否订阅者 对应Publish
+		ForkMethods      []string                                                  // 每个实例都能消费的topic
 		ReceiverProvider func(ctx context.Context) Component                       // 延迟绑定的receiver实例
 		TaskGoProvider   func(ctx context.Context, task func(ctx context.Context)) // 异步任务派发线程提供者
 	}
@@ -36,6 +35,17 @@ type (
 	// Option used to customize handler
 	Option func(options *options)
 )
+
+func apply(opts []Option, opt *options) {
+	for _, o := range opts {
+		o(opt)
+	}
+	if opt.nameFunc != nil {
+		for i, method := range opt.ForkMethods {
+			opt.ForkMethods[i] = opt.nameFunc(method)
+		}
+	}
+}
 
 // WithName used to rename component name
 func WithName(name string) Option {
@@ -62,23 +72,13 @@ func WithSubscriber() Option {
 	}
 }
 
-// WithSubscriberGroup 订阅消费组
+// WithForkMethods 每个实例都能消费的topic
 //
 //	@param group
 //	@return Option
-func WithSubscriberGroup(group string) Option {
+func WithForkMethods(methods ...string) Option {
 	return func(opt *options) {
-		opt.SubscriberGroup = group
-	}
-}
-
-// WithMethodPrefix 路由方法前缀，注册时会自动拼在方法名前
-//
-//	@param prefix
-//	@return Option
-func WithMethodPrefix(prefix string) Option {
-	return func(opt *options) {
-		opt.MethodPrefix = prefix
+		opt.ForkMethods = methods
 	}
 }
 

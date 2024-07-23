@@ -47,6 +47,7 @@ require (
 	github.com/mitchellh/mapstructure v1.5.0
 	github.com/spf13/cast v1.6.0
 	github.com/topfreegames/go-workers v1.2.1
+	k8s.io/utils v0.0.0-20230726121419-3b25d923346b
 )
 
 require (

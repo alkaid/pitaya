@@ -79,11 +79,7 @@ func NewService(comp Component, opts []Option) *Service {
 		Receiver: reflect.ValueOf(comp),
 	}
 
-	// apply options
-	for i := range opts {
-		opt := opts[i]
-		opt(&s.Options)
-	}
+	apply(opts, &s.Options)
 	if name := s.Options.name; name != "" {
 		s.Name = name
 	} else {

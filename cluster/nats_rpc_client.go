@@ -179,7 +179,7 @@ func (ns *NatsRPCClient) Publish(
 
 	// support notify type.  notify msg don't need wait response
 	if msg.Type == message.Notify {
-		err = ns.Send(GetPublishTopic(route.Method), marshalledData)
+		err = ns.Send(getChannel(route.SvType, route.Method), marshalledData)
 		if err != nil {
 			return nil, errors.WithStack(err)
 		}
@@ -203,7 +203,7 @@ func (ns *NatsRPCClient) Publish(
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
-	err = ns.conn.PublishRequest(GetPublishTopic(route.Method), reply, marshalledData)
+	err = ns.conn.PublishRequest(getChannel(route.SvType, route.Method), reply, marshalledData)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}

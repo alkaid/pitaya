@@ -29,8 +29,9 @@ func configureBackend() {
 		component.WithName("room"),
 	)
 	app.RegisterSubscribe(room,
-		component.WithName("roomqueue"),
-		component.WithSubscriberGroup("room"),
+		component.WithName("publish"),
+		component.WithNameFunc(strings.ToLower),
+		component.WithForkMethods("Test"),
 	)
 }
 

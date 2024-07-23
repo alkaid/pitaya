@@ -23,6 +23,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"k8s.io/utils/strings/slices"
 	"net/http"
 	"reflect"
 	"sync"
@@ -298,102 +299,197 @@ func (r *RemoteService) DoRPC(ctx context.Context, serverID string, route *route
 
 // DoNotify only support nats,don't use grpc.(copy then modify from DoRPC)
 func (r *RemoteService) DoNotify(ctx context.Context, serverID string, route *route.Route, protoData []byte, session session.Session) error {
-	co.Go(func() {
-		msg := &message.Message{
-			Type:  message.Notify,
-			Route: route.Short(),
-			Data:  protoData,
-		}
+	msg := &message.Message{
+		Type:  message.Notify,
+		Route: route.Short(),
+		Data:  protoData,
+	}
 
-		if serverID == "" {
-			r.remoteCall(ctx, nil, protos.RPCType_User, route, session, msg)
-			return
-		}
+	if serverID == "" {
+		_, err := r.remoteCall(ctx, nil, protos.RPCType_User, route, session, msg)
+		return err
+	}
 
-		target, _ := r.serviceDiscovery.GetServer(serverID)
-		if target == nil {
-			err := constants.ErrServerNotFound
-			logger.Zap.Error("notify error",
-				zap.String("uid", lo.If(session == nil, "").ElseF(func() string { return session.UID() })),
-				zap.String("route", route.String()),
-				zap.Error(err))
-			return
-		}
+	target, _ := r.serviceDiscovery.GetServer(serverID)
+	if target == nil {
+		err := constants.ErrServerNotFound
+		logger.Zap.Error("notify error",
+			zap.String("uid", lo.If(session == nil, "").ElseF(func() string { return session.UID() })),
+			zap.String("route", route.String()),
+			zap.Error(err))
+		return err
+	}
 
-		_, err := r.remoteCall(ctx, target, protos.RPCType_User, route, session, msg)
-		if err != nil {
-			return
-		}
-	})
-	return nil
+	_, err := r.remoteCall(ctx, target, protos.RPCType_User, route, session, msg)
+	return err
 }
 
-// DoFork only support nats,don't use grpc.(copy then modify from DoRPC)
 func (r *RemoteService) DoFork(ctx context.Context, route *route.Route, protoData []byte, session session.Session) error {
-	co.Go(func() {
-		msg := &message.Message{
-			Type:  message.Notify,
-			Route: route.Short(),
-			Data:  protoData,
-		}
+	msg := &message.Message{
+		Type:  message.Notify,
+		Route: route.Short(),
+		Data:  protoData,
+	}
+	// 路由的不是本服务则直接send无须排除
+	if route.SvType != r.server.Type {
 		err := r.rpcClient.Fork(ctx, route, session, msg)
 		if err != nil {
 			logger.Zap.Error("error making fork",
 				zap.String("uid", lo.If(session == nil, "").ElseF(func() string { return session.UID() })),
 				zap.Stringer("route", route),
 				zap.Error(err))
-			return
 		}
-
-	})
-	return nil
+		return err
+	}
+	svs, err := r.serviceDiscovery.GetServersByType(route.SvType)
+	if err != nil {
+		return err
+	}
+	// 排除当前副本
+	for _, server := range svs {
+		if r.server.ID == server.ID {
+			continue
+		}
+		_, err2 := r.remoteCall(ctx, server, protos.RPCType_User, route, session, msg)
+		if err2 != nil {
+			err = err2
+			logger.Zap.Error("error making fork",
+				zap.String("uid", lo.If(session == nil, "").ElseF(func() string { return session.UID() })),
+				zap.Stringer("route", route),
+				zap.Error(err))
+		}
+	}
+	return err
 }
 
-func (r *RemoteService) DoPublish(ctx context.Context, method string, request bool, protoData []byte, session session.Session) ([]*protos.Response, error) {
-	topic := cluster.GetPublishTopic(method)
-	route, err := route.Decode(topic)
-	if err != nil {
-		return nil, err
-	}
+func (r *RemoteService) DoForkRequest(ctx context.Context, route *route.Route, protoData []byte, session session.Session) ([]*protos.Response, error) {
 	msg := &message.Message{
-		Type:  lo.If(request, message.Request).Else(message.Notify),
+		Type:  message.Request,
 		Route: route.Short(),
 		Data:  protoData,
 	}
-	// 由于nats订阅端无法感知topic的订阅者数量，需要计算订阅者数量以使同步情况下能够正确阻塞等待
-	observersCount := 0
-	if request {
-		groups := map[string]struct{}{}
-		for _, s := range r.serviceDiscovery.GetServers() {
-			group, ok := s.Subscribe[method]
-			if !ok {
-				continue
+	svs, err := r.serviceDiscovery.GetServersByType(route.SvType)
+	if err != nil {
+		return nil, err
+	}
+	var resps []*protos.Response
+	var ch = make(chan *protos.Response, 1)
+	// TODO 可能需要限制goroutine数量
+	for _, server := range svs {
+		if r.server.ID == server.ID {
+			continue
+		}
+		co.Go(func() {
+			resp, err2 := r.remoteCall(ctx, server, protos.RPCType_User, route, session, msg)
+			if err2 != nil {
+				err = err2
 			}
-			if group == "" {
-				observersCount++
-			} else if s.Type == r.server.Type {
-				return nil, constants.ErrNonsenseRPC
-			} else {
-				groups[group] = struct{}{}
+			ch <- resp
+		})
+	}
+	for {
+		select {
+		case resp := <-ch:
+			resps = append(resps, resp)
+			if len(resps) >= len(svs)-1 {
+				return resps, err
 			}
 		}
-		observersCount += len(groups)
 	}
-	if observersCount == 0 {
-		logger.Zap.Info("no observers",
-			zap.String("uid", lo.If(session == nil, "").ElseF(func() string { return session.UID() })),
-			zap.String("route", route.String()))
-		return nil, nil
+}
+func (r *RemoteService) DoPublish(ctx context.Context, rt *route.Route, protoData []byte, session session.Session) error {
+	var err error
+	for _, server := range r.serviceDiscovery.GetServerTypes() {
+		sub := server.GetSubscribe(rt.Service, rt.Method)
+		// 排除非订阅者
+		if sub == nil {
+			continue
+		}
+		rt.SvType = server.Type
+		// 非fork时 排除当前服务
+		if server.Type == r.server.Type && !sub.Fork {
+			continue
+		}
+		if sub.Fork {
+			err2 := r.DoFork(ctx, rt, protoData, session)
+			if err2 != nil {
+				err = err2
+			}
+			continue
+		}
+		// 排除session未绑定的sessionStickness服务
+		if server.SessionStickiness && session != nil {
+			svId := session.GetBackendID(server.Type)
+			if svId == "" {
+				logger.Zap.Debug("DoPublish ignore unbound sessionStickness server", zap.String("server", server.Type))
+				continue
+			}
+		}
+		err2 := r.DoNotify(ctx, "", rt, protoData, session)
+		if err2 != nil {
+			err = err2
+		}
 	}
-	// 以上订阅者数量没有考虑外部系统的数量，也就是说使用框架publish的topic仅限框架内使用才能正确计算
-	responses, err := r.rpcClient.Publish(ctx, protos.RPCType_User, route, session, msg, observersCount)
-	if err != nil {
-		logger.Zap.Error("error making publish",
-			zap.String("uid", lo.If(session == nil, "").ElseF(func() string { return session.UID() })),
-			zap.String("route", route.String()),
-			zap.Error(err))
+	return err
+}
+func (r *RemoteService) DoPublishRequest(ctx context.Context, ro *route.Route, protoData []byte, session session.Session) (resps []*protos.Response, err error) {
+	var ch = make(chan *protos.Response, 1)
+	done := make(chan struct{})
+	svs := r.serviceDiscovery.GetServerTypes()
+	wg := sync.WaitGroup{}
+	// TODO 优化项 控制goroutine数量
+	for _, server := range svs {
+		sub := server.GetSubscribe(ro.Service, ro.Method)
+		// 排除非订阅者
+		if sub == nil {
+			continue
+		}
+		wg.Add(1)
+		co.Go(func() {
+			defer func() {
+				wg.Done()
+			}()
+			// 非fork时 排除当前服务
+			if server.Type == r.server.Type && !sub.Fork {
+				return
+			}
+			rt := route.NewRoute(server.Type, ro.Service, ro.Method)
+			rt.SvType = server.Type
+			if sub.Fork {
+				rs, err2 := r.DoForkRequest(ctx, rt, protoData, session)
+				if err2 != nil {
+					err = err2
+				}
+				for _, rp := range rs {
+					ch <- rp
+				}
+				return
+			}
+			// 排除session未绑定的sessionStickness服务
+			if server.SessionStickiness && session != nil {
+				svId := session.GetBackendID(server.Type)
+				if svId == "" {
+					logger.Zap.Debug("DoPublish ignore unbound sessionStickness server", zap.String("server", server.Type))
+					return
+				}
+			}
+			err2 := r.DoNotify(ctx, "", rt, protoData, session)
+			if err2 != nil {
+				err = err2
+			}
+		})
 	}
-	return responses, err
+	co.Go(func() {
+		for {
+			select {
+			case resp := <-ch:
+				resps = append(resps, resp)
+			case <-done:
+				return
+			}
+		}
+	})
+	return resps, err
 }
 
 // RPC makes rpcs
@@ -446,11 +542,10 @@ func (r *RemoteService) Notify(ctx context.Context, serverID string, ro *route.R
 //	@receiver r
 //	@param ctx
 //	@param ro
-//	@param self
 //	@param arg
 //	@param session
 //	@return error
-func (r *RemoteService) NotifyAll(ctx context.Context, ro *route.Route, self *cluster.Server, arg proto.Message, session session.Session) error {
+func (r *RemoteService) NotifyAll(ctx context.Context, ro *route.Route, arg proto.Message, session session.Session) error {
 	var data []byte
 	var err error
 	if arg != nil {
@@ -465,7 +560,7 @@ func (r *RemoteService) NotifyAll(ctx context.Context, ro *route.Route, self *cl
 	// 服务器为空 全局广播(每种服务器只有一个实例消费)
 	for _, server := range r.serviceDiscovery.GetServerTypes() {
 		// 排除自己
-		if server.Type == self.Type {
+		if server.Type == r.server.Type {
 			continue
 		}
 		// 排除session未绑定的sessionStickness服务
@@ -485,23 +580,7 @@ func (r *RemoteService) NotifyAll(ctx context.Context, ro *route.Route, self *cl
 	return nil
 }
 
-func (r *RemoteService) Fork(ctx context.Context, ro *route.Route, arg proto.Message, session session.Session) error {
-	var data []byte
-	var err error
-	if arg != nil {
-		data, err = proto.Marshal(arg)
-		if err != nil {
-			return err
-		}
-	}
-	err = r.DoFork(ctx, ro, data, session)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func (r *RemoteService) Publish(ctx context.Context, topic string, request bool, arg proto.Message, session session.Session) ([]*protos.Response, error) {
+func (r *RemoteService) Fork(ctx context.Context, notify bool, ro *route.Route, arg proto.Message, session session.Session) ([]*protos.Response, error) {
 	var data []byte
 	var err error
 	if arg != nil {
@@ -510,45 +589,54 @@ func (r *RemoteService) Publish(ctx context.Context, topic string, request bool,
 			return nil, err
 		}
 	}
-	return r.DoPublish(ctx, topic, request, data, session)
+	if notify {
+		return nil, r.DoFork(ctx, ro, data, session)
+	}
+	return r.DoForkRequest(ctx, ro, data, session)
+}
+
+func (r *RemoteService) Publish(ctx context.Context, ro *route.Route, notify bool, arg proto.Message, session session.Session) ([]*protos.Response, error) {
+	var data []byte
+	var err error
+	if arg != nil {
+		data, err = proto.Marshal(arg)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if notify {
+		return nil, r.DoPublish(ctx, ro, data, session)
+	}
+	return r.DoPublishRequest(ctx, ro, data, session)
 }
 
 // Register registers components
-func (r *RemoteService) Register(comp component.Component, opts []component.Option) (*component.Service, error) {
+func (r *RemoteService) Register(comp component.Component, opts []component.Option) error {
 	s := component.NewService(comp, opts)
 	services := lo.If(s.Options.Subscriber, r.subscribers).Else(r.services)
 
 	if _, ok := services[s.Name]; ok {
-		return nil, errors.WithStack(fmt.Errorf("remote: service already defined: %s", s.Name))
+		return errors.WithStack(fmt.Errorf("remote: service already defined: %s", s.Name))
 	}
 
 	if err := s.ExtractRemote(); err != nil {
-		return nil, err
+		return err
 	}
 
 	services[s.Name] = s
 	// register all remotes
-	// 注册非订阅者的rpc remote
-	if !s.Options.Subscriber {
-		for name, remote := range s.Remotes {
-			r.remotes[fmt.Sprintf("%s.%s%s", s.Name, s.Options.MethodPrefix, name)] = remote
-		}
-		return s, nil
-	}
-	var groups []string
-	if s.Options.SubscriberGroup != "" {
-		groups = append(groups, s.Options.SubscriberGroup)
-	}
-	// 注册订阅
 	for name, remote := range s.Remotes {
-		// 同一个服务器的不同subscriber之间订阅的topic不能相同,后者覆盖前者
-		r.remotes[fmt.Sprintf("%s.%s%s", cluster.PublishServiceName, s.Options.MethodPrefix, name)] = remote
-		err := r.rpcServer.Subscribe(name, groups...)
-		if err != nil {
-			return nil, err
+		r.remotes[fmt.Sprintf("%s.%s", s.Name, name)] = remote
+	}
+	if s.Options.Subscriber {
+
+		// 注册订阅信息到服务发现，供后续同步订阅时使用
+		for name, _ := range s.Remotes {
+			fork := slices.Contains(s.Options.ForkMethods, name)
+			r.server.AddSubscribe(s.Name, name, fork)
 		}
 	}
-	return s, nil
+	return nil
 }
 
 // RegisterInterceptor 注册拦截分发器,优先级别高于 component.Remote

@@ -153,12 +153,6 @@ func GetForkTopic(svrType string) string {
 	return fmt.Sprintf("pitaya.fork.%s", svrType)
 }
 
-const PublishServiceName = "publish"
-
-func GetPublishTopic(topic string) string {
-	return fmt.Sprintf("pitaya.%s.%s", PublishServiceName, topic)
-}
-
 // onSessionBind should be called on each session bind
 func (ns *NatsRPCServer) onSessionBind(ctx context.Context, s session.Session, callback map[string]string) error {
 	if ns.server.Frontend {
@@ -468,8 +462,16 @@ func (ns *NatsRPCServer) subscribe(topic string, queue bool) (*nats.Subscription
 func (ns *NatsRPCServer) stop() {
 }
 
+// Subscribe @implement [RPCServer.Subscribe]
+//
+// Deprecated: unused
+//
+//	@receiver ns
+//	@param topic
+//	@param groups
+//	@return error
 func (ns *NatsRPCServer) Subscribe(topic string, groups ...string) error {
-	topic = GetPublishTopic(topic)
+	//topic = GetPublishTopic(topic)
 	// TODO 线程不安全,若后续真有动态订阅需求再优化
 	sub, ok := ns.publishSubs[topic]
 	if ok {

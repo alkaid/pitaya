@@ -53,23 +53,8 @@ func (app *App) LazyRegister(c component.Component, options ...component.Option)
 	}
 }
 func (app *App) LazyRegisterRemote(c component.Component, options ...component.Option) {
-	if _, err := app.remoteService.Register(c, options); err != nil {
+	if err := app.remoteService.Register(c, options); err != nil {
 		logger.Zap.Error("Failed to lazy register remote", zap.Error(err))
-	}
-}
-func (app *App) LazyRegisterSubscribe(c component.Component, options ...component.Option) {
-	options = append(options, component.WithSubscriber())
-	if s, err := app.remoteService.Register(c, options); err != nil {
-		logger.Zap.Error("Failed to lazy register remote", zap.Error(err))
-	} else if s.Options.Subscriber {
-		// 注册订阅信息到服务发现，供后续同步订阅时使用
-		for name, _ := range s.Remotes {
-			app.server.Subscribe[name] = s.Options.SubscriberGroup
-		}
-		err = app.serviceDiscovery.FlushServer2Cluster(app.server)
-		if err != nil {
-			logger.Zap.Error("Failed to lazy register remote", zap.Error(err))
-		}
 	}
 }
 func (app *App) RegisterInterceptor(serviceName string, interceptor *component.Interceptor) {
@@ -112,13 +97,8 @@ func (app *App) startupComponents() {
 		if app.remoteService == nil {
 			logger.Zap.Warn("registered a remote component but remoteService is not running! skipping...")
 		} else {
-			if s, err := app.remoteService.Register(c.comp, c.opts); err != nil {
+			if err := app.remoteService.Register(c.comp, c.opts); err != nil {
 				logger.Zap.Error("Failed to register remote", zap.Error(err))
-			} else if s.Options.Subscriber {
-				// 注册订阅信息到服务发现，供后续同步订阅时使用
-				for name, _ := range s.Remotes {
-					app.server.Subscribe[name] = s.Options.SubscriberGroup
-				}
 			}
 		}
 	}

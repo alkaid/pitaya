@@ -38,6 +38,13 @@ import (
 // RPCServer interface
 type RPCServer interface {
 	SetPitayaServer(protos.PitayaServer)
+
+	// Subscribe @deprecated 订阅 由于绕过了框架的路由系统，非期望行为，已废弃
+	//
+	// Deprecated: unused
+	//  @param topic
+	//  @param groups
+	//  @return error
 	Subscribe(topic string, groups ...string) error
 	interfaces.Module
 }
@@ -57,6 +64,18 @@ type RPCClient interface {
 	//  @param msg
 	//  @return error
 	Fork(ctx context.Context, route *route.Route, session session.Session, msg *message.Message) error
+	// Publish @deprecated 通过nats直接发布消息,由于绕过了框架的路由系统，非期望行为，已废弃
+	//
+	// Deprecated:Use Call instead
+	//  @param ctx
+	//  @param rpcType
+	//  @param route
+	//  @param session
+	//  @param msg
+	//  @param observersCount
+	//  @param timeouts
+	//  @return []*protos.Response
+	//  @return error
 	Publish(ctx context.Context, rpcType protos.RPCType, route *route.Route, session session.Session, msg *message.Message, observersCount int, timeouts ...time.Duration) ([]*protos.Response, error)
 	interfaces.Module
 }
