@@ -27,7 +27,8 @@ type (
 		name             string                                                    // component name
 		nameFunc         func(string) string                                       // rename handler name
 		Subscriber       bool                                                      // 是否订阅者 对应Publish
-		ForkMethods      []string                                                  // 每个实例都能消费的topic
+		ForkMethods      []string                                                  // 每个服务副本都能消费的methods,优先级高于ForkAll
+		ForkAll          bool                                                      // 是否所有方法都能每个服务副本都消费，当ForkMethods为空时生效
 		ReceiverProvider func(ctx context.Context) Component                       // 延迟绑定的receiver实例
 		TaskGoProvider   func(ctx context.Context, task func(ctx context.Context)) // 异步任务派发线程提供者
 	}
@@ -72,13 +73,22 @@ func WithSubscriber() Option {
 	}
 }
 
-// WithForkMethods 每个实例都能消费的topic
+// WithForkMethods 每个服务副本都能消费的methods,优先级高于ForkAll
 //
 //	@param group
 //	@return Option
 func WithForkMethods(methods ...string) Option {
 	return func(opt *options) {
 		opt.ForkMethods = methods
+	}
+}
+
+// WithForkAll 是否所有方法都能每个服务副本都消费，当ForkMethods为空时生效
+//
+//	@return Option
+func WithForkAll() Option {
+	return func(opt *options) {
+		opt.ForkAll = true
 	}
 }
 

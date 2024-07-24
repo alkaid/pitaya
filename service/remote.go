@@ -629,10 +629,12 @@ func (r *RemoteService) Register(comp component.Component, opts []component.Opti
 		r.remotes[fmt.Sprintf("%s.%s", s.Name, name)] = remote
 	}
 	if s.Options.Subscriber {
-
+		fork := lo.If(len(s.Options.ForkMethods) == 0, s.Options.ForkAll).Else(false)
 		// 注册订阅信息到服务发现，供后续同步订阅时使用
 		for name, _ := range s.Remotes {
-			fork := slices.Contains(s.Options.ForkMethods, name)
+			if !fork {
+				fork = slices.Contains(s.Options.ForkMethods, name)
+			}
 			r.server.AddSubscribe(s.Name, name, fork)
 		}
 	}
