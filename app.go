@@ -110,6 +110,8 @@ type Pitaya interface {
 	//  @receiver app
 	//  @param listener
 	AddServerDiscoveryListener(listener cluster.SDListener)
+	// SetSDLeaderChangeListener 设置leader变化监听
+	SetSDLeaderChangeListener(listener cluster.LeaderChangeListener)
 	// AddConfLoader 添加配置重载回调
 	//  @param loader
 	AddConfLoader(loader config.ConfLoader)
@@ -519,6 +521,11 @@ func (app *App) FlushServer2Cluster(server *cluster.Server) error {
 //	@param listener
 func (app *App) AddServerDiscoveryListener(listener cluster.SDListener) {
 	app.serviceDiscovery.AddListener(listener)
+}
+
+// SetSDLeaderChangeListener 设置leader变化监听
+func (app *App) SetSDLeaderChangeListener(listener cluster.LeaderChangeListener) {
+	app.serviceDiscovery.OnLeaderChange(listener)
 }
 
 // AddConfLoader

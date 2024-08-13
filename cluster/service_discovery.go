@@ -39,7 +39,8 @@ type ServiceDiscovery interface {
 	//  @return map[string]*Server 索引为serverType,元素为Server
 	GetServerTypes() map[string]*Server
 	SyncServers(firstSync bool) error
-	AddListener(listener SDListener)
+	AddListener(listener SDListener) // OnLeaderChange 设置leader变化监听
+	OnLeaderChange(listener LeaderChangeListener)
 	// FlushServer2Cluster 将修改后的server数据保存到云端(etcd)
 	//  @param server
 	//  @return error

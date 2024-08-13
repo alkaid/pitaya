@@ -89,6 +89,7 @@ type SDListener interface {
 	//  @param old 旧server
 	ModifyServer(sv *Server, old *Server)
 }
+type LeaderChangeListener = func(id string)
 
 // RemoteBindingListener listens to session bindings in remote servers
 //

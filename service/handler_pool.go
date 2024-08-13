@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"github.com/topfreegames/pitaya/v2/logger"
 	"reflect"
 	"sync"
 
@@ -36,6 +37,10 @@ func NewHandlerPool() *HandlerPool {
 
 // Register ...
 func (h *HandlerPool) Register(serviceName string, name string, handler *component.Handler) {
+	handleName := fmt.Sprintf("%s.%s", serviceName, name)
+	if _, ok := h.handlers[handleName]; ok {
+		logger.Zap.Warn("handler already registered,overwriting", zap.String("name", handleName))
+	}
 	h.handlers[fmt.Sprintf("%s.%s", serviceName, name)] = handler
 }
 

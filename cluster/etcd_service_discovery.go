@@ -87,6 +87,7 @@ type etcdServiceDiscovery struct {
 	election         *concurrency.Election
 	electionCancel   context.CancelFunc // 选举取消
 	leaderID         string
+	onLeaderChange   LeaderChangeListener
 }
 
 // NewEtcdServiceDiscovery ctor
@@ -125,7 +126,7 @@ func NewEtcdServiceDiscovery(
 //
 //	@receiver sd
 //	@return *Server
-func (sd etcdServiceDiscovery) GetSelfServer() *Server {
+func (sd *etcdServiceDiscovery) GetSelfServer() *Server {
 	return sd.server
 }
 
@@ -277,6 +278,11 @@ func (sd *etcdServiceDiscovery) bootstrapServer(server *Server) error {
 // AddListener adds a listener to etcd service discovery
 func (sd *etcdServiceDiscovery) AddListener(listener SDListener) {
 	sd.listeners = append(sd.listeners, listener)
+}
+
+// OnLeaderChange 设置leader变化监听
+func (sd *etcdServiceDiscovery) OnLeaderChange(listener LeaderChangeListener) {
+	sd.onLeaderChange = listener
 }
 
 // AfterInit executes after Init
@@ -431,7 +437,9 @@ func (sd *etcdServiceDiscovery) bootstrap() error {
 		co.Go(func() {
 			for leader := range leaderChan {
 				sd.leaderID = leader
-				// TODO 抛出监听给业务层
+				if sd.onLeaderChange != nil {
+					sd.onLeaderChange(leader)
+				}
 			}
 		})
 

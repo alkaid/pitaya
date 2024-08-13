@@ -626,7 +626,11 @@ func (r *RemoteService) Register(comp component.Component, opts []component.Opti
 	services[s.Name] = s
 	// register all remotes
 	for name, remote := range s.Remotes {
-		r.remotes[fmt.Sprintf("%s.%s", s.Name, name)] = remote
+		remoteName := fmt.Sprintf("%s.%s", s.Name, name)
+		if _, ok := r.remotes[remoteName]; ok {
+			logger.Zap.Warn("remote already registered, overwriting", zap.String("name", remoteName))
+		}
+		r.remotes[remoteName] = remote
 	}
 	if s.Options.Subscriber {
 		fork := lo.If(len(s.Options.ForkMethods) == 0, s.Options.ForkAll).Else(false)

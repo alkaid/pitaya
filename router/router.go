@@ -23,10 +23,8 @@ package router
 import (
 	"context"
 	"fmt"
-	"math/rand"
-	"time"
-
 	"github.com/alkaid/goerrors/errors"
+	"math/rand/v2"
 
 	"go.uber.org/zap"
 
@@ -80,12 +78,10 @@ func (r *Router) defaultRoute(
 	session session.Session,
 ) (*cluster.Server, error) {
 	srvList := make([]*cluster.Server, 0)
-	s := rand.NewSource(time.Now().Unix())
-	rnd := rand.New(s)
 	for _, v := range servers {
 		srvList = append(srvList, v)
 	}
-	server := srvList[rnd.Intn(len(srvList))]
+	server := srvList[rand.IntN(len(srvList))]
 	var err error
 	if session != nil {
 		logW := logger.Zap.With(zap.String("uid", session.UID()), zap.String("frontend", session.GetFrontendID()), zap.Int64("frontSessID", session.GetFrontendSessionID()), zap.String("sv", svType))
