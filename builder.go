@@ -74,6 +74,10 @@ func NewBuilderWithConfigs(
 		serverMetadata,
 		*pitayaConfig,
 	)
+	conf.AddLoader(logger.Manager.ReloadFactory("pitaya.log", func() {
+		logger.Zap = logger.Manager.Log
+		logger.Sugar = logger.Manager.Sugar
+	}))
 	b.conf = conf
 	return b
 }
