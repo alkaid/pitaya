@@ -375,10 +375,11 @@ func (r *RemoteService) DoForkRequest(ctx context.Context, route *route.Route, p
 	var resps []*protos.Response
 	var ch = make(chan *protos.Response, 1)
 	// TODO 可能需要限制goroutine数量
-	for _, server := range svs {
-		if r.server.ID == server.ID {
+	for _, server2 := range svs {
+		if r.server.ID == server2.ID {
 			continue
 		}
+		server := server2
 		co.Go(func() {
 			resp, err2 := r.remoteCall(ctx, server, protos.RPCType_User, route, session, msg)
 			if err2 != nil {
@@ -438,13 +439,15 @@ func (r *RemoteService) DoPublishRequest(ctx context.Context, ro *route.Route, p
 	svs := r.serviceDiscovery.GetServerTypes()
 	wg := sync.WaitGroup{}
 	// TODO 优化项 控制goroutine数量
-	for _, server := range svs {
-		sub := server.GetSubscribe(ro.Service, ro.Method)
+	for _, server2 := range svs {
+		sub2 := server2.GetSubscribe(ro.Service, ro.Method)
 		// 排除非订阅者
-		if sub == nil {
+		if sub2 == nil {
 			continue
 		}
 		wg.Add(1)
+		sub := sub2
+		server := server2
 		co.Go(func() {
 			defer func() {
 				wg.Done()

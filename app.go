@@ -777,7 +777,8 @@ func (app *App) listen() {
 		// TODO 池化效果待验证
 		co.Go(func() {
 			for conn := range a.GetConnChan() {
-				co.Go(func() { app.handlerService.Handle(conn) })
+				conn2 := conn
+				co.Go(func() { app.handlerService.Handle(conn2) })
 			}
 		})
 		if app.config.Acceptor.ProxyProtocol {

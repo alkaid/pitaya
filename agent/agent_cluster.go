@@ -27,6 +27,7 @@ type Cluster struct {
 	rpcClient        cluster.RPCClient        // rpc client
 	serializer       serialize.Serializer     // message serializer
 	serviceDiscovery cluster.ServiceDiscovery // service discovery
+	uid              string
 }
 
 // NewCluster create new Cluster instance
@@ -58,13 +59,13 @@ func (a *Cluster) NetworkEntityName() string {
 
 // Kick kicks the user
 func (a *Cluster) Kick(ctx context.Context, reason ...session.CloseReason) error {
-	logger.Zap.Error("not support in cluster session!", zap.Error(constants.ErrNotImplemented))
+	logger.Zap.Error("not support in cluster session! use app.SendKickToUsers instead", zap.Error(constants.ErrNotImplemented))
 	return nil
 }
 
 // Push pushes the message to the user
 func (a *Cluster) Push(route string, v interface{}) error {
-	logger.Zap.Error("not support in cluster session!", zap.Error(constants.ErrNotImplemented))
+	logger.Zap.Error("not support in cluster session! use app.SendPushToUsers instead", zap.Error(constants.ErrNotImplemented))
 	return nil
 }
 
