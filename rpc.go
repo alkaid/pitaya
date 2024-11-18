@@ -271,12 +271,13 @@ func (app *App) doPublish(ctx context.Context, routeStr string, notify bool, arg
 //
 //	"不健全"指session的agent仅有少数 networkentity.NetworkEntity 方法
 //	- 本地pool有session返回session(数据和cluster是同步的)
-//	- context里有session返回session(bind后的session数据是和cluster同步的,因为从网关转发时打包了数据)
-//	- 上述都不存在时从cluster获取缓存数据构建一个不健全session
+//	- context里有session返回session(bind后的session数据是和cache cluster同步的,因为从网关转发时打包了数据)
+//	- 上述都不存在时从cache cluster获取缓存数据构建一个不健全session
+//	- 数据不存在时返回 [constants.ErrSessionNotFound]
 //	@receiver app
 //	@param ctx
 //	@param uid
-//	@return session.Session
+//	@return session.Session 若cache数据不存在，可能返回一个各自段都是零值的session
 //	@return error
 func (app *App) imperfectSessionForRPC(ctx context.Context, uid string) (session.Session, error) {
 	if uid == "" {

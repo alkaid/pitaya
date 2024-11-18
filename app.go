@@ -129,7 +129,7 @@ type Pitaya interface {
 	PushAfterRemoteHook(afterFunc pipeline.AfterHandlerTempl)
 	GetSessionFromCtx(ctx context.Context) session.SessPublic
 	// GetSessionByUID 根据uid获取session,尝试顺序 sessionPool>context>cache cluster
-	//
+	//  数据不存在时返回 [constants.ErrSessionNotFound]
 	// @param ctx
 	// @param uid
 	// @return session.SessPublic
@@ -336,7 +336,7 @@ type Pitaya interface {
 	//  @param targetServerType 目标服
 	//  @param callback 回调数据,通知其他服务时透传
 	//  @param reason
-	//  @return error
+	//  @return error session不存在时返回 [constants.ErrSessionNotFound]
 	KickBackend(ctx context.Context, uid string, targetServerType string, callback map[string]string) error
 
 	// GetLocalSessionByUid 获取本地已绑定的session,若没有返回空. 可用于判断uid是否绑定到了该服务器

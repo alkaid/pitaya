@@ -22,6 +22,7 @@ package session
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"hash/crc32"
@@ -1460,11 +1461,18 @@ func (s *sessionImpl) FlushUserData() error {
 //
 //	@Description:从存储服务获取并解包session数据
 //	@receiver s
-//	@return error
+//	@return error 数据不存在时返回 [constants.ErrSessionNotFound]
 func (s *sessionImpl) ObtainFromCluster() error {
+	s.reset()
 	cache, err := s.pool.storage.Hgetall(s.ClusterStorageKey())
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return constants.ErrSessionNotFound
+		}
 		return err
+	}
+	if len(cache) == 0 {
+		return constants.ErrSessionNotFound
 	}
 	for field, v := range cache {
 		switch field {
@@ -1500,10 +1508,14 @@ func (s *sessionImpl) ObtainFromCluster() error {
 	return nil
 }
 
+func (s *sessionImpl) reset() {
+	s.online = false
+}
+
+// InitialFromCluster 仅供bind时使用,仅恢复backend绑定关系和用户自定义数据
 func (s *sessionImpl) InitialFromCluster() error {
-	// 仅供bind时使用,仅恢复backend绑定关系和用户自定义数据
 	cache, err := s.pool.storage.Hgetall(s.ClusterStorageKey())
-	if err != nil {
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	for field, v := range cache {

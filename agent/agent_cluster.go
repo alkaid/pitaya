@@ -31,6 +31,7 @@ type Cluster struct {
 }
 
 // NewCluster create new Cluster instance
+// 数据不存在时返回 [constants.ErrSessionNotFound]
 func NewCluster(
 	uid string,
 	sessionPool session.SessionPool,
