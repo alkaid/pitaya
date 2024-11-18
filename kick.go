@@ -22,6 +22,7 @@ package pitaya
 
 import (
 	"context"
+	"github.com/topfreegames/pitaya/v2/session"
 
 	"go.uber.org/zap"
 
@@ -31,7 +32,7 @@ import (
 )
 
 // SendKickToUsers sends kick to an user array
-func (app *App) SendKickToUsers(uids []string, frontendType string, callback map[string]string) ([]string, error) {
+func (app *App) SendKickToUsers(uids []string, frontendType string, callback map[string]string, reason session.CloseReason) ([]string, error) {
 	if !app.server.Frontend && frontendType == "" {
 		return uids, constants.ErrFrontendTypeNotSpecified
 	}
@@ -40,12 +41,12 @@ func (app *App) SendKickToUsers(uids []string, frontendType string, callback map
 
 	for _, uid := range uids {
 		if s := app.sessionPool.GetSessionByUID(uid); s != nil {
-			if err := s.Kick(context.Background(), callback); err != nil {
+			if err := s.Kick(context.Background(), callback, reason); err != nil {
 				notKickedUids = append(notKickedUids, uid)
 				logger.Zap.Error("Session kick error", zap.Int64("ID", s.ID()), zap.String("UID", s.UID()), zap.Error(err))
 			}
 		} else if app.rpcClient != nil {
-			kick := &protos.KickMsg{UserId: uid, Metadata: callback}
+			kick := &protos.KickMsg{UserId: uid, Metadata: callback, Reason: int32(reason)}
 			if err := app.rpcClient.SendKick(uid, frontendType, kick); err != nil {
 				notKickedUids = append(notKickedUids, uid)
 				logger.Zap.Error("RPCClient send kick error", zap.String("UID", uid), zap.String("svType", frontendType), zap.Error(err))

@@ -266,9 +266,10 @@ type Pitaya interface {
 	//  @param uids
 	//  @param frontendType
 	//  @param callback 透传数据,会在 cluster.RemoteSessionListener .OnUserDisconnected()里回传，使用 AddSessionListener 设置该回调
+	//  @reason 原因
 	//  @return []string
 	//  @return error
-	SendKickToUsers(uids []string, frontendType string, callback map[string]string) ([]string, error)
+	SendKickToUsers(uids []string, frontendType string, callback map[string]string, reason session.CloseReason) ([]string, error)
 
 	GroupCreate(ctx context.Context, groupName string) error
 	GroupCreateWithTTL(ctx context.Context, groupName string, ttlTime time.Duration) error
