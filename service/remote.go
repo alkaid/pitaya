@@ -435,7 +435,6 @@ func (r *RemoteService) DoPublish(ctx context.Context, rt *route.Route, protoDat
 }
 func (r *RemoteService) DoPublishRequest(ctx context.Context, ro *route.Route, protoData []byte, session session.Session) (resps []*protos.Response, err error) {
 	var ch = make(chan *protos.Response, 1)
-	done := make(chan struct{})
 	svs := r.serviceDiscovery.GetServerTypes()
 	wg := sync.WaitGroup{}
 	// TODO 优化项 控制goroutine数量
@@ -476,10 +475,11 @@ func (r *RemoteService) DoPublishRequest(ctx context.Context, ro *route.Route, p
 					return
 				}
 			}
-			err2 := r.DoNotify(ctx, "", rt, protoData, session)
+			rp, err2 := r.DoRPC(ctx, "", rt, protoData, session)
 			if err2 != nil {
 				err = err2
 			}
+			ch <- rp
 		})
 	}
 	co.Go(func() {
@@ -487,11 +487,10 @@ func (r *RemoteService) DoPublishRequest(ctx context.Context, ro *route.Route, p
 			select {
 			case resp := <-ch:
 				resps = append(resps, resp)
-			case <-done:
-				return
 			}
 		}
 	})
+	wg.Wait()
 	return resps, err
 }
 
