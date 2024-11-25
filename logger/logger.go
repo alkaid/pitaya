@@ -37,6 +37,12 @@ var Sugar = Manager.Sugar
 //	@Deprecated use Zap instead
 var Log = Manager.Sugar
 
+func ResetGlobalVar() {
+	Zap = Manager.Log
+	Sugar = Manager.Sugar
+	Log = Sugar
+}
+
 // Logger 具体Log的持有类
 type Logger struct {
 	Log     *zap.Logger
