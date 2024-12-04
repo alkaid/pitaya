@@ -87,6 +87,7 @@ type etcdServiceDiscovery struct {
 	election         *concurrency.Election
 	electionCancel   context.CancelFunc // 选举取消
 	leaderID         string
+	setLeader        func(id string)
 	onLeaderChange   LeaderChangeListener
 }
 
@@ -207,7 +208,7 @@ func (sd *etcdServiceDiscovery) renewLease() error {
 	c := make(chan error, 1)
 	co.Go(func() {
 		defer close(c)
-		logger.Zap.Info("waiting for etcd lease")
+		logger.Zap.Info("waiting for etcd lease", zap.String("self", sd.server.ID))
 		err := sd.grantLease()
 		if err != nil {
 			c <- err
@@ -233,7 +234,7 @@ func (sd *etcdServiceDiscovery) grantLease() error {
 		return err
 	}
 	sd.leaseID = l.ID
-	logger.Zap.Debug("sd: got leaseID", zap.Int64("leaseID", int64(l.ID)))
+	logger.Zap.Debug("sd: got leaseID", zap.Int64("leaseID", int64(l.ID)), zap.String("self", sd.server.ID))
 	// this will keep alive forever, when channel c is closed
 	// it means we probably have to rebootstrap the lease
 	c, err := sd.cli.KeepAlive(context.TODO(), sd.leaseID)
@@ -553,7 +554,7 @@ func (sd *etcdServiceDiscovery) printServers() {
 	sd.mapByTypeLock.RLock()
 	defer sd.mapByTypeLock.RUnlock()
 	for k, v := range sd.serverMapByType {
-		logger.Sugar.Debugf("type: %s, servers: %+v", k, v)
+		logger.Zap.Debug("", zap.String("self", sd.server.ID), zap.String("type", k), zap.Any("servers", v))
 	}
 }
 
@@ -677,13 +678,13 @@ func (sd *etcdServiceDiscovery) SyncServers(firstSync bool) error {
 	for _, kv := range kvs.Kvs {
 		svType, svID, err := parseEtcdKey(string(kv.Key))
 		if err != nil {
-			logger.Zap.Warn("failed to parse etcd", zap.ByteString("key", kv.Key), zap.Error(err))
+			logger.Zap.Warn("failed to parse etcd", zap.ByteString("key", kv.Key), zap.String("self", sd.server.ID), zap.Error(err))
 			continue
 		}
 
 		// Check whether the server type is blacklisted or not
 		if sd.isServerTypeBlacklisted(svType) && svID != sd.server.ID {
-			logger.Zap.Debug("ignoring blacklisted server type", zap.String("svType", svType))
+			logger.Zap.Debug("ignoring blacklisted server type", zap.String("svType", svType), zap.String("self", sd.server.ID))
 			continue
 		}
 
@@ -703,7 +704,7 @@ func (sd *etcdServiceDiscovery) SyncServers(firstSync bool) error {
 	servers := parallelGetter.waitAndGetResult()
 
 	for _, server := range servers {
-		logger.Zap.Debug("adding server", zap.Any("server", server))
+		logger.Zap.Debug("adding server", zap.String("self", sd.server.ID), zap.Any("server", server))
 		sd.addServer(server)
 	}
 
@@ -738,16 +739,16 @@ func (sd *etcdServiceDiscovery) revoke() error {
 	c := make(chan error, 1)
 	co.Go(func() {
 		defer close(c)
-		logger.Zap.Debug("waiting for etcd revoke")
+		logger.Zap.Debug("waiting for etcd revoke", zap.String("self", sd.server.ID))
 		_, err := sd.cli.Revoke(context.TODO(), sd.leaseID)
 		c <- err
-		logger.Zap.Debug("finished waiting for etcd revoke")
+		logger.Zap.Debug("finished waiting for etcd revoke", zap.String("self", sd.server.ID))
 	})
 	select {
 	case err := <-c:
 		return err // completed normally
 	case <-time.After(sd.revokeTimeout):
-		logger.Zap.Warn("timed out waiting for etcd revoke")
+		logger.Zap.Warn("timed out waiting for etcd revoke", zap.String("self", sd.server.ID))
 		return nil // timed out
 	}
 }
@@ -789,11 +790,11 @@ func (sd *etcdServiceDiscovery) watchEtcdChanges() {
 				}
 			case wResp, ok := <-chn:
 				if wResp.Err() != nil {
-					logger.Zap.Warn("etcd watcher response error", zap.Error(wResp.Err()))
+					logger.Zap.Warn("etcd watcher response error", zap.String("self", sd.server.ID), zap.Error(wResp.Err()))
 					time.Sleep(100 * time.Millisecond)
 				}
 				if !ok {
-					logger.Zap.Error("etcd watcher died, retrying to watch in 1 second")
+					logger.Zap.Error("etcd watcher died, retrying to watch in 1 second", zap.String("self", sd.server.ID))
 					failedWatchAttempts++
 					time.Sleep(1000 * time.Millisecond)
 					if failedWatchAttempts > 10 {
@@ -823,16 +824,16 @@ func (sd *etcdServiceDiscovery) watchEtcdChanges() {
 						var sv *Server
 						var err error
 						if sv, err = parseServer(ev.Kv.Value); err != nil {
-							logger.Zap.Error("Failed to parse server from etcd", zap.Error(err))
+							logger.Zap.Error("Failed to parse server from etcd", zap.String("self", sd.server.ID), zap.Error(err))
 							continue
 						}
 
 						sd.addServer(sv)
-						logger.Log.Debugf("server %s added by watcher", ev.Kv.Key)
+						logger.Zap.Info("server added", zap.ByteString("sv", ev.Kv.Key), zap.String("self", sd.server.ID))
 						sd.printServers()
 					case clientv3.EventTypeDelete:
 						sd.deleteServer(svID)
-						logger.Log.Debugf("server %s deleted by watcher", svID)
+						logger.Zap.Info("server deleted", zap.ByteString("sv", ev.Kv.Key), zap.String("self", sd.server.ID))
 						sd.printServers()
 					}
 				}
@@ -853,6 +854,52 @@ func (sd *etcdServiceDiscovery) isServerTypeBlacklisted(svType string) bool {
 	return false
 }
 
+func (sd *etcdServiceDiscovery) watchLeader(ctx context.Context) {
+	w := sd.cli.Watch(context.Background(), sd.electionName+"/", clientv3.WithPrefix())
+	failedWatchAttempts := 0
+	go func(chn clientv3.WatchChan) {
+		for sd.running {
+			select {
+			case wResp, ok := <-w:
+				if wResp.Err() != nil {
+					logger.Zap.Warn("etcd watcher response error", zap.String("self", sd.server.ID), zap.Error(wResp.Err()))
+					time.Sleep(100 * time.Millisecond)
+				}
+				if !ok {
+					logger.Log.Error("etcd watcher died, retrying to watch in 1 second")
+					failedWatchAttempts++
+					time.Sleep(1000 * time.Millisecond)
+					if failedWatchAttempts > 10 {
+						if err := sd.InitETCDClient(); err != nil {
+							failedWatchAttempts = 0
+							continue
+						}
+						chn = sd.cli.Watch(context.Background(), sd.electionName+"/", clientv3.WithPrefix())
+						failedWatchAttempts = 0
+					}
+					continue
+				}
+				failedWatchAttempts = 0
+				resp, err := sd.election.Leader(ctx)
+				if err != nil {
+					logger.Log.Error("etcd election error", zap.String("self", sd.server.ID), zap.Error(err))
+					time.Sleep(time.Millisecond * 300)
+					continue
+				}
+				logger.Zap.Debug("etcd election watcher", zap.String("self", sd.server.ID), zap.ByteString("leader", resp.Kvs[0].Value))
+				// 当竞选成功时这里会和竞选函数里重复调用，不影响结果故可忽略
+				if sd.setLeader != nil {
+					sd.setLeader(string(resp.Kvs[0].Value))
+				}
+			case <-ctx.Done():
+				return
+			case <-sd.stopChan:
+				return
+			}
+		}
+	}(w)
+}
+
 func (sd *etcdServiceDiscovery) runElection(ctx context.Context) (<-chan string, error) {
 	var observe <-chan clientv3.GetResponse
 	var node *clientv3.GetResponse
@@ -864,12 +911,15 @@ func (sd *etcdServiceDiscovery) runElection(ctx context.Context) (<-chan string,
 	setLeader := func(id string) {
 		// Only report changes in leadership
 		if leaderID == id {
+			logger.Zap.Debug("etcd election leader remains the same,ignore", zap.String("leaderID", leaderID), zap.String("self", sd.server.ID))
 			return
 		}
+		logger.Zap.Info("etcd election leader changed", zap.String("name", sd.electionName),
+			zap.String("leaderID", id), zap.String("old", leaderID), zap.String("self", sd.server.ID))
 		leaderID = id
-		logger.Zap.Debug("etcd election leader change", zap.String("name", sd.electionName), zap.String("leaderID", leaderID))
 		leaderChan <- id
 	}
+	sd.setLeader = setLeader
 
 	if err = sd.newSession(ctx, sd.leaseID); err != nil {
 		return nil, errors.Wrap(err, "while creating initial session")
@@ -883,7 +933,7 @@ func (sd *etcdServiceDiscovery) runElection(ctx context.Context) (<-chan string,
 			// Discover who if any, is leader of this election
 			if node, err = sd.election.Leader(ctx); err != nil {
 				if err != concurrency.ErrElectionNoLeader {
-					logger.Zap.Error("while determining election leader", zap.Error(err))
+					logger.Zap.Error("while determining election leader", zap.String("self", sd.server.ID), zap.Error(err))
 					goto reconnect
 				}
 			} else {
@@ -900,7 +950,7 @@ func (sd *etcdServiceDiscovery) runElection(ctx context.Context) (<-chan string,
 					if sd.resumeLeader {
 						// Recreate our session with the old lease id
 						if err = sd.newSession(ctx, clientv3.LeaseID(node.Kvs[0].Lease)); err != nil {
-							logger.Zap.Error("while re-establishing session with lease", zap.Error(err))
+							logger.Zap.Error("while re-establishing session with lease", zap.String("self", sd.server.ID), zap.Error(err))
 							goto reconnect
 						}
 						sd.election = concurrency.ResumeElection(sd.session, sd.electionName,
@@ -918,7 +968,7 @@ func (sd *etcdServiceDiscovery) runElection(ctx context.Context) (<-chan string,
 						err = election.Resign(ctx)
 						cancel()
 						if err != nil {
-							logger.Zap.Error("while resigning leadership after reconnect", zap.Error(err))
+							logger.Zap.Error("while resigning leadership after reconnect", zap.String("self", sd.server.ID), zap.Error(err))
 							goto reconnect
 						}
 					}
@@ -946,7 +996,7 @@ func (sd *etcdServiceDiscovery) runElection(ctx context.Context) (<-chan string,
 						return
 					}
 					// NOTE: Campaign currently does not return an error if session expires
-					logger.Zap.Error("while campaigning for leader", zap.Error(err))
+					logger.Zap.Error("while campaigning for leader", zap.String("self", sd.server.ID), zap.Error(err))
 					sd.session.Close()
 					goto reconnect
 				}
@@ -969,9 +1019,11 @@ func (sd *etcdServiceDiscovery) runElection(ctx context.Context) (<-chan string,
 					if !ok {
 						// NOTE: Observe will not close if the session expires, we must
 						// watch for session.Done()
+						logger.Zap.Error("election observe stream closed", zap.String("self", sd.server.ID))
 						sd.session.Close()
 						goto reconnect
 					}
+					logger.Zap.Debug("etcd election observe", zap.String("self", sd.server.ID), zap.ByteString("leader", resp.Kvs[0].Value))
 					if string(resp.Kvs[0].Value) == sd.server.ID {
 						setLeader(string(resp.Kvs[0].Value))
 					} else {
@@ -985,7 +1037,7 @@ func (sd *etcdServiceDiscovery) runElection(ctx context.Context) (<-chan string,
 						// longer leader anyway.
 						ctx, cancel := context.WithTimeout(context.Background(), sd.heartbeatTTL)
 						if err = sd.election.Resign(ctx); err != nil {
-							logger.Zap.Error("while resigning leadership during shutdown", zap.Error(err))
+							logger.Zap.Error("while resigning leadership during shutdown", zap.String("self", sd.server.ID), zap.Error(err))
 						}
 						cancel()
 					}
@@ -997,7 +1049,7 @@ func (sd *etcdServiceDiscovery) runElection(ctx context.Context) (<-chan string,
 			}
 
 		reconnect:
-			logger.Zap.Debug("etcd election need reconnect")
+			logger.Zap.Debug("etcd election need reconnect", zap.String("self", sd.server.ID))
 			// 出错重连 无主
 			setLeader("")
 			for {
@@ -1005,7 +1057,7 @@ func (sd *etcdServiceDiscovery) runElection(ctx context.Context) (<-chan string,
 					if errors.Cause(err) == context.Canceled {
 						return
 					}
-					logger.Zap.Error("while creating new session", zap.Error(err))
+					logger.Zap.Error("while creating new session", zap.String("self", sd.server.ID), zap.Error(err))
 					tick := time.NewTicker(sd.reconnectBackOff)
 					select {
 					case <-ctx.Done():
@@ -1021,6 +1073,9 @@ func (sd *etcdServiceDiscovery) runElection(ctx context.Context) (<-chan string,
 		}
 	}()
 
+	// 非leader成员监听leader变化
+	go sd.watchLeader(ctx)
+
 	// Wait until we have a leader before returning
 	for {
 		resp, err := sd.election.Leader(ctx)
@@ -1032,9 +1087,8 @@ func (sd *etcdServiceDiscovery) runElection(ctx context.Context) (<-chan string,
 			continue
 		}
 		// If we are not leader, notify the channel
-		if string(resp.Kvs[0].Value) != sd.server.ID {
-			leaderChan <- string(resp.Kvs[0].Value)
-		}
+		logger.Zap.Debug("init leader", zap.String("self", sd.server.ID), zap.ByteString("leader", resp.Kvs[0].Value))
+		setLeader(string(resp.Kvs[0].Value))
 		break
 	}
 	return leaderChan, nil

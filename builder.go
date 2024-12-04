@@ -74,9 +74,6 @@ func NewBuilderWithConfigs(
 		serverMetadata,
 		*pitayaConfig,
 	)
-	conf.AddLoader(logger.Manager.ReloadFactory("pitaya.log", func() {
-		logger.ResetGlobalVar()
-	}))
 	b.conf = conf
 	return b
 }
@@ -206,14 +203,13 @@ func (builder *Builder) AddPostBuildHook(hook func(app Pitaya)) {
 
 // Build returns a valid App instance
 func (builder *Builder) Build() Pitaya {
+	// 根据配置初始化zap
+	logger.InitLogMgr(builder.Config.Log.Development, builder.Config.Log.Level)
+	builder.conf.AddLoader(logger.Manager.ReloadFactory("pitaya.log", func() {
+		logger.ResetGlobalVar()
+	}))
 	handlerPool := service.NewHandlerPool()
 	var remoteService *service.RemoteService
-	// 根据配置初始化zap
-	if builder.Config.Log.Development {
-		logger.Manager.SetDevelopment(true)
-	}
-	logger.Manager.SetLevel(builder.Config.Log.Level)
-	logger.ResetGlobalVar()
 	if builder.ServerMode == Standalone {
 		if builder.ServiceDiscovery != nil || builder.RPCClient != nil || builder.RPCServer != nil {
 			panic("Standalone mode can't have RPC or service discovery instances")

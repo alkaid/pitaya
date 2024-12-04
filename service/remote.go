@@ -291,7 +291,7 @@ func (r *RemoteService) DoRPC(ctx context.Context, serverID string, route *route
 
 	target, _ := r.serviceDiscovery.GetServer(serverID)
 	if target == nil {
-		return nil, errors.WithStack(constants.ErrServerNotFound)
+		return nil, errors.WithStack(fmt.Errorf("%w svID=%s", constants.ErrServerNotFound, serverID))
 	}
 
 	return r.remoteCall(ctx, target, protos.RPCType_User, route, session, msg)
@@ -312,7 +312,7 @@ func (r *RemoteService) DoNotify(ctx context.Context, serverID string, route *ro
 
 	target, _ := r.serviceDiscovery.GetServer(serverID)
 	if target == nil {
-		err := constants.ErrServerNotFound
+		err := fmt.Errorf("%w svID=%s", constants.ErrServerNotFound, serverID)
 		logger.Zap.Error("notify error",
 			zap.String("uid", lo.If(session == nil, "").ElseF(func() string { return session.UID() })),
 			zap.String("route", route.String()),

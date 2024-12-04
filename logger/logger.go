@@ -43,6 +43,12 @@ func ResetGlobalVar() {
 	Log = Sugar
 }
 
+func InitLogMgr(development bool, level string) {
+	Manager.SetDevelopment(development)
+	Manager.SetLevel(level)
+	ResetGlobalVar()
+}
+
 // Logger 具体Log的持有类
 type Logger struct {
 	Log     *zap.Logger
