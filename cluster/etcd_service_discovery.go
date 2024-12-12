@@ -80,7 +80,7 @@ type etcdServiceDiscovery struct {
 
 	// 选主相关
 	electionEnable   bool   // 是否开启选举
-	electionName     string // 竞选名,不传的话默认为server.Type
+	electionName     string // 竞选名,不传的话默认为election/server.Type
 	resumeLeader     bool   // 若连上后发现自己是leader 是否使用原leader创建election. false的话会辞职
 	reconnectBackOff time.Duration
 	session          *concurrency.Session
@@ -860,7 +860,7 @@ func (sd *etcdServiceDiscovery) watchLeader(ctx context.Context) {
 	go func(chn clientv3.WatchChan) {
 		for sd.running {
 			select {
-			case wResp, ok := <-w:
+			case wResp, ok := <-chn:
 				if wResp.Err() != nil {
 					logger.Zap.Warn("etcd watcher response error", zap.String("self", sd.server.ID), zap.Error(wResp.Err()))
 					time.Sleep(100 * time.Millisecond)
@@ -870,6 +870,7 @@ func (sd *etcdServiceDiscovery) watchLeader(ctx context.Context) {
 					failedWatchAttempts++
 					time.Sleep(1000 * time.Millisecond)
 					if failedWatchAttempts > 10 {
+						// 这里可能和 watchEtcdChanges()冲突 产生多个client
 						if err := sd.InitETCDClient(); err != nil {
 							failedWatchAttempts = 0
 							continue
@@ -992,7 +993,7 @@ func (sd *etcdServiceDiscovery) runElection(ctx context.Context) (<-chan string,
 			select {
 			case err = <-errChan:
 				if err != nil {
-					if errors.Cause(err) == context.Canceled {
+					if errors.Is(err, context.Canceled) {
 						return
 					}
 					// NOTE: Campaign currently does not return an error if session expires
