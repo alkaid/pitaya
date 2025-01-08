@@ -196,9 +196,10 @@ type SessPublic interface {
 	// Bind 绑定session到他当前所在的frontend
 	//  @param ctx
 	//  @param uid
-	//  @param callback 回调数据,通知其他服务时透传
+	//  @param custSessData 自定义session数据,可以nil,功能和 PushToFront 一样,但比它少N次IO
+	//  @param callback 回调数据,通知其他服务时透传,可以nil
 	//  @return error
-	Bind(ctx context.Context, uid string, callback map[string]string) error
+	Bind(ctx context.Context, uid string, custSessData map[string]any, callback map[string]string) error
 	// BindBackend
 	//  @Description: bind session in stateful backend 注意业务层若当前服务是frontend时请勿调用。frontend时仅框架内自己调用
 	//  @param ctx
@@ -235,11 +236,13 @@ type SessPublic interface {
 	//  @param value
 	//  @return error
 	Set(key string, value interface{}) error
+	SetData(data map[string]interface{}) error
 	HasKey(key string) bool
 	// Get 获取用户自定义数据
 	//  @param key
 	//  @return interface{}
 	Get(key string) interface{}
+	GetData() map[string]interface{}
 	Int(key string) int
 	Int8(key string) int8
 	Int16(key string) int16
@@ -720,8 +723,11 @@ func (s *sessionImpl) UIDInt() int64 {
 func (s *sessionImpl) GetData() map[string]interface{} {
 	s.RLock()
 	defer s.RUnlock()
-
-	return s.data
+	data := map[string]interface{}{}
+	for k, v := range s.data {
+		data[k] = v
+	}
+	return data
 }
 
 // SetData 设置用户自定义数据
@@ -733,7 +739,10 @@ func (s *sessionImpl) SetData(data map[string]interface{}) error {
 	s.Lock()
 	defer s.Unlock()
 
-	s.data = data
+	s.data = map[string]any{}
+	for k, v := range data {
+		s.data[k] = v
+	}
 	return s.updateEncodedData()
 }
 
@@ -765,7 +774,7 @@ func (s *sessionImpl) SetIP(ip string) {
 }
 
 // Bind bind UID to current session
-func (s *sessionImpl) Bind(ctx context.Context, uid string, callback map[string]string) error {
+func (s *sessionImpl) Bind(ctx context.Context, uid string, custSessData map[string]any, callback map[string]string) error {
 	if uid == "" {
 		return constants.ErrIllegalUID
 	}
@@ -776,6 +785,12 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, callback map[string]
 
 	s.uid = uid
 	s.uidInt = util.ForceIdStrToInt(s.uid)
+	if len(custSessData) > 0 {
+		err = s.SetData(custSessData)
+		if err != nil {
+			return errors.WithStack(fmt.Errorf("%w,uid=%s", err, uid))
+		}
+	}
 	for _, cb := range s.pool.sessionBindCallbacks {
 		err = cb(ctx, s, callback)
 		if err != nil {
@@ -1275,6 +1290,9 @@ func (s *sessionImpl) bindInFront(ctx context.Context, callback map[string]strin
 		Fid:      s.frontendID,
 		Sid:      s.frontendSessionID,
 		Metadata: callback,
+		Session: &protos.Session{
+			Data: s.encodedData,
+		},
 	}
 	res, err := s.SendRequestToFrontend(ctx, constants.SessionBindRoute, bindMsg)
 	if err != nil {
@@ -1412,6 +1430,7 @@ func (s *sessionImpl) FlushFrontendData() error {
 		fieldKeyFrontendID:     s.frontendID,
 		fieldKeyFrontendSessID: strconv.FormatInt(s.frontendSessionID, 10),
 		fieldKeyIP:             s.ip,
+		fieldKeyData:           string(s.encodedData),
 	})
 	if err != nil {
 		return err

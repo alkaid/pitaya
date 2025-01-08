@@ -23,6 +23,7 @@ package remote
 import (
 	"context"
 	"fmt"
+	"github.com/alkaid/goerrors/apierrors"
 	"strconv"
 
 	"github.com/pkg/errors"
@@ -76,11 +77,20 @@ func (sys *Sys) Init() {
 			}
 		}
 		logW := logger.Zap.With(zap.Int64("sid", s.ID()), zap.String("uid", s.UID()))
+		custData := s.GetData()
 		// 从redis同步backend bind数据到本地
 		err = s.InitialFromCluster()
 		if err != nil {
 			logW.Error("session binding error", zap.Error(err))
 			return err
+		}
+		// 设置自定义数据
+		if len(custData) > 0 {
+			err = s.SetData(custData)
+			if err != nil {
+				logW.Error("session binding error", zap.Error(err), zap.Any("custData", custData))
+				return err
+			}
 		}
 		// 同步到redis
 		err = s.FlushFrontendData()
@@ -323,7 +333,12 @@ func (s *Sys) BindSession(ctx context.Context, bindMsg *protos.BindMsg) (*protos
 	if sess == nil {
 		return nil, protos.ErrSessionNotFound().WithMetadata(map[string]string{"uid": bindMsg.Uid, "sid": strconv.Itoa(int(bindMsg.Sid)), "fid": bindMsg.Fid}).WithStack()
 	}
-	if err := sess.Bind(ctx, bindMsg.Uid, bindMsg.Metadata); err != nil {
+	// 绑定自定义数据
+	err := sess.SetDataEncoded(bindMsg.Session.Data)
+	if err != nil {
+		return nil, apierrors.FromError(err).WithMetadata(map[string]string{"uid": bindMsg.Uid, "sid": strconv.Itoa(int(bindMsg.Sid)), "fid": bindMsg.Fid}).WithStack()
+	}
+	if err = sess.Bind(ctx, bindMsg.Uid, sess.GetData(), bindMsg.Metadata); err != nil {
 		return nil, err
 	}
 	return &protos.Response{Data: []byte("ack")}, nil
