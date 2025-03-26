@@ -717,8 +717,13 @@ func (sd *etcdServiceDiscovery) SyncServers(firstSync bool) error {
 	return nil
 }
 
+func (sd *etcdServiceDiscovery) Running() bool {
+	return sd.running
+}
+
 // BeforeShutdown executes before shutting down and will remove the server from the list
 func (sd *etcdServiceDiscovery) BeforeShutdown() {
+	sd.listeners = nil
 	sd.revoke()
 	if sd.electionCancel != nil {
 		sd.electionCancel()
