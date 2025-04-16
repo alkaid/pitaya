@@ -71,6 +71,8 @@ const (
 // SessionCtxKey is the context key where the session will be set
 var SessionCtxKey = "session"
 
+var UserIdCtxKey = "userId"
+
 // CoroutineCtxKey is the context key where the session will be set
 var CoroutineCtxKey = "alkaid-coroutine"
 
