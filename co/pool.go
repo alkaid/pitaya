@@ -69,7 +69,9 @@ func (s *StatefulPool) Name() string {
 //	@param task
 func (s *StatefulPool) Go(ctx context.Context, goID int, task func(ctx context.Context), disableTimeoutWatch bool) (done chan struct{}) {
 	done = make(chan struct{})
-	logg := util.GetLoggerFromCtx(ctx).With(zap.String("pool", s.Name())).With(zap.Int("goID", goID))
+	fields := util.LogFieldsFromCtx(ctx)
+	fields = append(fields, zap.String("pool", s.Name()), zap.Int("goID", goID))
+	logg := util.GetLoggerFromCtx(ctx).With(fields...)
 	ctx = context.WithValue(ctx, constants.LoggerCtxKey, logg)
 	taskWithDone := func() {
 		task(ctx)

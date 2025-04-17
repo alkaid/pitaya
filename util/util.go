@@ -203,6 +203,20 @@ func ConvertProtoToMessageType(protoMsgType protos.MsgType) message.Type {
 	return msgType
 }
 
+func LogFieldsFromCtx(ctx context.Context) []zap.Field {
+	fields := make([]zap.Field, 0, 3)
+	if rId, ok := pcontext.GetFromPropagateCtx(ctx, constants.RequestIDKey).(string); ok && rId != "" {
+		fields = append(fields, zap.String("reqId", rId))
+	}
+	if uId, ok := pcontext.GetFromPropagateCtx(ctx, constants.UserIdCtxKey).(string); ok && uId != "" {
+		fields = append(fields, zap.String("uid", uId))
+	}
+	if route, ok := pcontext.GetFromPropagateCtx(ctx, constants.RouteKey).(string); ok && route != "" {
+		fields = append(fields, zap.String("route", route))
+	}
+	return fields
+}
+
 // CtxWithDefaultLogger inserts a default logger on ctx to be used on handlers and remotes.
 // If using logrus, userId, route and requestId will be added as fields.
 // Otherwise the pitaya logger will be used as it is.
