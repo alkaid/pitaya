@@ -2,12 +2,12 @@ package co
 
 import (
 	"context"
+	"github.com/topfreegames/pitaya/v2/logger"
 	"time"
 
 	"github.com/alkaid/goerrors/errors"
 	"github.com/panjf2000/ants/v2"
 	"github.com/topfreegames/pitaya/v2/config"
-	"github.com/topfreegames/pitaya/v2/constants"
 	"github.com/topfreegames/pitaya/v2/metrics"
 	"github.com/topfreegames/pitaya/v2/util"
 	"go.uber.org/zap"
@@ -71,8 +71,7 @@ func (s *StatefulPool) Go(ctx context.Context, goID int, task func(ctx context.C
 	done = make(chan struct{})
 	fields := util.LogFieldsFromCtx(ctx)
 	fields = append(fields, zap.String("pool", s.Name()), zap.Int("goID", goID))
-	logg := util.GetLoggerFromCtx(ctx).With(fields...)
-	ctx = context.WithValue(ctx, constants.LoggerCtxKey, logg)
+	logg := logger.Zap.With(fields...)
 	taskWithDone := func() {
 		task(ctx)
 		close(done)

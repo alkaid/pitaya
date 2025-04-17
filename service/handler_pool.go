@@ -82,8 +82,8 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		if err != nil {
 			return nil, apierrors.FromError(err)
 		}
-		// logger := ctx.Value(constants.LoggerCtxKey).(*zap.Logger)
-		// logger.Debug("SID=%d, Data=%s", session.ID(), data)
+		// l := ctx.Value(constants.LoggerCtxKey).(*zap.Logger)
+		// l.Debug("SID=%d, Data=%s", session.ID(), data)
 		var resp any
 		resp, err = interceptor.InterceptorFun(ctx, *rt, data)
 		if err != nil {
@@ -114,12 +114,12 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		return nil, apierrors.FromError(err)
 	}
 
-	logger := ctx.Value(constants.LoggerCtxKey).(*zap.Logger)
+	l := ctx.Value(constants.LoggerCtxKey).(*zap.Logger)
 	exit, err := handler.ValidateMessageType(msgType)
 	if err != nil && exit {
 		return nil, apierrors.BadRequest("", "process handle message error", "").WithCause(err)
 	} else if err != nil {
-		logger.Warn("invalid message type", zap.Error(err))
+		l.Warn("invalid message type", zap.Error(err))
 	}
 
 	// First unmarshal the handler arg that will be passed to
@@ -134,12 +134,12 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		return nil, err
 	}
 
-	logger.Debug("process handle message", zap.Int64("SID", session.ID()), zap.ByteString("Data", data))
+	l.Debug("process handle message", zap.Int64("SID", session.ID()), zap.ByteString("Data", data))
 	receiver := handler.Receiver
 	if handler.Options.ReceiverProvider != nil {
 		rec := handler.Options.ReceiverProvider(ctx)
 		if rec == nil {
-			logger.Warn("pitaya/handle: route not found,the ReceiverProvider return nil", zap.String("route", rt.Short()))
+			l.Warn("pitaya/handle: route not found,the ReceiverProvider return nil", zap.String("route", rt.Short()))
 			return nil, apierrors.NotFound("", "process handle message error", "").WithCause(err)
 		}
 		receiver = reflect.ValueOf(rec)

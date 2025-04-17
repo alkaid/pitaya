@@ -123,12 +123,12 @@ func processHandlerMessage(
 		return nil, apierrors.FromError(err)
 	}
 
-	logger := ctx.Value(constants.LoggerCtxKey).(*zap.Logger)
+	l := ctx.Value(constants.LoggerCtxKey).(*zap.Logger)
 	exit, err := handler.ValidateMessageType(msgType)
 	if err != nil && exit {
 		return nil, apierrors.BadRequest("", err.Error(), "").WithCause(err)
 	} else if err != nil {
-		logger.Warn("invalid message type", zap.Error(err))
+		l.Warn("invalid message type", zap.Error(err))
 	}
 
 	// First unmarshal the handler arg that will be passed to
@@ -143,7 +143,7 @@ func processHandlerMessage(
 		return nil, err
 	}
 
-	logger.Debug("process handle message", zap.Int64("SID", session.ID()), zap.ByteString("Data", data))
+	l.Debug("process handle message", zap.Int64("SID", session.ID()), zap.ByteString("Data", data))
 	args := []reflect.Value{handler.Receiver, reflect.ValueOf(ctx)}
 	if arg != nil {
 		args = append(args, reflect.ValueOf(arg))
