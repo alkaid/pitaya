@@ -232,7 +232,7 @@ func CtxWithDefaultLogger(ctx context.Context, route, userID string) context.Con
 		rID = nuid.Next()
 	}
 	if userID != "" {
-		ctx = pcontext.AddToPropagateCtx(ctx, constants.UserIdCtxKey, requestID)
+		ctx = pcontext.AddToPropagateCtx(ctx, constants.UserIdCtxKey, userID)
 	}
 	defaultLogger := logger.Zap.With(zap.String("route", route), zap.String("reqId", rID), zap.String("uid", userID))
 
