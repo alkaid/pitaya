@@ -434,9 +434,19 @@ func (r *RemoteService) DoPublish(ctx context.Context, rt *route.Route, protoDat
 	return err
 }
 func (r *RemoteService) DoPublishRequest(ctx context.Context, ro *route.Route, protoData []byte, session session.Session) (resps []*protos.Response, err error) {
-	var ch = make(chan *protos.Response, 1)
+	var ch = make(chan *protos.Response, 10)
+	done := make(chan struct{})
 	svs := r.serviceDiscovery.GetServerTypes()
 	wg := sync.WaitGroup{}
+	// 收集响应
+	co.Go(func() {
+		defer close(done)
+		for resp := range ch {
+			if resp != nil {
+				resps = append(resps, resp)
+			}
+		}
+	})
 	// TODO 优化项 控制goroutine数量
 	for _, server2 := range svs {
 		sub2 := server2.GetSubscribe(ro.Service, ro.Method)
@@ -476,21 +486,18 @@ func (r *RemoteService) DoPublishRequest(ctx context.Context, ro *route.Route, p
 				}
 			}
 			rp, err2 := r.DoRPC(ctx, "", rt, protoData, session)
+			// 这里的err会有竞态问题，返回的是随机一个error.后续应该优化成errors group
 			if err2 != nil {
 				err = err2
 			}
 			ch <- rp
 		})
 	}
-	co.Go(func() {
-		for {
-			select {
-			case resp := <-ch:
-				resps = append(resps, resp)
-			}
-		}
-	})
 	wg.Wait()
+	// 通知收集goroutine结束
+	close(ch)
+	// 等待收集goroutine完成
+	<-done
 	return resps, err
 }
 
