@@ -950,6 +950,10 @@ func (s *sessionImpl) OnClose(c func()) error {
 func (s *sessionImpl) Close(callback map[string]string, reason ...CloseReason) {
 	logger.Zap.Debug("session close", zap.Int64("id", s.ID()), zap.String("uid", s.UID()))
 	atomic.AddInt64(&s.pool.SessionCount, -1)
+	if len(s.UID()) > 0 {
+		s.pool.sessionsByUID.Delete(s.UID())
+		atomic.AddInt64(&s.pool.UserCount, -1)
+	}
 	s.online = false
 	s.pool.sessionsByID.Delete(s.ID())
 	// Only remove session by UID if the session ID matches the one being closed. This avoids problems with removing a valid session after the user has already reconnected before this session's heartbeat times out
