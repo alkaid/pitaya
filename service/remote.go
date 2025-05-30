@@ -132,7 +132,6 @@ func (r *RemoteService) remoteProcess(
 	route *route.Route,
 	msg *message.Message,
 ) {
-	logW := logger.Zap.With(zap.String("route", route.String()), zap.Any("rpcdata", msg))
 	res, err := r.remoteCall(ctx, server, protos.RPCType_Sys, route, a.GetSession(), msg)
 	switch msg.Type {
 	case message.Request:
@@ -142,7 +141,7 @@ func (r *RemoteService) remoteProcess(
 		}
 		err = a.GetSession().ResponseMID(ctx, msg.ID, res.Data)
 		if err != nil {
-			logW.Error("Failed to respond to remote server", zap.Error(err))
+			util.GetLoggerFromCtx(ctx).Error("Failed to respond to remote server", zap.Error(err), zap.String("route", route.String()), zap.Any("rpcdata", msg))
 			a.AnswerWithError(ctx, msg.ID, err)
 		}
 	case message.Notify:
@@ -152,7 +151,7 @@ func (r *RemoteService) remoteProcess(
 			return
 		}
 	default:
-		logW.Error("not support message type", zap.Uint8("msgType", uint8(msg.Type)))
+		util.GetLoggerFromCtx(ctx).Error("not support message type", zap.Uint8("msgType", uint8(msg.Type)), zap.String("route", route.String()), zap.Any("rpcdata", msg))
 	}
 }
 
@@ -958,7 +957,13 @@ func (r *RemoteService) remoteCall(
 	if target == nil {
 		target, err = r.router.Route(ctx, rpcType, svType, route, msg, session)
 		if err != nil {
-			return nil, apierrors.FromError(err)
+			apiErr := apierrors.FromError(err)
+			if rpcType == protos.RPCType_Sys {
+				logW := util.GetLoggerFromCtx(ctx)
+				logFun := lo.If(int(apiErr.Status.Code) >= http.StatusInternalServerError, logW.Error).Else(logW.Warn)
+				logFun("Failed to respond to remote server", zap.String("route", route.String()), zap.Error(err))
+			}
+			return nil, apiErr
 		}
 	}
 
