@@ -23,12 +23,12 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"google.golang.org/protobuf/proto"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/golang/mock/gomock"
-	"github.com/golang/protobuf/proto"
 	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/topfreegames/pitaya/v2/config"

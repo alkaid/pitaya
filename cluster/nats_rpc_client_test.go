@@ -24,11 +24,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"google.golang.org/protobuf/proto"
 	"testing"
 	"time"
 
 	"github.com/golang/mock/gomock"
-	"github.com/golang/protobuf/proto"
 	"github.com/google/uuid"
 	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
