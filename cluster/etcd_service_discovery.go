@@ -547,6 +547,7 @@ func parseServer(value []byte) (*Server, error) {
 		logger.Zap.Warn("failed to load server", zap.Any("server", sv), zap.Error(err))
 		return nil, err
 	}
+	sv.fix()
 	return sv, nil
 }
 

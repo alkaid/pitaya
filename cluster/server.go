@@ -62,6 +62,15 @@ func NewServer(id, serverType string, frontend bool, metadata ...map[string]stri
 	}
 }
 
+func (s *Server) fix() {
+	if s.Metadata == nil {
+		s.Metadata = make(map[string]string)
+	}
+	if s.Subscribe == nil {
+		s.Subscribe = make(map[string]*SubscribeItem)
+	}
+}
+
 // AsJSONString returns the server as a json string
 func (s *Server) AsJSONString() string {
 	str, err := json.Marshal(s)
