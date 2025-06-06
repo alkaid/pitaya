@@ -3,10 +3,11 @@ package tracing
 import (
 	"context"
 	"fmt"
+	"github.com/pkg/errors"
+	"github.com/topfreegames/pitaya/v2/logger"
+	"go.uber.org/zap"
 	"sync"
-
-	"github.com/zeromicro/go-zero/core/lang"
-	"github.com/zeromicro/go-zero/core/logx"
+	"time"
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
@@ -25,30 +26,51 @@ import (
 type Config struct {
 	Name     string  `json:",optional"`
 	Endpoint string  `json:",optional"`
-	Sampler  float64 `json:",default=1.0"`
+	Sampler  float64 `json:",default=0.1"`
 }
 
 var (
-	agents = make(map[string]lang.PlaceholderType)
-	lock   sync.Mutex
+	lock          sync.Mutex
+	agentInstance *sdktrace.TracerProvider
 )
 
-// StartAgent starts a opentelemetry agent.
-func StartAgent(c Config) {
+// StartAgent restart an opentelemetry agent.
+func StartAgent(c Config) error {
 	lock.Lock()
 	defer lock.Unlock()
 
-	_, ok := agents[c.Endpoint]
-	if ok {
-		return
+	if agentInstance != nil {
+		err := stopAgent()
+		if err != nil {
+			return err
+		}
 	}
 
 	// if error happens, let later calls run.
 	if err := startAgent(c); err != nil {
-		return
+		return err
 	}
+	return nil
+}
 
-	agents[c.Endpoint] = lang.Placeholder
+func StopAgent() error {
+	lock.Lock()
+	defer lock.Unlock()
+	return stopAgent()
+}
+
+func stopAgent() error {
+	if agentInstance == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := agentInstance.Shutdown(ctx)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	agentInstance = nil
+	return nil
 }
 
 func startAgent(c Config) error {
@@ -62,15 +84,15 @@ func startAgent(c Config) error {
 
 	if len(c.Endpoint) > 0 {
 		// conn, err := grpc.DialContext(ctx, opt.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
-		conn, err := grpc.DialContext(ctx, c.Endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, err := grpc.NewClient(c.Endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
-			return fmt.Errorf("failed to create gRPC connection to collector: %w", err)
+			return errors.WithStack(fmt.Errorf("failed to create gRPC connection to collector: %w", err))
 		}
 
 		// Set up a trace exporter
 		exp, err := otlptracegrpc.New(ctx, otlptracegrpc.WithGRPCConn(conn))
 		if err != nil {
-			return fmt.Errorf("failed to create trace exporter: %w", err)
+			return errors.WithStack(fmt.Errorf("failed to create trace exporter: %w", err))
 		}
 		// Always be sure to batch in production.
 		opts = append(opts, sdktrace.WithBatcher(exp))
@@ -81,8 +103,8 @@ func startAgent(c Config) error {
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{}, propagation.Baggage{}))
 	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
-		logx.Errorf("[otel] error: %v", err)
+		logger.Zap.Error("[otel] error", zap.Error(err))
 	}))
-
+	agentInstance = tp
 	return nil
 }

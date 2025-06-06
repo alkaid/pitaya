@@ -10,19 +10,19 @@ import (
 	"github.com/topfreegames/pitaya/v2/config"
 )
 
-func newPool() *StatefulPool {
+func newPool(name string) *StatefulPool {
 	p, _ := NewStatefulPool(config.GoPool{
-		Name:                "test",
+		Name:                name,
 		Expire:              time.Minute * 10,
 		TaskBuffer:          100,
 		DisableTimeoutWatch: false,
-		TimeoutBuckets:      []time.Duration{time.Second * 5, time.Second * 10},
+		TimeoutBuckets:      []time.Duration{time.Second * 5, time.Second * 6},
 	}, nil)
 	return p
 }
 
 func TestStatefulPool_Go(t *testing.T) {
-	p := newPool()
+	p := newPool("test")
 	var wg sync.WaitGroup
 	for i := 1; i < 100000; i++ {
 		wg.Add(1)
@@ -39,42 +39,36 @@ func TestStatefulPool_Go(t *testing.T) {
 //
 //	@param t
 func Test_HugeAmount(t *testing.T) {
-	p := newPool()
+	p := newPool("test")
 	var wg sync.WaitGroup
 	ctx := context.Background()
 	var GoByID = func(goID int, task func()) {
+		wg.Add(1)
 		p.Go(ctx, goID, func(ctx context.Context) {
 			task()
+			wg.Done()
 		}, false)
 	}
 	var calc = func() {
 		// 模拟一个耗时操作
 		time.Sleep(time.Microsecond * time.Duration(rand.IntN(1000)))
-		wg.Done()
 	}
 	for k := 0; k < 1000; k++ {
-		wg.Add(1)
 		GoByID(k, func() {
-			wg.Add(1)
 			GoByID(k+1, func() {
 				for i := 0; i < 5; i++ {
-					wg.Add(1)
 					GoByID(i, calc)
 				}
 				calc()
 			})
-			wg.Add(1)
 			GoByID(k+2, func() {
 				for i := 0; i < 5; i++ {
-					wg.Add(1)
 					GoByID(i, calc)
 				}
 				calc()
 			})
-			wg.Add(1)
 			GoByID(k+3, func() {
 				for i := 0; i < 5; i++ {
-					wg.Add(1)
 					GoByID(i, calc)
 				}
 				calc()
@@ -82,6 +76,43 @@ func Test_HugeAmount(t *testing.T) {
 			calc()
 		})
 	}
+	GoByID(10000, func() {
+		time.Sleep(time.Second * 15)
+	})
 	wg.Wait()
-	time.Sleep(time.Second * 10)
+}
+
+// Test_MultiPool 测试多个线程池情况下能否正常跑完
+//
+//	@param t
+func Test_MultiPool(t *testing.T) {
+	p := newPool("user")
+	rp := newPool("room")
+	var wg sync.WaitGroup
+	ctx := context.Background()
+	var GoByID = func(goID int, task func()) {
+		wg.Add(1)
+		p.Go(ctx, goID, func(ctx context.Context) {
+			task()
+			wg.Done()
+		}, false)
+	}
+	var calc = func() {
+		// 模拟一个耗时操作
+		time.Sleep(time.Millisecond * time.Duration(rand.IntN(13)+10))
+	}
+	for k := 0; k < 10; k++ {
+		GoByID(k, func() {
+			rp.Wait(ctx, 1, func(ctx context.Context) {
+				calc()
+			}, false)
+			rp.Wait(ctx, 1, func(ctx context.Context) {
+			}, false)
+		})
+	}
+	GoByID(10000, func() {
+		time.Sleep(time.Second * 10)
+		t.Log("done")
+	})
+	wg.Wait()
 }
