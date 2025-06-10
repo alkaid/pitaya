@@ -23,12 +23,16 @@
 package tracing
 
 import (
+	"github.com/alkaid/goerrors/apierrors"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+
+	semconv "go.opentelemetry.io/otel/semconv/v1.32.0"
 )
 
 // LogError logs an error to an opentracing span
 func LogError(span trace.Span, err error) {
+	span.SetAttributes(semconv.HTTPResponseStatusCode(apierrors.Code(err)))
 	span.SetStatus(codes.Error, err.Error())
 	span.RecordError(err)
 }

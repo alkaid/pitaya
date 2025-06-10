@@ -139,7 +139,8 @@ func (gs *GRPCClient) Call(
 	}
 
 	ctx = pcontext.AddToPropagateCtx(ctx, constants.RequestTimeout, gs.reqTimeout.String())
-	req, err := buildRequest(ctx, rpcType, route.String(), session, msg, gs.server)
+	req, err1 := buildRequest(ctx, rpcType, route.String(), session, msg, gs.server)
+	err = err1
 	if err != nil {
 		return nil, err
 	}
@@ -153,12 +154,14 @@ func (gs *GRPCClient) Call(
 		defer metrics.ReportTimingFromCtx(ctxT, gs.metricsReporters, "rpc", err)
 	}
 
-	res, err := c.(*grpcClient).call(ctxT, &req)
+	res, err1 := c.(*grpcClient).call(ctxT, &req)
+	err = err1
 	if err != nil {
 		return nil, err
 	}
 	if res.Status != nil {
-		return nil, apierrors.FromStatus(res.Status)
+		err = apierrors.FromStatus(res.Status)
+		return nil, err
 	}
 	return res, nil
 }

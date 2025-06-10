@@ -159,11 +159,13 @@ func (ns *NatsRPCClient) Publish(
 		err = constants.ErrRPCClientNotInitialized
 		return nil, errors.WithStack(err)
 	}
-	req, err := buildRequest(ctx, rpcType, route.String(), session, msg, ns.server)
+	req, err1 := buildRequest(ctx, rpcType, route.String(), session, msg, ns.server)
+	err = err1
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
-	marshalledData, err := proto.Marshal(&req)
+	marshalledData, err1 := proto.Marshal(&req)
+	err = err1
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -194,7 +196,8 @@ func (ns *NatsRPCClient) Publish(
 	}
 	reply := route.Method + uid + "_" + util.NanoID(16)
 	//reply := nats.NewInbox()
-	sub, err := ns.conn.SubscribeSync(reply)
+	sub, err1 := ns.conn.SubscribeSync(reply)
+	err = err1
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -288,11 +291,13 @@ func (ns *NatsRPCClient) Call(
 	}
 	logger.Log.Debugf("[rpc_client] sending remote nats request for route %s with timeout of %s", route, reqTimeout)
 
-	req, err := buildRequest(ctx, rpcType, route.String(), session, msg, ns.server)
+	req, err1 := buildRequest(ctx, rpcType, route.String(), session, msg, ns.server)
+	err = err1
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
-	marshalledData, err := proto.Marshal(&req)
+	marshalledData, err1 := proto.Marshal(&req)
+	err = err1
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -339,7 +344,8 @@ func (ns *NatsRPCClient) Call(
 	}
 
 	if res.Status != nil {
-		return nil, apierrors.FromStatus(res.Status)
+		err = apierrors.FromStatus(res.Status)
+		return nil, err
 	}
 	return res, nil
 }
@@ -368,11 +374,13 @@ func (ns *NatsRPCClient) Fork(
 		err = constants.ErrRPCClientNotInitialized
 		return errors.WithStack(err)
 	}
-	req, err := buildRequest(ctx, protos.RPCType_User, route.String(), session, msg, ns.server)
+	req, err1 := buildRequest(ctx, protos.RPCType_User, route.String(), session, msg, ns.server)
+	err = err1
 	if err != nil {
 		return errors.WithStack(err)
 	}
-	marshalledData, err := proto.Marshal(&req)
+	marshalledData, err1 := proto.Marshal(&req)
+	err = err1
 	if err != nil {
 		return errors.WithStack(err)
 	}
@@ -384,7 +392,8 @@ func (ns *NatsRPCClient) Fork(
 			metrics.ReportTimingFromCtx(ctx, ns.metricsReporters, typ, err)
 		}()
 	}
-	return ns.Send(GetForkTopic(route.SvType), marshalledData)
+	err = ns.Send(GetForkTopic(route.SvType), marshalledData)
+	return err
 }
 
 // Init inits nats rpc client

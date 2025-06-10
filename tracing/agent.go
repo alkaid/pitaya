@@ -8,6 +8,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
 	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -84,10 +85,15 @@ func startAgent(ctx context.Context, c Config, opts ...sdktrace.TracerProviderOp
 			attribute.String("ip", localIP), // 用于 discovery processor 匹配 https://grafana.com/docs/alloy/latest/reference/components/otelcol/otelcol.processor.discovery/#arguments
 		)
 	}
+	if hostname, err := os.Hostname(); err == nil {
+		resourceAttrs = append(resourceAttrs,
+			attribute.String("hostname", hostname), // 同上 用于 discovery processor
+		)
+	}
 	res, err := resource.New(ctx,
 		resource.WithAttributes(resourceAttrs...),
 		resource.WithFromEnv(), // 自动从环境变量获取资源属性
-		resource.WithHost(),    // 自动添加主机信息
+		//resource.WithHost(),    // 自动添加主机信息
 	)
 	if err != nil {
 		return errors.WithStack(fmt.Errorf("failed to create resource: %w", err))
