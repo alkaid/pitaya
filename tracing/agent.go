@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"github.com/pkg/errors"
 	"github.com/topfreegames/pitaya/v2/logger"
+	"go.opentelemetry.io/otel/attribute"
 	"go.uber.org/zap"
+	"net"
 	"sync"
 	"time"
 
@@ -15,7 +17,7 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
-	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.32.0"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -35,7 +37,7 @@ var (
 )
 
 // StartAgent restart an opentelemetry agent.
-func StartAgent(c Config) error {
+func StartAgent(ctx context.Context, c Config, opts ...sdktrace.TracerProviderOption) error {
 	lock.Lock()
 	defer lock.Unlock()
 
@@ -47,7 +49,7 @@ func StartAgent(c Config) error {
 	}
 
 	// if error happens, let later calls run.
-	if err := startAgent(c); err != nil {
+	if err := startAgent(ctx, c, opts...); err != nil {
 		return err
 	}
 	return nil
@@ -73,14 +75,29 @@ func stopAgent() error {
 	return nil
 }
 
-func startAgent(c Config) error {
-	ctx := context.Background()
-	opts := []sdktrace.TracerProviderOption{
+func startAgent(ctx context.Context, c Config, opts ...sdktrace.TracerProviderOption) error {
+	resourceAttrs := []attribute.KeyValue{
+		semconv.ServiceNameKey.String(c.Name),
+	}
+	if localIP := getLocalIP(); localIP != "" {
+		resourceAttrs = append(resourceAttrs,
+			attribute.String("ip", localIP), // 用于 discovery processor 匹配 https://grafana.com/docs/alloy/latest/reference/components/otelcol/otelcol.processor.discovery/#arguments
+		)
+	}
+	res, err := resource.New(ctx,
+		resource.WithAttributes(resourceAttrs...),
+		resource.WithFromEnv(), // 自动从环境变量获取资源属性
+		resource.WithHost(),    // 自动添加主机信息
+	)
+	if err != nil {
+		return errors.WithStack(fmt.Errorf("failed to create resource: %w", err))
+	}
+	opts = append([]sdktrace.TracerProviderOption{
 		// Set the sampling rate based on the parent span to 100%
 		sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(c.Sampler))),
 		// Record information about this application in an Resource.
-		sdktrace.WithResource(resource.NewSchemaless(semconv.ServiceNameKey.String(c.Name))),
-	}
+		sdktrace.WithResource(res),
+	}, opts...)
 
 	if len(c.Endpoint) > 0 {
 		// conn, err := grpc.DialContext(ctx, opt.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
@@ -107,4 +124,19 @@ func startAgent(c Config) error {
 	}))
 	agentInstance = tp
 	return nil
+}
+
+func getLocalIP() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+			if ipnet.IP.To4() != nil {
+				return ipnet.IP.String()
+			}
+		}
+	}
+	return ""
 }

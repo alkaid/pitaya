@@ -26,7 +26,7 @@ import (
 	"github.com/topfreegames/pitaya/v2/route"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
-	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.32.0"
 
 	"go.opentelemetry.io/otel/codes"
 
