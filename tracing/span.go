@@ -137,7 +137,7 @@ func RPCStartSpan(ctx context.Context, spanInfo *SpanInfo, attrs ...attribute.Ke
 	attrs = append(attrs, RPCClientIDKey.String(clientID))
 	attrs = append(attrs, RPCServiceIDKey.String(svID))
 	if spanInfo.RequestID != "" {
-		attrs = append(attrs, attribute.Key("request.id").String(spanInfo.RequestID))
+		attrs = append(attrs, attribute.Key(constants.RequestIDKey).String(spanInfo.RequestID))
 	}
 	if spanInfo.MsgType != "" {
 		attrs = append(attrs, attribute.Key("msg.type").String(spanInfo.MsgType))

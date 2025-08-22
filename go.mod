@@ -167,7 +167,7 @@ require (
 	sigs.k8s.io/yaml v1.4.0 // indirect
 )
 
-replace github.com/panjf2000/ants/v2 v2.11.3 => github.com/alkaid/ants/v2 v2.11.3-ak-3
+replace github.com/panjf2000/ants/v2 v2.11.3 => github.com/alkaid/ants/v2 v2.11.3-ak-4
 
 //replace github.com/panjf2000/ants/v2 => ../ants
 

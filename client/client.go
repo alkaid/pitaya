@@ -258,7 +258,7 @@ func (c *Client) handlePackets() {
 				Log.Debug("client handle packets got", zap.String("data", string(p.Data)))
 				m, err := message.Decode(p.Data)
 				if err != nil {
-					Log.Error("error decoding msg from sv", zap.String("data", string(m.Data)))
+					Log.Error("error decoding msg from sv", zap.Any("data", m))
 				}
 				if m.Type == message.Response {
 					c.pendingReqMutex.Lock()
