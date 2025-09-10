@@ -619,7 +619,7 @@ func (pool *sessionPoolImpl) RemoveSessionLocal(session Session) {
 		pool.sessionsByUID.Delete(session.UID())
 		atomic.AddInt64(&pool.UserCount, -1)
 	}
-	if _, ok := pool.sessionsByID.Load(session.ID()); ok {
+	if _, ok := pool.sessionsByID.Load(session.ID()); !ok {
 		return
 	}
 	atomic.AddInt64(&pool.SessionCount, -1)
