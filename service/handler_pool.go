@@ -153,10 +153,11 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		// 若提供了自定义派发线程
 		var wg sync.WaitGroup
 		wg.Add(1)
-		handler.Options.TaskGoProvider(ctx, func(ctx context.Context) {
+		final := func() { wg.Done() }
+		handler.Options.TaskGoProvider(ctx, final, func(ctx context.Context) {
+			defer final()
 			args[1] = reflect.ValueOf(ctx)
 			resp, err = util.Pcall(handler.Method, args)
-			wg.Done()
 		})
 		wg.Wait()
 	} else {

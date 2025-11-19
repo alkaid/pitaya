@@ -860,10 +860,11 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 		// 若提供了自定义派发线程
 		var wg sync.WaitGroup
 		wg.Add(1)
-		remote.Options.TaskGoProvider(ctx, func(ctx context.Context) {
+		final := func() { wg.Done() }
+		remote.Options.TaskGoProvider(ctx, final, func(ctx context.Context) {
+			defer final()
 			params[1] = reflect.ValueOf(ctx)
 			ret, err = util.Pcall(remote.Method, params)
-			wg.Done()
 		})
 		wg.Wait()
 	} else {
