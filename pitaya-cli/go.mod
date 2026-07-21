@@ -5,7 +5,7 @@ go 1.18
 require (
 	github.com/abiosoft/ishell/v2 v2.0.2
 	github.com/mitchellh/go-homedir v1.1.0
-	github.com/sirupsen/logrus v1.9.3
+	github.com/sirupsen/logrus v1.9.4
 	github.com/topfreegames/pitaya/v2 v2.8.1-0.20231207120201-acb62e4fb582
 )
 
