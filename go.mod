@@ -26,10 +26,10 @@ require (
 	github.com/spf13/viper/remote v1.20.1
 	github.com/stretchr/testify v1.10.0
 	github.com/zeromicro/go-zero v1.8.3
-	go.etcd.io/etcd/api/v3 v3.6.0
-	go.etcd.io/etcd/client/pkg/v3 v3.6.0
-	go.etcd.io/etcd/client/v3 v3.6.0
-	go.etcd.io/etcd/tests/v3 v3.6.0
+	go.etcd.io/etcd/api/v3 v3.6.1
+	go.etcd.io/etcd/client/pkg/v3 v3.6.1
+	go.etcd.io/etcd/client/v3 v3.6.1
+	go.etcd.io/etcd/tests/v3 v3.6.1
 	go.opentelemetry.io/otel v1.36.0
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.36.0
 	go.opentelemetry.io/otel/sdk v1.36.0
@@ -139,9 +139,9 @@ require (
 	github.com/xiang90/probing v0.0.0-20190116061207-43a291ad63a2 // indirect
 	go.etcd.io/bbolt v1.4.0 // indirect
 	go.etcd.io/etcd/client/v2 v2.305.21 // indirect
-	go.etcd.io/etcd/etcdctl/v3 v3.6.0 // indirect
-	go.etcd.io/etcd/pkg/v3 v3.6.0 // indirect
-	go.etcd.io/etcd/server/v3 v3.6.0 // indirect
+	go.etcd.io/etcd/etcdctl/v3 v3.6.1 // indirect
+	go.etcd.io/etcd/pkg/v3 v3.6.1 // indirect
+	go.etcd.io/etcd/server/v3 v3.6.1 // indirect
 	go.etcd.io/gofail v0.2.0 // indirect
 	go.etcd.io/raft/v3 v3.6.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect

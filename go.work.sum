@@ -838,7 +838,6 @@ github.com/alicebob/miniredis/v2 v2.33.0/go.mod h1:MhP4a3EU7aENRi9aO+tHfTBZicLqQ
 github.com/alicebob/miniredis/v2 v2.34.0 h1:mBFWMaJSNL9RwdGRyEDoAAv8OQc5UlEhLDQggTglU/0=
 github.com/alicebob/miniredis/v2 v2.34.0/go.mod h1:kWShP4b58T1CW0Y5dViCd5ztzrDqRWqM3nksiyXk5s8=
 github.com/alkaid/ants/v2 v2.11.3-ak-4 h1:TGOgxEr2BjNOv5mF13EccVlmKXXwCG22ttCu7Tle4N4=
-github.com/alkaid/ants/v2 v2.11.3-ak-4/go.mod h1:8u92CYMUc6gyvTIw8Ru7Mt7+/ESnJahz5EVtqfrilek=
 github.com/alkaid/viper v1.20.1-ak-1/go.mod h1:x3AfkRSCVUZ8n4dWNEeVOS3GPT/IKSiQwKBlsgHhYBQ=
 github.com/andybalholm/brotli v1.0.5/go.mod h1:fO7iG3H7G2nSZ7m0zPUDn85XEX2GTukHGRSepvi9Eig=
 github.com/andybalholm/cascadia v1.3.1 h1:nhxRkql1kdYCc8Snf7D5/D3spOX+dBgjA6u8x004T2c=
@@ -1438,6 +1437,7 @@ go.etcd.io/etcd/etcdutl/v3 v3.5.11/go.mod h1:p7jTKqjyEjl/lyTzhHuQ5kqQt1FhQlRHw8T
 go.etcd.io/etcd/etcdutl/v3 v3.6.0 h1:MixJh+DgSa4h8D2jD27rZwT7O+im/Kp8BaCz86JsMfI=
 go.etcd.io/etcd/etcdutl/v3 v3.6.0/go.mod h1:gheEcr7WMMV9TN+TvXSxP9ixk8Bg5Lwp63uz1OANeKg=
 go.etcd.io/etcd/raft/v3 v3.5.11/go.mod h1:Tp7kZJVtWJWLiMCPrgkimiOB5ZYi8YM93onQihpG724=
+go.etcd.io/etcd/server/v3 v3.6.1 h1:Y/mh94EeImzXyTBIMVgR0v5H+ANtRFDY4g1s5sxOZGE=
 go.etcd.io/gofail v0.1.0 h1:XItAMIhOojXFQMgrxjnd2EIIHun/d5qL0Pf7FzVTkFg=
 go.etcd.io/gofail v0.1.0/go.mod h1:VZBCXYGZhHAinaBiiqYvuDynvahNsAyLFwB3kEHKz1M=
 go.mongodb.org/mongo-driver v1.11.1 h1:QP0znIRTuL0jf1oBQoAoM0C6ZJfBK4kx0Uumtv1A7w8=
