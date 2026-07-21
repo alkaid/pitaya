@@ -22,18 +22,18 @@ package config
 
 import (
 	"context"
-	"github.com/topfreegames/pitaya/v2/util/viperx"
+	"github.com/alkaid/pitaya/v2/util/viperx"
 	"strings"
 	"time"
 
-	"github.com/topfreegames/pitaya/v2/util"
+	"github.com/alkaid/pitaya/v2/util"
 
 	errors2 "github.com/alkaid/goerrors/errors"
 	"go.uber.org/zap"
 
-	"github.com/spf13/viper"
-	_ "github.com/spf13/viper/remote"
-	"github.com/topfreegames/pitaya/v2/logger"
+	"github.com/alkaid/viper"
+	_ "github.com/alkaid/viper/remote"
+	"github.com/alkaid/pitaya/v2/logger"
 )
 
 // ConfLoader 重载监听

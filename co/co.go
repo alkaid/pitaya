@@ -4,9 +4,9 @@ package co
 import (
 	"context"
 
-	"github.com/panjf2000/ants/v2"
-	"github.com/topfreegames/pitaya/v2/logger"
-	"github.com/topfreegames/pitaya/v2/util"
+	"github.com/alkaid/ants/v2"
+	"github.com/alkaid/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/util"
 	"go.uber.org/zap"
 )
 

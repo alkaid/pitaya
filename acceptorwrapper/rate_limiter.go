@@ -25,10 +25,10 @@ import (
 	"go.uber.org/zap"
 	"time"
 
-	"github.com/topfreegames/pitaya/v2/acceptor"
-	"github.com/topfreegames/pitaya/v2/constants"
-	"github.com/topfreegames/pitaya/v2/logger"
-	"github.com/topfreegames/pitaya/v2/metrics"
+	"github.com/alkaid/pitaya/v2/acceptor"
+	"github.com/alkaid/pitaya/v2/constants"
+	"github.com/alkaid/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/metrics"
 )
 
 // RateLimiter wraps net.Conn by applying rate limiting and return empty

@@ -26,7 +26,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spf13/viper"
+	"github.com/alkaid/viper"
 	"github.com/stretchr/testify/assert"
 )
 

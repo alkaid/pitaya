@@ -4,10 +4,10 @@ import (
 	"math"
 	"time"
 
-	"github.com/topfreegames/pitaya/v2/config"
-	"github.com/topfreegames/pitaya/v2/interfaces"
-	"github.com/topfreegames/pitaya/v2/logger"
-	"github.com/topfreegames/pitaya/v2/metrics"
+	"github.com/alkaid/pitaya/v2/config"
+	"github.com/alkaid/pitaya/v2/interfaces"
+	"github.com/alkaid/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/metrics"
 	"go.uber.org/zap"
 )
 

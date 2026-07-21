@@ -35,27 +35,27 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
-	"github.com/topfreegames/pitaya/v2/acceptor"
+	"github.com/alkaid/pitaya/v2/acceptor"
 	"go.uber.org/zap"
 
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/alkaid/goerrors/apierrors"
 
-	"github.com/topfreegames/pitaya/v2/co"
-	"github.com/topfreegames/pitaya/v2/conn/codec"
-	"github.com/topfreegames/pitaya/v2/conn/message"
-	"github.com/topfreegames/pitaya/v2/conn/packet"
-	"github.com/topfreegames/pitaya/v2/constants"
-	"github.com/topfreegames/pitaya/v2/logger"
-	"github.com/topfreegames/pitaya/v2/metrics"
-	"github.com/topfreegames/pitaya/v2/protos"
-	"github.com/topfreegames/pitaya/v2/serialize"
-	"github.com/topfreegames/pitaya/v2/session"
-	"github.com/topfreegames/pitaya/v2/tracing"
-	"github.com/topfreegames/pitaya/v2/util"
-	"github.com/topfreegames/pitaya/v2/util/compression"
-	netutil "github.com/topfreegames/pitaya/v2/util/net"
+	"github.com/alkaid/pitaya/v2/co"
+	"github.com/alkaid/pitaya/v2/conn/codec"
+	"github.com/alkaid/pitaya/v2/conn/message"
+	"github.com/alkaid/pitaya/v2/conn/packet"
+	"github.com/alkaid/pitaya/v2/constants"
+	"github.com/alkaid/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/metrics"
+	"github.com/alkaid/pitaya/v2/protos"
+	"github.com/alkaid/pitaya/v2/serialize"
+	"github.com/alkaid/pitaya/v2/session"
+	"github.com/alkaid/pitaya/v2/tracing"
+	"github.com/alkaid/pitaya/v2/util"
+	"github.com/alkaid/pitaya/v2/util/compression"
+	netutil "github.com/alkaid/pitaya/v2/util/net"
 )
 
 var (

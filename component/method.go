@@ -26,7 +26,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/topfreegames/pitaya/v2/conn/message"
+	"github.com/alkaid/pitaya/v2/conn/message"
 	"google.golang.org/protobuf/proto"
 )
 

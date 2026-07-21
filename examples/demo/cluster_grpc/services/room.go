@@ -7,10 +7,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/topfreegames/pitaya/v2"
-	"github.com/topfreegames/pitaya/v2/component"
-	"github.com/topfreegames/pitaya/v2/examples/demo/protos"
-	"github.com/topfreegames/pitaya/v2/timer"
+	"github.com/alkaid/pitaya/v2"
+	"github.com/alkaid/pitaya/v2/component"
+	"github.com/alkaid/pitaya/v2/examples/demo/protos"
+	"github.com/alkaid/pitaya/v2/timer"
 )
 
 type (

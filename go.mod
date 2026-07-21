@@ -1,10 +1,13 @@
-module github.com/topfreegames/pitaya/v2
+module github.com/alkaid/pitaya/v2
 
 go 1.24.2
 
 require (
 	github.com/DataDog/datadog-go v4.8.3+incompatible
+	github.com/alkaid/ants/v2 v2.12.1-ak-2
 	github.com/alkaid/goerrors v1.0.18
+	github.com/alkaid/viper v1.21.0-ak-5
+	github.com/alkaid/viper/remote v1.21.0-ak-5
 	github.com/go-playground/validator/v10 v10.26.0
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/go-viper/mapstructure/v2 v2.4.0
@@ -17,13 +20,10 @@ require (
 	github.com/nats-io/nats.go v1.45.0
 	github.com/nats-io/nuid v1.0.1
 	github.com/opentracing/opentracing-go v1.2.0
-	github.com/panjf2000/ants/v2 v2.11.3
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/client_golang v1.22.0
 	github.com/samber/lo v1.50.0
 	github.com/sirupsen/logrus v1.9.4
-	github.com/spf13/viper v1.21.0
-	github.com/spf13/viper/remote v1.20.1
 	github.com/stretchr/testify v1.11.1
 	github.com/zeromicro/go-zero v1.8.5
 	go.etcd.io/etcd/api/v3 v3.6.6
@@ -55,8 +55,10 @@ require (
 	cloud.google.com/go/compute/metadata v0.8.0 // indirect
 	cloud.google.com/go/firestore v1.18.0 // indirect
 	cloud.google.com/go/longrunning v0.6.7 // indirect
+	dario.cat/mergo v1.0.2 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/VividCortex/ewma v1.2.0 // indirect
+	github.com/alkaid/crypt v0.31.0-ak-2 // indirect
 	github.com/armon/go-metrics v0.4.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bgentry/speakeasy v0.2.0 // indirect
@@ -125,7 +127,6 @@ require (
 	github.com/prometheus/common v0.64.0 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
-	github.com/sagikazarmark/crypt v0.31.0 // indirect
 	github.com/sagikazarmark/locafero v0.12.0 // indirect
 	github.com/soheilhy/cmux v0.1.5 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
@@ -165,19 +166,3 @@ require (
 	sigs.k8s.io/json v0.0.0-20221116044647-bc3834ca7abd // indirect
 	sigs.k8s.io/yaml v1.4.0 // indirect
 )
-
-replace github.com/panjf2000/ants/v2 v2.11.3 => github.com/alkaid/ants/v2 v2.12.1-ak-1
-
-//replace github.com/panjf2000/ants/v2 => ../ants
-
-replace github.com/sagikazarmark/crypt v0.29.0 => github.com/alkaid/crypt v0.31.0-ak-1
-
-//replace github.com/alkaid/crypt => ../crypt
-
-replace github.com/spf13/viper v1.20.1 => github.com/alkaid/viper v1.21.0-ak-4
-
-//replace github.com/spf13/viper => ../viper
-
-replace github.com/spf13/viper/remote v1.20.1 => github.com/alkaid/viper/remote v1.21.0-ak-4
-
-//replace github.com/spf13/viper/remote => ../viper/remote

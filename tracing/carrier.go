@@ -3,9 +3,9 @@ package tracing
 import (
 	"context"
 
-	"github.com/topfreegames/pitaya/v2/constants"
-	pcontext "github.com/topfreegames/pitaya/v2/context"
-	"github.com/topfreegames/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/constants"
+	pcontext "github.com/alkaid/pitaya/v2/context"
+	"github.com/alkaid/pitaya/v2/logger"
 	"go.opentelemetry.io/otel/propagation"
 )
 

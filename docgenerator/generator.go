@@ -28,8 +28,8 @@ import (
 
 	"google.golang.org/protobuf/proto"
 
-	"github.com/topfreegames/pitaya/v2/component"
-	"github.com/topfreegames/pitaya/v2/route"
+	"github.com/alkaid/pitaya/v2/component"
+	"github.com/alkaid/pitaya/v2/route"
 )
 
 type docs struct {

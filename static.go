@@ -24,16 +24,16 @@ package pitaya
 //	"context"
 //	"time"
 //
-//	"github.com/spf13/viper"
-//	"github.com/topfreegames/pitaya/v2/cluster"
-//	"github.com/topfreegames/pitaya/v2/component"
-//	"github.com/topfreegames/pitaya/v2/config"
-//	"github.com/topfreegames/pitaya/v2/constants"
-//	"github.com/topfreegames/pitaya/v2/interfaces"
-//	"github.com/topfreegames/pitaya/v2/metrics"
-//	"github.com/topfreegames/pitaya/v2/router"
-//	"github.com/topfreegames/pitaya/v2/session"
-//	"github.com/topfreegames/pitaya/v2/worker"
+//	"github.com/alkaid/viper"
+//	"github.com/alkaid/pitaya/v2/cluster"
+//	"github.com/alkaid/pitaya/v2/component"
+//	"github.com/alkaid/pitaya/v2/config"
+//	"github.com/alkaid/pitaya/v2/constants"
+//	"github.com/alkaid/pitaya/v2/interfaces"
+//	"github.com/alkaid/pitaya/v2/metrics"
+//	"github.com/alkaid/pitaya/v2/router"
+//	"github.com/alkaid/pitaya/v2/session"
+//	"github.com/alkaid/pitaya/v2/worker"
 //)
 //
 //var DefaultApp Pitaya

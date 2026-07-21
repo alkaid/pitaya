@@ -23,7 +23,7 @@ package metrics
 import (
 	"fmt"
 
-	"github.com/topfreegames/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/logger"
 	"go.uber.org/zap"
 
 	"net/http"
@@ -31,9 +31,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/topfreegames/pitaya/v2/config"
-	"github.com/topfreegames/pitaya/v2/constants"
-	"github.com/topfreegames/pitaya/v2/metrics/models"
+	"github.com/alkaid/pitaya/v2/config"
+	"github.com/alkaid/pitaya/v2/constants"
+	"github.com/alkaid/pitaya/v2/metrics/models"
 )
 
 var (

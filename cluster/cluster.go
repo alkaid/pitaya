@@ -24,15 +24,15 @@ import (
 	"context"
 	"time"
 
-	"github.com/topfreegames/pitaya/v2/co"
-	"github.com/topfreegames/pitaya/v2/conn/message"
-	"github.com/topfreegames/pitaya/v2/constants"
-	pcontext "github.com/topfreegames/pitaya/v2/context"
-	"github.com/topfreegames/pitaya/v2/interfaces"
-	"github.com/topfreegames/pitaya/v2/protos"
-	"github.com/topfreegames/pitaya/v2/route"
-	"github.com/topfreegames/pitaya/v2/session"
-	"github.com/topfreegames/pitaya/v2/util"
+	"github.com/alkaid/pitaya/v2/co"
+	"github.com/alkaid/pitaya/v2/conn/message"
+	"github.com/alkaid/pitaya/v2/constants"
+	pcontext "github.com/alkaid/pitaya/v2/context"
+	"github.com/alkaid/pitaya/v2/interfaces"
+	"github.com/alkaid/pitaya/v2/protos"
+	"github.com/alkaid/pitaya/v2/route"
+	"github.com/alkaid/pitaya/v2/session"
+	"github.com/alkaid/pitaya/v2/util"
 )
 
 // RPCServer interface

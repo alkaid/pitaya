@@ -23,7 +23,7 @@ package tracing
 import (
 	"context"
 
-	"github.com/topfreegames/pitaya/v2/route"
+	"github.com/alkaid/pitaya/v2/route"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/baggage"
 	semconv "go.opentelemetry.io/otel/semconv/v1.32.0"
@@ -34,8 +34,8 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/topfreegames/pitaya/v2/constants"
-	pcontext "github.com/topfreegames/pitaya/v2/context"
+	"github.com/alkaid/pitaya/v2/constants"
+	pcontext "github.com/alkaid/pitaya/v2/context"
 )
 
 const TraceName = "pitaya"

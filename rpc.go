@@ -23,18 +23,18 @@ package pitaya
 import (
 	"context"
 	"github.com/alkaid/goerrors/apierrors"
-	"github.com/topfreegames/pitaya/v2/protos"
+	"github.com/alkaid/pitaya/v2/protos"
 	"reflect"
 
-	"github.com/topfreegames/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/logger"
 	"go.uber.org/zap"
 
-	agent2 "github.com/topfreegames/pitaya/v2/agent"
-	"github.com/topfreegames/pitaya/v2/session"
+	agent2 "github.com/alkaid/pitaya/v2/agent"
+	"github.com/alkaid/pitaya/v2/session"
 
-	"github.com/topfreegames/pitaya/v2/config"
-	"github.com/topfreegames/pitaya/v2/constants"
-	"github.com/topfreegames/pitaya/v2/route"
+	"github.com/alkaid/pitaya/v2/config"
+	"github.com/alkaid/pitaya/v2/constants"
+	"github.com/alkaid/pitaya/v2/route"
 	"google.golang.org/protobuf/proto"
 )
 

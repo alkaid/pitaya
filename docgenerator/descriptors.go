@@ -3,14 +3,14 @@ package docgenerator
 import (
 	"strings"
 
-	"github.com/topfreegames/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/logger"
 	"go.uber.org/zap"
 
 	"google.golang.org/protobuf/types/descriptorpb"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
 
-	"github.com/topfreegames/pitaya/v2/constants"
+	"github.com/alkaid/pitaya/v2/constants"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoregistry"
 )

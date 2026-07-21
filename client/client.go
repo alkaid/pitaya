@@ -34,19 +34,19 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/topfreegames/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/logger"
 
 	"github.com/alkaid/goerrors/apierrors"
 	"go.uber.org/zap"
 
-	"github.com/topfreegames/pitaya/v2/acceptor"
+	"github.com/alkaid/pitaya/v2/acceptor"
 
 	"github.com/gorilla/websocket"
-	"github.com/topfreegames/pitaya/v2/conn/codec"
-	"github.com/topfreegames/pitaya/v2/conn/message"
-	"github.com/topfreegames/pitaya/v2/conn/packet"
-	"github.com/topfreegames/pitaya/v2/session"
-	"github.com/topfreegames/pitaya/v2/util/compression"
+	"github.com/alkaid/pitaya/v2/conn/codec"
+	"github.com/alkaid/pitaya/v2/conn/message"
+	"github.com/alkaid/pitaya/v2/conn/packet"
+	"github.com/alkaid/pitaya/v2/session"
+	"github.com/alkaid/pitaya/v2/util/compression"
 )
 
 // HandshakeSys struct

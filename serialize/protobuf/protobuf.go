@@ -21,7 +21,7 @@
 package protobuf
 
 import (
-	"github.com/topfreegames/pitaya/v2/constants"
+	"github.com/alkaid/pitaya/v2/constants"
 	"google.golang.org/protobuf/proto"
 )
 

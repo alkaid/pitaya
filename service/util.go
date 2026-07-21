@@ -29,16 +29,16 @@ import (
 
 	"github.com/alkaid/goerrors/apierrors"
 
-	"github.com/topfreegames/pitaya/v2/component"
-	"github.com/topfreegames/pitaya/v2/conn/message"
-	"github.com/topfreegames/pitaya/v2/constants"
-	"github.com/topfreegames/pitaya/v2/logger"
-	"github.com/topfreegames/pitaya/v2/pipeline"
-	"github.com/topfreegames/pitaya/v2/protos"
-	"github.com/topfreegames/pitaya/v2/route"
-	"github.com/topfreegames/pitaya/v2/serialize"
-	"github.com/topfreegames/pitaya/v2/session"
-	"github.com/topfreegames/pitaya/v2/util"
+	"github.com/alkaid/pitaya/v2/component"
+	"github.com/alkaid/pitaya/v2/conn/message"
+	"github.com/alkaid/pitaya/v2/constants"
+	"github.com/alkaid/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/pipeline"
+	"github.com/alkaid/pitaya/v2/protos"
+	"github.com/alkaid/pitaya/v2/route"
+	"github.com/alkaid/pitaya/v2/serialize"
+	"github.com/alkaid/pitaya/v2/session"
+	"github.com/alkaid/pitaya/v2/util"
 	"google.golang.org/protobuf/proto"
 )
 

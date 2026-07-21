@@ -26,7 +26,7 @@ func configureJaeger(config *viper.Viper, logger logrus.FieldLogger) {
 		logger.Error("Could not parse Jaeger env vars: %s", err.Error())
 		return
 	}
-	options := jaeger.Options{ // import "github.com/topfreegames/pitaya/v2/tracing/jaeger"
+	options := jaeger.Options{ // import "github.com/alkaid/pitaya/v2/tracing/jaeger"
 		Disabled:    cfg.Disabled,
 		Probability: cfg.Sampler.Param,
 		ServiceName: cfg.ServiceName,

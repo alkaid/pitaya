@@ -8,7 +8,7 @@ import (
 	reflect "reflect"
 
 	gomock "github.com/golang/mock/gomock"
-	protos "github.com/topfreegames/pitaya/v2/protos"
+	protos "github.com/alkaid/pitaya/v2/protos"
 	context "golang.org/x/net/context"
 	grpc "google.golang.org/grpc"
 )

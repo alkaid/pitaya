@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/topfreegames/pitaya/v2/config"
+	"github.com/alkaid/pitaya/v2/config"
 )
 
 func newPool(name string) *StatefulPool {

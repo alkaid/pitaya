@@ -36,15 +36,15 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/samber/lo"
-	"github.com/topfreegames/pitaya/v2/co"
+	"github.com/alkaid/pitaya/v2/co"
 
-	"github.com/topfreegames/pitaya/v2/util"
+	"github.com/alkaid/pitaya/v2/util"
 
 	nats "github.com/nats-io/nats.go"
-	"github.com/topfreegames/pitaya/v2/constants"
-	"github.com/topfreegames/pitaya/v2/logger"
-	"github.com/topfreegames/pitaya/v2/networkentity"
-	"github.com/topfreegames/pitaya/v2/protos"
+	"github.com/alkaid/pitaya/v2/constants"
+	"github.com/alkaid/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/networkentity"
+	"github.com/alkaid/pitaya/v2/protos"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )

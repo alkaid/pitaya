@@ -8,10 +8,10 @@ import (
 	"github.com/golang/mock/gomock"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/topfreegames/pitaya/v2/config"
-	"github.com/topfreegames/pitaya/v2/helpers"
-	"github.com/topfreegames/pitaya/v2/metrics"
-	protosmocks "github.com/topfreegames/pitaya/v2/protos/mocks"
+	"github.com/alkaid/pitaya/v2/config"
+	"github.com/alkaid/pitaya/v2/helpers"
+	"github.com/alkaid/pitaya/v2/metrics"
+	protosmocks "github.com/alkaid/pitaya/v2/protos/mocks"
 )
 
 func TestNewGRPCServer(t *testing.T) {

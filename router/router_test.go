@@ -3,16 +3,16 @@ package router
 import (
 	"context"
 	"errors"
-	"github.com/topfreegames/pitaya/v2/session"
+	"github.com/alkaid/pitaya/v2/session"
 	"testing"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
-	"github.com/topfreegames/pitaya/v2/cluster"
-	"github.com/topfreegames/pitaya/v2/cluster/mocks"
-	"github.com/topfreegames/pitaya/v2/conn/message"
-	"github.com/topfreegames/pitaya/v2/protos"
-	"github.com/topfreegames/pitaya/v2/route"
+	"github.com/alkaid/pitaya/v2/cluster"
+	"github.com/alkaid/pitaya/v2/cluster/mocks"
+	"github.com/alkaid/pitaya/v2/conn/message"
+	"github.com/alkaid/pitaya/v2/protos"
+	"github.com/alkaid/pitaya/v2/route"
 )
 
 var (

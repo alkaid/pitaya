@@ -5,7 +5,7 @@ import (
 	"net"
 	"net/netip"
 
-	"github.com/topfreegames/pitaya/v2/protos"
+	"github.com/alkaid/pitaya/v2/protos"
 )
 
 // NetworkEntity represent low-level network instance

@@ -3,9 +3,9 @@ package services
 import (
 	"context"
 
-	"github.com/topfreegames/pitaya/v2"
-	"github.com/topfreegames/pitaya/v2/component"
-	"github.com/topfreegames/pitaya/v2/examples/demo/worker/protos"
+	"github.com/alkaid/pitaya/v2"
+	"github.com/alkaid/pitaya/v2/component"
+	"github.com/alkaid/pitaya/v2/examples/demo/worker/protos"
 	"google.golang.org/protobuf/proto"
 )
 

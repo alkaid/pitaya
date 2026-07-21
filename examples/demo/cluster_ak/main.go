@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/topfreegames/pitaya/v2"
-	"github.com/topfreegames/pitaya/v2/acceptor"
-	"github.com/topfreegames/pitaya/v2/component"
-	"github.com/topfreegames/pitaya/v2/config"
-	"github.com/topfreegames/pitaya/v2/examples/demo/cluster_ak/services"
-	"github.com/topfreegames/pitaya/v2/groups"
-	"github.com/topfreegames/pitaya/v2/serialize/protobuf"
+	"github.com/alkaid/pitaya/v2"
+	"github.com/alkaid/pitaya/v2/acceptor"
+	"github.com/alkaid/pitaya/v2/component"
+	"github.com/alkaid/pitaya/v2/config"
+	"github.com/alkaid/pitaya/v2/examples/demo/cluster_ak/services"
+	"github.com/alkaid/pitaya/v2/groups"
+	"github.com/alkaid/pitaya/v2/serialize/protobuf"
 )
 
 func configureBackend() {

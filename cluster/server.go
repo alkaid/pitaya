@@ -24,7 +24,7 @@ import (
 	"encoding/json"
 	"os"
 
-	"github.com/topfreegames/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/logger"
 	"go.uber.org/zap"
 )
 

@@ -27,18 +27,18 @@ import (
 	"strconv"
 
 	"github.com/pkg/errors"
-	"github.com/topfreegames/pitaya/v2/util"
+	"github.com/alkaid/pitaya/v2/util"
 
-	"github.com/topfreegames/pitaya/v2/co"
+	"github.com/alkaid/pitaya/v2/co"
 
-	"github.com/topfreegames/pitaya/v2/cluster"
-	"github.com/topfreegames/pitaya/v2/component"
-	"github.com/topfreegames/pitaya/v2/constants"
-	"github.com/topfreegames/pitaya/v2/logger"
-	"github.com/topfreegames/pitaya/v2/protos"
-	"github.com/topfreegames/pitaya/v2/route"
-	"github.com/topfreegames/pitaya/v2/service"
-	"github.com/topfreegames/pitaya/v2/session"
+	"github.com/alkaid/pitaya/v2/cluster"
+	"github.com/alkaid/pitaya/v2/component"
+	"github.com/alkaid/pitaya/v2/constants"
+	"github.com/alkaid/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/protos"
+	"github.com/alkaid/pitaya/v2/route"
+	"github.com/alkaid/pitaya/v2/service"
+	"github.com/alkaid/pitaya/v2/session"
 	"go.uber.org/zap"
 )
 

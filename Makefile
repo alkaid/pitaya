@@ -22,12 +22,12 @@ setup: init-submodules
 
 build-cli:
 	@$(MKFOLDER)
-	@go build -o build/$(BIN) github.com/topfreegames/pitaya/v2/pitaya-cli
+	@go build -o build/$(BIN) github.com/alkaid/pitaya/pitaya-cli/v2
 	@echo "build pitaya-cli at ./build/$(BIN)"
 
 build-k6-extension:
 	@$(MKFOLDER)
-	@xk6 build --with github.com/topfreegames/xk6-pitaya=./xk6-pitaya/ --with github.com/topfreegames/pitaya/v2=./ --with google.golang.org/grpc=google.golang.org/grpc@v1.54.1 --output ./build/$(XK6_BIN)
+	@xk6 build --with github.com/alkaid/pitaya/xk6-pitaya=./xk6-pitaya/ --with github.com/alkaid/pitaya/v2=./ --with google.golang.org/grpc=google.golang.org/grpc@v1.54.1 --output ./build/$(XK6_BIN)
 	@echo "build pitaya k6 extension at ./build/$(XK6_BIN)"
 
 init-submodules:
@@ -190,32 +190,32 @@ test-coverage-func coverage-func: test-coverage merge-profiles
 mocks: agent-mock session-mock networkentity-mock pitaya-mock serializer-mock metrics-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock
 
 agent-mock:
-	@mockgen github.com/topfreegames/pitaya/v2/agent Agent,AgentFactory | sed 's/mock_agent/mocks/' > agent/mocks/agent.go
+	@mockgen github.com/alkaid/pitaya/v2/agent Agent,AgentFactory | sed 's/mock_agent/mocks/' > agent/mocks/agent.go
 
 session-mock:
-	@mockgen github.com/topfreegames/pitaya/v2/session Session,SessionPool | sed 's/mock_session/mocks/' > session/mocks/session.go
+	@mockgen github.com/alkaid/pitaya/v2/session Session,SessionPool | sed 's/mock_session/mocks/' > session/mocks/session.go
 
 networkentity-mock:
-	@mockgen github.com/topfreegames/pitaya/v2/networkentity NetworkEntity | sed 's/mock_networkentity/mocks/' > networkentity/mocks/networkentity.go
+	@mockgen github.com/alkaid/pitaya/v2/networkentity NetworkEntity | sed 's/mock_networkentity/mocks/' > networkentity/mocks/networkentity.go
 
 pitaya-mock:
-	@mockgen github.com/topfreegames/pitaya/v2 Pitaya | sed 's/mock_v2/mocks/' > mocks/app.go
+	@mockgen github.com/alkaid/pitaya/v2 Pitaya | sed 's/mock_v2/mocks/' > mocks/app.go
 
 metrics-mock:
-	@mockgen github.com/topfreegames/pitaya/v2/metrics Reporter | sed 's/mock_metrics/mocks/' > metrics/mocks/reporter.go
-	@mockgen github.com/topfreegames/pitaya/v2/metrics Client | sed 's/mock_metrics/mocks/' > metrics/mocks/statsd_reporter.go
+	@mockgen github.com/alkaid/pitaya/v2/metrics Reporter | sed 's/mock_metrics/mocks/' > metrics/mocks/reporter.go
+	@mockgen github.com/alkaid/pitaya/v2/metrics Client | sed 's/mock_metrics/mocks/' > metrics/mocks/statsd_reporter.go
 
 serializer-mock:
-	@mockgen github.com/topfreegames/pitaya/v2/serialize Serializer | sed 's/mock_serialize/mocks/' > serialize/mocks/serializer.go
+	@mockgen github.com/alkaid/pitaya/v2/serialize Serializer | sed 's/mock_serialize/mocks/' > serialize/mocks/serializer.go
 
 acceptor-mock:
-	@mockgen github.com/topfreegames/pitaya/v2/acceptor PlayerConn,Acceptor | sed 's/mock_acceptor/mocks/' > mocks/acceptor.go
+	@mockgen github.com/alkaid/pitaya/v2/acceptor PlayerConn,Acceptor | sed 's/mock_acceptor/mocks/' > mocks/acceptor.go
 
 message-mock:
-	@mockgen github.com/topfreegames/pitaya/v2/conn/message Encoder | sed 's/mock_message/mocks/' > conn/message/mocks/message_encoder.go
+	@mockgen github.com/alkaid/pitaya/v2/conn/message Encoder | sed 's/mock_message/mocks/' > conn/message/mocks/message_encoder.go
 
 protos-client-mock:
-	@mockgen github.com/topfreegames/pitaya/v2/protos PitayaClient,PitayaServer  | sed 's/mock_protos/mocks/' > protos/mocks/pitaya.go
+	@mockgen github.com/alkaid/pitaya/v2/protos PitayaClient,PitayaServer  | sed 's/mock_protos/mocks/' > protos/mocks/pitaya.go
 
 cluster-mock:
 	@mockgen -source=cluster/cluster.go | sed 's/mock_cluster/mocks/' > cluster/mocks/cluster.go

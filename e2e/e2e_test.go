@@ -31,9 +31,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
-	"github.com/topfreegames/pitaya/v2/client"
-	"github.com/topfreegames/pitaya/v2/conn/message"
-	"github.com/topfreegames/pitaya/v2/helpers"
+	"github.com/alkaid/pitaya/v2/client"
+	"github.com/alkaid/pitaya/v2/conn/message"
+	"github.com/alkaid/pitaya/v2/helpers"
 )
 
 var update = flag.Bool("update", false, "update server binary")

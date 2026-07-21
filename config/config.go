@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
-	"github.com/topfreegames/pitaya/v2/metrics/models"
+	"github.com/alkaid/pitaya/v2/metrics/models"
 )
 
 // PitayaConfig provides all the configuration for a pitaya app

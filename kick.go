@@ -22,13 +22,13 @@ package pitaya
 
 import (
 	"context"
-	"github.com/topfreegames/pitaya/v2/session"
+	"github.com/alkaid/pitaya/v2/session"
 
 	"go.uber.org/zap"
 
-	"github.com/topfreegames/pitaya/v2/constants"
-	"github.com/topfreegames/pitaya/v2/logger"
-	"github.com/topfreegames/pitaya/v2/protos"
+	"github.com/alkaid/pitaya/v2/constants"
+	"github.com/alkaid/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/protos"
 )
 
 // SendKickToUsers sends kick to an user array

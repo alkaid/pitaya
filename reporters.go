@@ -1,10 +1,10 @@
 package pitaya
 
 import (
-	"github.com/topfreegames/pitaya/v2/config"
-	"github.com/topfreegames/pitaya/v2/logger"
-	"github.com/topfreegames/pitaya/v2/metrics"
-	"github.com/topfreegames/pitaya/v2/metrics/models"
+	"github.com/alkaid/pitaya/v2/config"
+	"github.com/alkaid/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/metrics"
+	"github.com/alkaid/pitaya/v2/metrics/models"
 	"go.uber.org/zap"
 )
 

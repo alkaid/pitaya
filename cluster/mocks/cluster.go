@@ -9,11 +9,11 @@ import (
 	reflect "reflect"
 
 	gomock "github.com/golang/mock/gomock"
-	cluster "github.com/topfreegames/pitaya/v2/cluster"
-	message "github.com/topfreegames/pitaya/v2/conn/message"
-	protos "github.com/topfreegames/pitaya/v2/protos"
-	route "github.com/topfreegames/pitaya/v2/route"
-	session "github.com/topfreegames/pitaya/v2/session"
+	cluster "github.com/alkaid/pitaya/v2/cluster"
+	message "github.com/alkaid/pitaya/v2/conn/message"
+	protos "github.com/alkaid/pitaya/v2/protos"
+	route "github.com/alkaid/pitaya/v2/route"
+	session "github.com/alkaid/pitaya/v2/session"
 )
 
 // MockRPCServer is a mock of RPCServer interface.

@@ -5,7 +5,7 @@ import (
 	"sync"
 
 	validator "github.com/go-playground/validator/v10"
-	"github.com/topfreegames/pitaya/v2/route"
+	"github.com/alkaid/pitaya/v2/route"
 )
 
 // DefaultValidator is the default arguments validator for handlers

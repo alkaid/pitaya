@@ -25,8 +25,8 @@ import (
 	"errors"
 	"reflect"
 
-	"github.com/topfreegames/pitaya/v2/conn/message"
-	"github.com/topfreegames/pitaya/v2/route"
+	"github.com/alkaid/pitaya/v2/conn/message"
+	"github.com/alkaid/pitaya/v2/route"
 	"google.golang.org/protobuf/proto"
 )
 

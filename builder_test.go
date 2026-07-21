@@ -24,8 +24,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/topfreegames/pitaya/v2/acceptor"
-	"github.com/topfreegames/pitaya/v2/config"
+	"github.com/alkaid/pitaya/v2/acceptor"
+	"github.com/alkaid/pitaya/v2/config"
 )
 
 func TestPostBuildHooks(t *testing.T) {

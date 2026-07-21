@@ -2,14 +2,14 @@ package co
 
 import (
 	"context"
-	"github.com/topfreegames/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/logger"
 	"time"
 
 	"github.com/alkaid/goerrors/errors"
-	"github.com/panjf2000/ants/v2"
-	"github.com/topfreegames/pitaya/v2/config"
-	"github.com/topfreegames/pitaya/v2/metrics"
-	"github.com/topfreegames/pitaya/v2/util"
+	"github.com/alkaid/ants/v2"
+	"github.com/alkaid/pitaya/v2/config"
+	"github.com/alkaid/pitaya/v2/metrics"
+	"github.com/alkaid/pitaya/v2/util"
 	"go.uber.org/zap"
 	"golang.org/x/exp/slices"
 )

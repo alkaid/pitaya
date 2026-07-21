@@ -24,12 +24,12 @@ import (
 	"fmt"
 	"net"
 
-	"github.com/topfreegames/pitaya/v2/constants"
+	"github.com/alkaid/pitaya/v2/constants"
 	"google.golang.org/grpc"
 
-	"github.com/topfreegames/pitaya/v2/config"
-	"github.com/topfreegames/pitaya/v2/metrics"
-	"github.com/topfreegames/pitaya/v2/protos"
+	"github.com/alkaid/pitaya/v2/config"
+	"github.com/alkaid/pitaya/v2/metrics"
+	"github.com/alkaid/pitaya/v2/protos"
 )
 
 // GRPCServer rpc server struct

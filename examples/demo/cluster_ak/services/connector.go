@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/topfreegames/pitaya/v2/component"
-	"github.com/topfreegames/pitaya/v2/examples/demo/cluster_ak/protos"
+	"github.com/alkaid/pitaya/v2/component"
+	"github.com/alkaid/pitaya/v2/examples/demo/cluster_ak/protos"
 )
 
 // ConnectorRemote is a remote that will receive rpc's

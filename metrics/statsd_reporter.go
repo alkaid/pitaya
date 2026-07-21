@@ -23,13 +23,13 @@ package metrics
 import (
 	"fmt"
 
-	"github.com/topfreegames/pitaya/v2/constants"
+	"github.com/alkaid/pitaya/v2/constants"
 
 	"go.uber.org/zap"
 
 	"github.com/DataDog/datadog-go/statsd"
-	"github.com/topfreegames/pitaya/v2/config"
-	"github.com/topfreegames/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/config"
+	"github.com/alkaid/pitaya/v2/logger"
 )
 
 // Client is the interface to required dogstatsd functions

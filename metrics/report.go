@@ -27,11 +27,11 @@ import (
 	"time"
 
 	"github.com/alkaid/goerrors/apierrors"
-	"github.com/topfreegames/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/logger"
 
-	"github.com/topfreegames/pitaya/v2/constants"
+	"github.com/alkaid/pitaya/v2/constants"
 
-	pcontext "github.com/topfreegames/pitaya/v2/context"
+	pcontext "github.com/alkaid/pitaya/v2/context"
 )
 
 // ReportTimingFromCtx reports the latency from the context
