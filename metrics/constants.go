@@ -30,4 +30,16 @@ var (
 	ExceededRateLimiting = "exceeded_rate_limiting"
 	// PoolGoDeadlines 线程池中超时goroutine的数量
 	PoolGoDeadlines = "pool_go_deadlines"
+	// PoolWorkers reports managed, escaped, and total workers in a stateful pool.
+	PoolWorkers = "pool_workers"
+	// PoolWaitingTasks reports Submit calls currently blocked by a stateful pool.
+	PoolWaitingTasks = "pool_waiting_tasks"
+	// PoolEscapeBudgetLimit reports the global and per-ID escape limits.
+	PoolEscapeBudgetLimit = "pool_escape_budget_limit"
+	// PoolEscapeBudgetExhausted reports how many IDs are blocked by each escape budget.
+	PoolEscapeBudgetExhausted = "pool_escape_budget_exhausted"
+	// PoolEscapeEventsDropped reports the lifetime number of dropped escape events.
+	PoolEscapeEventsDropped = "pool_escape_events_dropped"
+	// PoolEscapeEvents counts stateful-pool escape transitions.
+	PoolEscapeEvents = "pool_escape_events_total"
 )

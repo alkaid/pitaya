@@ -2,11 +2,12 @@ package co
 
 import (
 	"context"
-	"github.com/alkaid/pitaya/v2/logger"
 	"time"
 
-	"github.com/alkaid/goerrors/errors"
+	"github.com/alkaid/pitaya/v2/logger"
+
 	"github.com/alkaid/ants/v2"
+	"github.com/alkaid/goerrors/errors"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/metrics"
 	"github.com/alkaid/pitaya/v2/util"
@@ -15,7 +16,8 @@ import (
 )
 
 const (
-	DefaultStatefulPoolExpire     = time.Minute * 10
+	DefaultStatefulPoolExpire     = time.Minute * 23
+	DefaultRunningTaskTimeout     = time.Minute * 10
 	DefaultStatefulPoolTaskBuffer = 100
 )
 
@@ -35,6 +37,9 @@ func NewStatefulPool(config config.GoPool, reporters []metrics.Reporter, options
 	if config.Expire == 0 {
 		config.Expire = DefaultStatefulPoolExpire
 	}
+	if config.RunningTaskTimeout == 0 {
+		config.RunningTaskTimeout = DefaultRunningTaskTimeout
+	}
 	if config.TaskBuffer == 0 {
 		config.TaskBuffer = DefaultStatefulPoolTaskBuffer
 	}
@@ -44,6 +49,9 @@ func NewStatefulPool(config config.GoPool, reporters []metrics.Reporter, options
 	options = append(options,
 		ants.WithTaskBuffer(config.TaskBuffer),
 		ants.WithExpiryDuration(config.Expire),
+		ants.WithRunningTaskTimeout(config.RunningTaskTimeout),
+		ants.WithMaxEscapedWorkersPerID(10),
+		ants.WithMaxEscapedWorkers(ants.DefaultAntsPoolSize/4),
 		ants.WithDisablePurgeRunning(config.DisablePurgeRunning),
 		ants.WithDisablePurge(config.DisablePurge))
 	p, err := ants.NewPoolWithID(ants.DefaultAntsPoolSize, options...)

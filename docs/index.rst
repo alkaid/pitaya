@@ -13,6 +13,7 @@ Welcome to Pitaya's documentation!
    overview
    features
    communication
+   actor-keyed-executor
    configuration
    API
    cli

@@ -25,16 +25,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/abiosoft/ishell/v2"
+	"github.com/alkaid/pitaya/v2/client"
 	"github.com/mitchellh/go-homedir"
-	"github.com/sirupsen/logrus"
-	"github.com/topfreegames/pitaya/v2/client"
 )
 
 func protoClient(log Log, addr string) error {
 	log.Println("Using protobuf client")
-	protoclient := client.NewProto(docsString, logrus.InfoLevel)
+	protoclient := client.NewProto(docsString)
 	pClient = protoclient
 
 	for k, v := range pushInfo {
@@ -50,20 +50,18 @@ func protoClient(log Log, addr string) error {
 }
 
 func tryConnect(addr string) error {
-	if err := pClient.ConnectToWS(addr, "", &tls.Config{
-		InsecureSkipVerify: true,
-	}); err != nil {
-		if err := pClient.ConnectToWS(addr, ""); err != nil {
-			if err := pClient.ConnectTo(addr, &tls.Config{
-				InsecureSkipVerify: true,
-			}); err != nil {
-				if err := pClient.ConnectTo(addr); err != nil {
-					return err
-				}
-			}
+	tlsConfig := &tls.Config{InsecureSkipVerify: true}
+	if strings.Contains(addr, "://") {
+		return pClient.ConnectTo(addr, tlsConfig)
+	}
+
+	for _, uri := range []string{"wss://" + addr, "ws://" + addr, "tls://" + addr, "tcp://" + addr} {
+		if err := pClient.ConnectTo(uri, tlsConfig); err == nil {
+			return nil
 		}
 	}
-	return nil
+
+	return fmt.Errorf("failed to connect to %s", addr)
 }
 
 func readServerMessages(callback func(data []byte)) {

@@ -7,10 +7,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/dop251/goja"
-	"github.com/sirupsen/logrus"
-	pitayaclient "github.com/topfreegames/pitaya/v2/client"
-	"github.com/topfreegames/pitaya/v2/session"
+	pitayaclient "github.com/alkaid/pitaya/v2/client"
+	"github.com/alkaid/pitaya/v2/session"
+	"github.com/grafana/sobek"
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modules"
 )
@@ -63,7 +62,7 @@ func (mi *ModuleInstance) Exports() modules.Exports {
 // - handshakeData: the handshake data to send to the server
 // - requestTimeoutMs: the timeout for requests in milliseconds
 // - logLevel: the log level to use
-func (mi *ModuleInstance) NewClient(call goja.ConstructorCall) *goja.Object {
+func (mi *ModuleInstance) NewClient(call sobek.ConstructorCall) *sobek.Object {
 	rt := mi.vu.Runtime()
 
 	var optionsArg map[string]interface{}
@@ -87,7 +86,7 @@ func (mi *ModuleInstance) NewClient(call goja.ConstructorCall) *goja.Object {
 		metrics:   mi.metrics,
 	}
 
-	client.client = pitayaclient.New(logrus.InfoLevel)
+	client.client = pitayaclient.New(client.timeout)
 	client.client.SetClientHandshakeData(opts.HandshakeData)
 
 	return rt.ToValue(client).ToObject(rt)

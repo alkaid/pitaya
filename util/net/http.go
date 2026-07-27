@@ -67,8 +67,7 @@ func JoinPreservingTrailingSlash(elem ...string) string {
 
 // IsTimeout returns true if the given error is a network timeout error
 func IsTimeout(err error) bool {
-	var neterr net.Error
-	if errors.As(err, &neterr) {
+	if neterr, ok := errors.AsType[net.Error](err); ok {
 		return neterr != nil && neterr.Timeout()
 	}
 	return false
@@ -84,8 +83,7 @@ func IsProbableEOF(err error) bool {
 	if err == nil {
 		return false
 	}
-	var uerr *url.Error
-	if errors.As(err, &uerr) {
+	if uerr, ok := errors.AsType[*url.Error](err); ok {
 		err = uerr.Err
 	}
 	msg := err.Error()

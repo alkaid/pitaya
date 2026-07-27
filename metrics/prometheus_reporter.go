@@ -29,11 +29,11 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/metrics/models"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var (
@@ -162,6 +162,72 @@ func (p *PrometheusReporter) registerMetrics(
 			ConstLabels: constLabels,
 		},
 		append([]string{"route", "pool", "second"}, additionalLabelsKeys...),
+	)
+
+	p.gaugeReportersMap[PoolWorkers] = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace:   "pitaya",
+			Subsystem:   "gopool",
+			Name:        PoolWorkers,
+			Help:        "the number of managed, escaped, and total workers in a stateful pool",
+			ConstLabels: constLabels,
+		},
+		append([]string{"pool", "state"}, additionalLabelsKeys...),
+	)
+
+	p.gaugeReportersMap[PoolWaitingTasks] = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace:   "pitaya",
+			Subsystem:   "gopool",
+			Name:        PoolWaitingTasks,
+			Help:        "the number of Submit calls currently blocked by a stateful pool",
+			ConstLabels: constLabels,
+		},
+		append([]string{"pool"}, additionalLabelsKeys...),
+	)
+
+	p.gaugeReportersMap[PoolEscapeBudgetLimit] = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace:   "pitaya",
+			Subsystem:   "gopool",
+			Name:        PoolEscapeBudgetLimit,
+			Help:        "the configured global and per-ID escape-worker limits",
+			ConstLabels: constLabels,
+		},
+		append([]string{"pool", "scope"}, additionalLabelsKeys...),
+	)
+
+	p.gaugeReportersMap[PoolEscapeBudgetExhausted] = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace:   "pitaya",
+			Subsystem:   "gopool",
+			Name:        PoolEscapeBudgetExhausted,
+			Help:        "the number of IDs whose replacement is blocked by an escape budget",
+			ConstLabels: constLabels,
+		},
+		append([]string{"pool", "scope"}, additionalLabelsKeys...),
+	)
+
+	p.gaugeReportersMap[PoolEscapeEventsDropped] = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace:   "pitaya",
+			Subsystem:   "gopool",
+			Name:        PoolEscapeEventsDropped,
+			Help:        "the lifetime number of best-effort escape events dropped by a stateful pool",
+			ConstLabels: constLabels,
+		},
+		append([]string{"pool"}, additionalLabelsKeys...),
+	)
+
+	p.countReportersMap[PoolEscapeEvents] = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace:   "pitaya",
+			Subsystem:   "gopool",
+			Name:        PoolEscapeEvents,
+			Help:        "the number of stateful-pool escape transitions",
+			ConstLabels: constLabels,
+		},
+		append([]string{"pool", "event", "reason"}, additionalLabelsKeys...),
 	)
 
 	// ProcessDelay summary

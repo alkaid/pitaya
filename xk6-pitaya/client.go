@@ -8,10 +8,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dop251/goja"
-	pitayaclient "github.com/topfreegames/pitaya/v2/client"
-	pitayamessage "github.com/topfreegames/pitaya/v2/conn/message"
-	"github.com/topfreegames/pitaya/v2/session"
+	pitayaclient "github.com/alkaid/pitaya/v2/client"
+	pitayamessage "github.com/alkaid/pitaya/v2/conn/message"
+	"github.com/alkaid/pitaya/v2/session"
+	"github.com/grafana/sobek"
 	"go.k6.io/k6/js/modules"
 	"go.k6.io/k6/metrics"
 )
@@ -61,7 +61,7 @@ func (c *Client) IsConnected() bool {
 // ConsumePush will return a promise that will be resolved when a push is received on the given route.
 // The promise will be rejected if the timeout is reached before a push is received.
 // The promise will be resolved with the push data.
-func (c *Client) ConsumePush(route string, timeoutMs int) *goja.Promise {
+func (c *Client) ConsumePush(route string, timeoutMs int) *sobek.Promise {
 	promise, resolve, reject := c.makeHandledPromise()
 	ch := c.getPushChannelForRoute(route)
 	go func() {
@@ -105,7 +105,7 @@ func (c *Client) Notify(route string, msg interface{}) error {
 // msg is the message to send
 // returns a promise that will be resolved when the response is received
 // the promise will be rejected if the timeout is reached before a response is received
-func (c *Client) Request(route string, msg interface{}) *goja.Promise { // TODO: add custom timeout
+func (c *Client) Request(route string, msg interface{}) *sobek.Promise { // TODO: add custom timeout
 	m := msg
 	if m == nil {
 		m = map[string]interface{}{}
@@ -190,7 +190,7 @@ func (c *Client) pushRequestMetrics(route string, responseTime time.Duration, su
 
 // Disconnect disconnects from the server
 func (c *Client) Disconnect() {
-	c.client.Disconnect()
+	c.client.Disconnect(pitayaclient.CloseReasonManual)
 }
 
 func (c *Client) listen() {
@@ -245,7 +245,7 @@ func (c *Client) getPushChannelForRoute(route string) chan []byte {
 // makeHandledPromise will create a promise and return its resolve and reject methods,
 // wrapped in such a way that it will block the eventloop from exiting before they are
 // called even if the promise isn't resolved by the time the current script ends executing.
-func (c *Client) makeHandledPromise() (*goja.Promise, func(interface{}), func(interface{})) {
+func (c *Client) makeHandledPromise() (*sobek.Promise, func(interface{}), func(interface{})) {
 	runtime := c.vu.Runtime()
 	callback := c.vu.RegisterCallback()
 	p, resolve, reject := runtime.NewPromise()

@@ -36,10 +36,10 @@ import (
 
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/alkaid/pitaya/v2/co"
 	"github.com/alkaid/pitaya/v2/pipeline"
 	"github.com/alkaid/pitaya/v2/protos"
+	"github.com/go-redis/redis/v8"
 
 	"github.com/alkaid/pitaya/v2/acceptor"
 	"github.com/alkaid/pitaya/v2/cluster"
@@ -808,7 +808,7 @@ func (app *App) listen() {
 	}
 	// 注册配置重载回调
 	app.RegisterModuleBefore(config.NewConfigModule(app.conf), "configLoader")
-	statefulGoPool := co.NewStatefulPoolsModule(app.config.GoPools, app.metricsReporters)
+	statefulGoPool := co.NewStatefulPoolsModule(app.config.GoPools, app.metricsReporters, app.config.Metrics.Period)
 
 	app.RegisterModuleBefore(statefulGoPool, "statefulGoPool")
 

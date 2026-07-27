@@ -1,7 +1,9 @@
 package co
 
 import (
+	"context"
 	"math"
+	"sync"
 	"time"
 
 	"github.com/alkaid/pitaya/v2/config"
@@ -26,18 +28,22 @@ var builtinPool = []string{
 }
 
 type StatefulPoolsModule struct {
-	reporters []metrics.Reporter
-	pools     map[string]*StatefulPool
-	cfgMap    map[string]config.GoPool
+	reporters     []metrics.Reporter
+	pools         map[string]*StatefulPool
+	cfgMap        map[string]config.GoPool
+	reportPeriod  time.Duration
+	monitorCancel context.CancelFunc
+	monitorWG     sync.WaitGroup
 }
 
 var instance *StatefulPoolsModule
 
-func NewStatefulPoolsModule(poolsCfg map[string]config.GoPool, reporters []metrics.Reporter) *StatefulPoolsModule {
+func NewStatefulPoolsModule(poolsCfg map[string]config.GoPool, reporters []metrics.Reporter, reportPeriod ...time.Duration) *StatefulPoolsModule {
 	module := StatefulPoolsModule{
-		reporters: reporters,
-		pools:     map[string]*StatefulPool{},
-		cfgMap:    poolsCfg,
+		reporters:    reporters,
+		pools:        map[string]*StatefulPool{},
+		cfgMap:       poolsCfg,
+		reportPeriod: resolveStatefulPoolMetricsPeriod(reportPeriod),
 	}
 	for name, pool := range module.cfgMap {
 		pool.Name = name
@@ -71,11 +77,28 @@ func (p *StatefulPoolsModule) Init() error {
 }
 
 func (p *StatefulPoolsModule) AfterInit() {
+	if len(p.reporters) == 0 || p.monitorCancel != nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	p.monitorCancel = cancel
+	for _, pool := range p.pools {
+		p.monitorWG.Go(func() {
+			pool.monitorMetrics(ctx, p.reportPeriod)
+		})
+	}
 }
 
 func (p *StatefulPoolsModule) BeforeShutdown() {
+	if p.monitorCancel != nil {
+		p.monitorCancel()
+	}
 }
 
 func (p *StatefulPoolsModule) Shutdown() error {
+	if p.monitorCancel != nil {
+		p.monitorCancel()
+		p.monitorWG.Wait()
+	}
 	return nil
 }

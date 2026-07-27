@@ -3,8 +3,8 @@ package config
 import (
 	"time"
 
-	"github.com/go-redis/redis/v8"
 	"github.com/alkaid/pitaya/v2/metrics/models"
+	"github.com/go-redis/redis/v8"
 )
 
 // PitayaConfig provides all the configuration for a pitaya app
@@ -83,6 +83,7 @@ type ConfSource struct {
 type GoPool struct {
 	Name                string          // 线程池名
 	Expire              time.Duration   // 线程池回收不使用的goroutine的间隔时长
+	RunningTaskTimeout  time.Duration   // 任务超时逃逸判定阈值
 	DisablePurge        bool            // 是否禁止超时回收
 	DisablePurgeRunning bool            // 是否禁止回收有任务运行中的线程(即使超时)
 	TaskBuffer          int             // 每个worker的队列长度
