@@ -10,6 +10,8 @@ else
 	GREP_CMD := grep -v
 endif
 
+MOCKGEN := go tool mockgen
+
 TESTABLE_PACKAGES = `go list ./... | $(GREP_CMD) examples | $(GREP_CMD) constants | $(GREP_CMD) mocks | $(GREP_CMD) helpers | $(GREP_CMD) interfaces | $(GREP_CMD) protos | $(GREP_CMD) e2e | $(GREP_CMD) benchmark`
 
 init-toolchain:
@@ -187,41 +189,53 @@ test-coverage-func coverage-func: test-coverage merge-profiles
 	@echo "\033[1;34m=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\033[0m"
 	@go tool cover -func=coverage-all.out | egrep -v "100.0[%]"
 
-mocks: agent-mock session-mock networkentity-mock pitaya-mock serializer-mock metrics-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock
+.PHONY: mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
+
+mocks: agent-mock session-mock networkentity-mock pitaya-mock serializer-mock metrics-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 
 agent-mock:
-	@mockgen github.com/alkaid/pitaya/v2/agent Agent,AgentFactory | sed 's/mock_agent/mocks/' > agent/mocks/agent.go
+	@$(MOCKGEN) -destination=agent/mocks/agent.go -package=mocks github.com/alkaid/pitaya/v2/agent Agent,AgentFactory
 
 session-mock:
-	@mockgen github.com/alkaid/pitaya/v2/session Session,SessionPool | sed 's/mock_session/mocks/' > session/mocks/session.go
+	@$(MOCKGEN) -destination=session/mocks/session.go -package=mocks github.com/alkaid/pitaya/v2/session Session,SessionPool
 
 networkentity-mock:
-	@mockgen github.com/alkaid/pitaya/v2/networkentity NetworkEntity | sed 's/mock_networkentity/mocks/' > networkentity/mocks/networkentity.go
+	@$(MOCKGEN) -destination=networkentity/mocks/networkentity.go -package=mocks github.com/alkaid/pitaya/v2/networkentity NetworkEntity
 
 pitaya-mock:
-	@mockgen github.com/alkaid/pitaya/v2 Pitaya | sed 's/mock_v2/mocks/' > mocks/app.go
+	@$(MOCKGEN) -destination=mocks/app.go -package=mocks github.com/alkaid/pitaya/v2 Pitaya
 
 metrics-mock:
-	@mockgen github.com/alkaid/pitaya/v2/metrics Reporter | sed 's/mock_metrics/mocks/' > metrics/mocks/reporter.go
-	@mockgen github.com/alkaid/pitaya/v2/metrics Client | sed 's/mock_metrics/mocks/' > metrics/mocks/statsd_reporter.go
+	@$(MOCKGEN) -destination=metrics/mocks/reporter.go -package=mocks github.com/alkaid/pitaya/v2/metrics Reporter
+	@$(MOCKGEN) -destination=metrics/mocks/statsd_reporter.go -package=mocks github.com/alkaid/pitaya/v2/metrics Client
 
 serializer-mock:
-	@mockgen github.com/alkaid/pitaya/v2/serialize Serializer | sed 's/mock_serialize/mocks/' > serialize/mocks/serializer.go
+	@$(MOCKGEN) -destination=serialize/mocks/serializer.go -package=mocks github.com/alkaid/pitaya/v2/serialize Serializer
 
 acceptor-mock:
-	@mockgen github.com/alkaid/pitaya/v2/acceptor PlayerConn,Acceptor | sed 's/mock_acceptor/mocks/' > mocks/acceptor.go
+	@$(MOCKGEN) -destination=mocks/acceptor.go -package=mocks github.com/alkaid/pitaya/v2/acceptor PlayerConn,Acceptor
 
 message-mock:
-	@mockgen github.com/alkaid/pitaya/v2/conn/message Encoder | sed 's/mock_message/mocks/' > conn/message/mocks/message_encoder.go
+	@$(MOCKGEN) -destination=conn/message/mocks/message_encoder.go -package=mocks github.com/alkaid/pitaya/v2/conn/message Encoder
 
 protos-client-mock:
-	@mockgen github.com/alkaid/pitaya/v2/protos PitayaClient,PitayaServer  | sed 's/mock_protos/mocks/' > protos/mocks/pitaya.go
+	@$(MOCKGEN) -destination=protos/mocks/pitaya.go -package=mocks github.com/alkaid/pitaya/v2/protos PitayaClient,PitayaServer
 
 cluster-mock:
-	@mockgen -source=cluster/cluster.go | sed 's/mock_cluster/mocks/' > cluster/mocks/cluster.go
+	@$(MOCKGEN) -destination=cluster/mocks/cluster.go -package=mocks github.com/alkaid/pitaya/v2/cluster RPCServer,RPCClient,SDListener,RemoteBindingListener,RemoteSessionListener,InfoRetriever
 
 discovery-mock:
-	@mockgen -source=cluster/service_discovery.go | sed 's/mock_cluster/mocks/' > cluster/mocks/service_discovery.go
+	@$(MOCKGEN) -destination=cluster/mocks/service_discovery.go -package=mocks github.com/alkaid/pitaya/v2/cluster ServiceDiscovery
+
+worker-mock:
+	@$(MOCKGEN) -destination=worker/mocks/rpc_job.go -package=mocks github.com/alkaid/pitaya/v2/worker RPCJob
+
+interfaces-mock:
+	@$(MOCKGEN) -destination=interfaces/mocks/interfaces.go -package=mocks github.com/alkaid/pitaya/v2/interfaces Module,BindingStorage
+
+codec-mock:
+	@$(MOCKGEN) -destination=conn/codec/mocks/packet_encoder.go -package=mocks github.com/alkaid/pitaya/v2/conn/codec PacketEncoder
+	@$(MOCKGEN) -destination=conn/codec/mocks/packet_decoder.go -package=mocks github.com/alkaid/pitaya/v2/conn/codec PacketDecoder
 
 build-dev-image:
 	@docker build . -f dev.Dockerfile -t pitaya-dev:latest --build-arg GOPROXY=https://goproxy.io,direct --build-arg GOPRIVATE=git.mycompany.com,github.com/my/private

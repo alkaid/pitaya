@@ -28,10 +28,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang/mock/gomock"
-	"github.com/google/uuid"
-	nats "github.com/nats-io/nats.go"
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
@@ -41,6 +37,10 @@ import (
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/route"
 	sessionmocks "github.com/alkaid/pitaya/v2/session/mocks"
+	"github.com/google/uuid"
+	nats "github.com/nats-io/nats.go"
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 )
 
 func TestNewNatsRPCClient(t *testing.T) {

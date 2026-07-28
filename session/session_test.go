@@ -36,10 +36,10 @@ import (
 	"github.com/alkaid/pitaya/v2/networkentity"
 	"github.com/alkaid/pitaya/v2/networkentity/mocks"
 	"github.com/alkaid/pitaya/v2/protos"
-	"github.com/golang/mock/gomock"
 	"github.com/google/uuid"
 	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 	"google.golang.org/protobuf/proto"
 )
 

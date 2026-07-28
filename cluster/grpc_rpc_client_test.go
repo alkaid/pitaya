@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/golang/mock/gomock"
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
@@ -18,6 +16,8 @@ import (
 	protosmocks "github.com/alkaid/pitaya/v2/protos/mocks"
 	"github.com/alkaid/pitaya/v2/route"
 	sessionmocks "github.com/alkaid/pitaya/v2/session/mocks"
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 	"google.golang.org/grpc"
 )
 

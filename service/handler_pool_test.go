@@ -27,9 +27,6 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/golang/mock/gomock"
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/component"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
@@ -38,6 +35,9 @@ import (
 	"github.com/alkaid/pitaya/v2/route"
 	"github.com/alkaid/pitaya/v2/serialize/mocks"
 	session_mocks "github.com/alkaid/pitaya/v2/session/mocks"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 )
 
 func TestGetHandlerExists(t *testing.T) {

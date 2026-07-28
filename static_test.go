@@ -27,10 +27,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang/mock/gomock"
-	"github.com/google/uuid"
-	"github.com/alkaid/viper"
-	"github.com/stretchr/testify/require"
 	"github.com/alkaid/pitaya/v2/cluster"
 	"github.com/alkaid/pitaya/v2/component"
 	"github.com/alkaid/pitaya/v2/config"
@@ -41,6 +37,10 @@ import (
 	sessionmocks "github.com/alkaid/pitaya/v2/session/mocks"
 	"github.com/alkaid/pitaya/v2/worker"
 	workermocks "github.com/alkaid/pitaya/v2/worker/mocks"
+	"github.com/alkaid/viper"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/runtime/protoiface"
 )

@@ -5,13 +5,13 @@ import (
 	"net"
 	"testing"
 
-	"github.com/golang/mock/gomock"
+	"go.uber.org/mock/gomock"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/helpers"
 	"github.com/alkaid/pitaya/v2/metrics"
 	protosmocks "github.com/alkaid/pitaya/v2/protos/mocks"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestNewGRPCServer(t *testing.T) {

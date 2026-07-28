@@ -32,11 +32,6 @@ import (
 
 	"github.com/alkaid/pitaya/v2/session"
 
-	"github.com/golang/mock/gomock"
-	"github.com/google/uuid"
-	opentracing "github.com/opentracing/opentracing-go"
-	"github.com/alkaid/viper"
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/acceptor"
 	"github.com/alkaid/pitaya/v2/cluster"
 	"github.com/alkaid/pitaya/v2/config"
@@ -49,6 +44,11 @@ import (
 	"github.com/alkaid/pitaya/v2/router"
 	"github.com/alkaid/pitaya/v2/session/mocks"
 	"github.com/alkaid/pitaya/v2/timer"
+	"github.com/alkaid/viper"
+	"github.com/google/uuid"
+	opentracing "github.com/opentracing/opentracing-go"
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 )
 
 var (

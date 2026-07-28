@@ -30,9 +30,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/golang/mock/gomock"
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/assert"
 	codecmocks "github.com/alkaid/pitaya/v2/conn/codec/mocks"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	messagemocks "github.com/alkaid/pitaya/v2/conn/message/mocks"
@@ -46,6 +43,9 @@ import (
 	"github.com/alkaid/pitaya/v2/protos"
 	serializemocks "github.com/alkaid/pitaya/v2/serialize/mocks"
 	"github.com/alkaid/pitaya/v2/session"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 )
 
 type mockAddr struct{}
