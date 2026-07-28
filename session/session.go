@@ -34,17 +34,17 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/alkaid/pitaya/v2/co"
 	"github.com/pkg/errors"
 	"github.com/samber/lo"
-	"github.com/alkaid/pitaya/v2/co"
 
 	"github.com/alkaid/pitaya/v2/util"
 
-	nats "github.com/nats-io/nats.go"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/networkentity"
 	"github.com/alkaid/pitaya/v2/protos"
+	nats "github.com/nats-io/nats.go"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )
@@ -1377,7 +1377,7 @@ func (s *sessionImpl) SendRequest(ctx context.Context, serverID, route string, m
 }
 func (s *sessionImpl) SendRequestToFrontend(ctx context.Context, route string, msg proto.Message) (*protos.Response, error) {
 	if s.frontendID == "" {
-		return nil, errors.New(fmt.Sprintf("frontendID is nil.sid=%d,uid=%s,online=%b,agent=%s,route=%s", s.ID(), s.uid, s.online, s.entity.NetworkEntityName(), route))
+		return nil, errors.New(fmt.Sprintf("frontendID is nil.sid=%d,uid=%s,online=%t,agent=%s,route=%s", s.ID(), s.uid, s.online, s.entity.NetworkEntityName(), route))
 	}
 	return s.SendRequest(ctx, s.frontendID, route, msg)
 }

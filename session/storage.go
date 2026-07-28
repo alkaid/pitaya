@@ -101,6 +101,5 @@ func (r RedisCache) Hmset(key string, fieldsAndValues map[string]string) error {
 
 // HmsetCtx is the implementation of redis hmset command.
 func (r RedisCache) HmsetCtx(ctx context.Context, key string, fieldsAndValues map[string]string) error {
-	vals := make(map[string]interface{}, len(fieldsAndValues))
-	return r.conn.HMSet(ctx, key, vals).Err()
+	return r.conn.HMSet(ctx, key, fieldsAndValues).Err()
 }

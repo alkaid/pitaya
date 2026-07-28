@@ -17,7 +17,7 @@ import (
 	"github.com/nats-io/nats-server/v2/server"
 	gnatsd "github.com/nats-io/nats-server/v2/test"
 	clientv3 "go.etcd.io/etcd/client/v3"
-	"go.etcd.io/etcd/tests/v3/integration"
+	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
 // GetFreePort returns a free port
@@ -62,10 +62,10 @@ func GetTestNatsServer(t *testing.T) *server.Server {
 }
 
 // GetTestEtcd gets a test in memory etcd server
-func GetTestEtcd(t *testing.T) (*integration.ClusterV3, *clientv3.Client) {
+func GetTestEtcd(t *testing.T) (*integration.Cluster, *clientv3.Client) {
 	t.Helper()
-	integration.BeforeTest(t)
-	c := integration.NewClusterV3(t, &integration.ClusterConfig{Size: 1})
+	integration.BeforeTestExternal(t)
+	c := integration.NewCluster(t, &integration.ClusterConfig{Size: 1})
 	cli := c.RandClient()
 	return c, cli
 }
