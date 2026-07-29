@@ -151,9 +151,9 @@ func buildRequest(
 	session session.Session,
 	msg *message.Message,
 	thisServer *Server,
-) (protos.Request, error) {
+) (*protos.Request, error) {
 	var err error
-	req := protos.Request{
+	req := &protos.Request{
 		Type: rpcType,
 		Msg: &protos.Msg{
 			Route: route,

@@ -61,6 +61,28 @@ var (
 	}
 )
 
+func newAppTestBuilder(
+	isFrontend bool,
+	serverType string,
+	serverMode ServerMode,
+	serverMetadata map[string]string,
+	pitayaConfig config.PitayaConfig,
+) *Builder {
+	builder := NewDefaultBuilder(isFrontend, serverType, serverMode, serverMetadata, pitayaConfig)
+	builder.conf = config.NewConfig()
+	return builder
+}
+
+func newAppTestApp(
+	isFrontend bool,
+	serverType string,
+	serverMode ServerMode,
+	serverMetadata map[string]string,
+	pitayaConfig config.PitayaConfig,
+) Pitaya {
+	return newAppTestBuilder(isFrontend, serverType, serverMode, serverMetadata, pitayaConfig).Build()
+}
+
 func TestMain(m *testing.M) {
 	exit := m.Run()
 	os.Exit(exit)
@@ -69,8 +91,14 @@ func TestMain(m *testing.M) {
 func TestNewApp(t *testing.T) {
 	for _, table := range tables {
 		t.Run(table.serverType, func(t *testing.T) {
-			builderConfig := config.NewDefaultPitayaConfig()
-			app := NewDefaultApp(table.isFrontend, table.serverType, table.serverMode, table.serverMetadata, *builderConfig).(*App)
+			builder := NewBuilderWithConfigs(
+				table.isFrontend,
+				table.serverType,
+				table.serverMode,
+				table.serverMetadata,
+				config.NewConfig(table.cfg),
+			)
+			app := builder.Build().(*App)
 			assert.Equal(t, table.isFrontend, app.server.Frontend)
 			assert.Equal(t, table.serverType, app.server.Type)
 			assert.Equal(t, table.serverMode, app.serverMode)
@@ -84,7 +112,7 @@ func TestAddAcceptor(t *testing.T) {
 	for _, table := range tables {
 		t.Run(table.serverType, func(t *testing.T) {
 			builderConfig := config.NewDefaultPitayaConfig()
-			builder := NewDefaultBuilder(table.isFrontend, table.serverType, table.serverMode, table.serverMetadata, *builderConfig)
+			builder := newAppTestBuilder(table.isFrontend, table.serverType, table.serverMode, table.serverMetadata, *builderConfig)
 			builder.AddAcceptor(acc)
 			app := builder.Build().(*App)
 			if table.isFrontend {
@@ -98,32 +126,32 @@ func TestAddAcceptor(t *testing.T) {
 
 func TestGetDieChan(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
+	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
 	assert.Equal(t, app.dieChan, app.GetDieChan())
 }
 
 func TestGetSever(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
+	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
 	assert.Equal(t, app.server, app.GetServer())
 }
 
 func TestGetMetricsReporters(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
+	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
 	assert.Equal(t, app.metricsReporters, app.GetMetricsReporters())
 }
 func TestGetServerByID(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig)
+	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig)
 	s, err := app.GetServerByID("id")
 	assert.Nil(t, s)
-	assert.EqualError(t, constants.ErrNoServerWithID, err.Error())
+	assert.ErrorIs(t, err, constants.ErrNoServerWithID)
 }
 
 func TestGetServersByType(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig)
+	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig)
 	s, err := app.GetServersByType("id")
 	assert.Nil(t, s)
 	assert.EqualError(t, constants.ErrNoServersAvailableOfType, err.Error())
@@ -132,7 +160,7 @@ func TestGetServersByType(t *testing.T) {
 func TestSetHeartbeatInterval(t *testing.T) {
 	inter := 35 * time.Millisecond
 	builderConfig := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
+	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
 	app.SetHeartbeatTime(inter)
 	assert.Equal(t, inter, app.heartbeat)
 }
@@ -154,7 +182,7 @@ func TestInitSysRemotes(t *testing.T) {
 
 func TestSetDictionary(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
+	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
 
 	dict := map[string]uint16{"someroute": 12}
 	err := app.SetDictionary(dict)
@@ -168,7 +196,7 @@ func TestSetDictionary(t *testing.T) {
 
 func TestAddRoute(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
+	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
 	app.router = nil
 	err := app.AddRoute("somesv", func(ctx context.Context, route *route.Route, payload []byte, servers map[string]*cluster.Server, session session.Session) (*cluster.Server, error) {
 		return nil, nil
@@ -190,7 +218,7 @@ func TestAddRoute(t *testing.T) {
 
 func TestShutdown(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
+	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
 	go func() {
 		app.Shutdown()
 	}()
@@ -210,7 +238,7 @@ func TestConfigureDefaultMetricsReporter(t *testing.T) {
 			builderConfig := config.NewDefaultPitayaConfig()
 			builderConfig.Metrics.Prometheus.Enabled = table.enabled
 			builderConfig.Metrics.Statsd.Enabled = table.enabled
-			app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
+			app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
 			// if statsd is enabled there are 2 metricsReporters, prometheus and statsd
 			assert.Equal(t, table.enabled, len(app.metricsReporters) == 2)
 		})
@@ -219,7 +247,7 @@ func TestConfigureDefaultMetricsReporter(t *testing.T) {
 
 func TestDefaultSD(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
+	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
 	assert.NotNil(t, app.serviceDiscovery)
 
 	etcdSD, err := cluster.NewEtcdServiceDiscovery(config.NewDefaultPitayaConfig().Cluster.SD.Etcd, app.server, app.dieChan)
@@ -233,7 +261,7 @@ func TestDefaultRPCServer(t *testing.T) {
 	ctrl := gomock.NewController(t)
 
 	builderConfig := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
+	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
 	assert.NotNil(t, app.rpcServer)
 
 	sessionPool := mocks.NewMockSessionPool(ctrl)
@@ -247,7 +275,7 @@ func TestDefaultRPCServer(t *testing.T) {
 
 func TestDefaultRPCClient(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
+	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
 	assert.NotNil(t, app.rpcClient)
 
 	natsRPCClient, err := cluster.NewNatsRPCClient(config.NewDefaultPitayaConfig().Cluster.RPC.Client.Nats, app.server, nil, app.dieChan)
@@ -261,7 +289,7 @@ func TestStartAndListenStandalone(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
 
 	acc := acceptor.NewTCPAcceptor("0.0.0.0:0")
-	builder := NewDefaultBuilder(true, "testtype", Standalone, map[string]string{}, *builderConfig)
+	builder := newAppTestBuilder(true, "testtype", Standalone, map[string]string{}, *builderConfig)
 	builder.AddAcceptor(acc)
 	app := builder.Build().(*App)
 
@@ -290,7 +318,7 @@ func TestStartAndListenCluster(t *testing.T) {
 	ns := helpers.GetTestNatsServer(t)
 	nsAddr := ns.Addr().String()
 
-	builder := NewDefaultBuilder(true, "testtype", Cluster, map[string]string{}, *config.NewDefaultPitayaConfig())
+	builder := newAppTestBuilder(true, "testtype", Cluster, map[string]string{}, *config.NewDefaultPitayaConfig())
 
 	var err error
 	natsClientConfig := config.NewDefaultPitayaConfig().Cluster.RPC.Client.Nats
@@ -336,7 +364,7 @@ func TestGetSessionFromCtx(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	ss := mocks.NewMockSession(ctrl)
 
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *config.NewDefaultPitayaConfig())
+	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *config.NewDefaultPitayaConfig())
 	ctx := context.WithValue(context.Background(), constants.SessionCtxKey, ss)
 	s := app.GetSessionFromCtx(ctx)
 	assert.Equal(t, ss, s)
@@ -387,178 +415,60 @@ func TestDescriptor(t *testing.T) {
 	assert.EqualError(t, constants.ErrProtodescriptor, err.Error())
 }
 
+func expectedSysDocumentation(pointerNames bool) map[string]interface{} {
+	type remoteTypes struct {
+		input  string
+		output string
+	}
+
+	specs := map[string]remoteTypes{
+		"bindbackendsession":      {"*protos.BindBackendMsg", "*protos.Response"},
+		"bindsession":             {"*protos.BindMsg", "*protos.Response"},
+		"kick":                    {"*protos.KickMsg", "*protos.KickAnswer"},
+		"kickbackend":             {"*protos.BindBackendMsg", "*protos.Response"},
+		"pushsession":             {"*protos.Session", "*protos.Response"},
+		"sessionbound":            {"*protos.BindMsg", "*protos.Response"},
+		"sessionboundbackend":     {"*protos.BindBackendMsg", "*protos.Response"},
+		"sessionboundbackendfork": {"*protos.BindBackendMsg", "*protos.Response"},
+		"sessionboundfork":        {"*protos.BindMsg", "*protos.Response"},
+		"sessionclosed":           {"*protos.KickMsg", "*protos.Response"},
+		"sessionkickedbackend":    {"*protos.BindBackendMsg", "*protos.Response"},
+	}
+	remotes := make(map[string]interface{}, len(specs))
+	for route, types := range specs {
+		input := map[string]interface{}{}
+		output := map[string]interface{}{}
+		if pointerNames {
+			input[types.input] = map[string]interface{}{}
+			output[types.output] = map[string]interface{}{}
+		}
+		remotes["testtype.sys."+route] = map[string]interface{}{
+			"input":  input,
+			"output": []interface{}{output},
+		}
+	}
+	return map[string]interface{}{
+		"handlers": map[string]interface{}{},
+		"remotes":  remotes,
+	}
+}
+
 func TestDocumentation(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
+	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
 	app.startupComponents()
 	doc, err := app.Documentation(false)
 	assert.NoError(t, err)
-	assert.Equal(t, map[string]interface{}{
-		"handlers": map[string]interface{}{},
-		"remotes": map[string]interface{}{
-			"testtype.sys.bindsession": map[string]interface{}{
-				"input": map[string]interface{}{
-					"uid":  "string",
-					"data": "[]byte",
-					"id":   "int64",
-				},
-				"output": []interface{}{
-					map[string]interface{}{
-						"error": map[string]interface{}{
-							"msg":      "string",
-							"code":     "string",
-							"metadata": "map[string]string",
-						},
-						"data": "[]byte",
-					},
-					"error",
-				},
-			},
-			"testtype.sys.kick": map[string]interface{}{
-				"input": map[string]interface{}{
-					"userId": "string",
-				},
-				"output": []interface{}{
-					map[string]interface{}{
-						"kicked": "bool",
-					},
-					"error",
-				},
-			},
-			"testtype.sys.pushsession": map[string]interface{}{
-				"input": map[string]interface{}{
-					"data": "[]byte",
-					"id":   "int64",
-					"uid":  "string",
-				},
-				"output": []interface{}{
-					map[string]interface{}{
-						"error": map[string]interface{}{
-							"code":     "string",
-							"metadata": "map[string]string",
-							"msg":      "string",
-						},
-						"data": "[]byte",
-					},
-					"error",
-				},
-			},
-			"testtype.sys.bindbackendsession": map[string]interface{}{
-				"input": map[string]interface{}{
-					"uid":  "string",
-					"data": "[]byte",
-					"id":   "int64",
-				},
-				"output": []interface{}{
-					map[string]interface{}{
-						"error": map[string]interface{}{
-							"msg":      "string",
-							"code":     "string",
-							"metadata": "map[string]string",
-						},
-						"data": "[]byte",
-					},
-					"error",
-				},
-			},
-		},
-	}, doc)
+	assert.Equal(t, expectedSysDocumentation(false), doc)
 }
 
 func TestDocumentationTrue(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
+	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
 	app.startupComponents()
 	doc, err := app.Documentation(true)
 	assert.NoError(t, err)
-	assert.Equal(t, map[string]interface{}{
-		"remotes": map[string]interface{}{
-			"testtype.sys.bindsession": map[string]interface{}{
-				"input": map[string]interface{}{
-					"*protos.Session": map[string]interface{}{
-						"data": "[]byte",
-						"id":   "int64",
-						"uid":  "string",
-					},
-				},
-				"output": []interface{}{map[string]interface{}{
-					"*protos.Response": map[string]interface{}{
-						"data": "[]byte",
-						"error": map[string]interface{}{
-							"*protos.Error": map[string]interface{}{
-								"code":     "string",
-								"metadata": "map[string]string",
-								"msg":      "string",
-							},
-						},
-					},
-				},
-					"error",
-				},
-			},
-			"testtype.sys.kick": map[string]interface{}{
-				"input": map[string]interface{}{
-					"*protos.KickMsg": map[string]interface{}{
-						"userId": "string",
-					},
-				},
-				"output": []interface{}{map[string]interface{}{
-					"*protos.KickAnswer": map[string]interface{}{
-						"kicked": "bool",
-					},
-				},
-					"error",
-				},
-			},
-			"testtype.sys.pushsession": map[string]interface{}{
-				"input": map[string]interface{}{
-					"*protos.Session": map[string]interface{}{
-						"data": "[]byte",
-						"id":   "int64",
-						"uid":  "string",
-					},
-				},
-				"output": []interface{}{map[string]interface{}{
-					"*protos.Response": map[string]interface{}{
-						"data": "[]byte",
-						"error": map[string]interface{}{
-							"*protos.Error": map[string]interface{}{
-								"code":     "string",
-								"metadata": "map[string]string",
-								"msg":      "string",
-							},
-						},
-					},
-				},
-					"error",
-				},
-			},
-			"testtype.sys.bindbackendsession": map[string]interface{}{
-				"input": map[string]interface{}{
-					"*protos.Session": map[string]interface{}{
-						"data": "[]byte",
-						"id":   "int64",
-						"uid":  "string",
-					},
-				},
-				"output": []interface{}{map[string]interface{}{
-					"*protos.Response": map[string]interface{}{
-						"data": "[]byte",
-						"error": map[string]interface{}{
-							"*protos.Error": map[string]interface{}{
-								"code":     "string",
-								"metadata": "map[string]string",
-								"msg":      "string",
-							},
-						},
-					},
-				},
-					"error",
-				},
-			},
-		},
-		"handlers": map[string]interface{}{},
-	}, doc)
+	assert.Equal(t, expectedSysDocumentation(true), doc)
 }
 
 func TestAddGRPCInfoToMetadata(t *testing.T) {
@@ -586,7 +496,7 @@ func TestAddGRPCInfoToMetadata(t *testing.T) {
 
 func TestStartWorker(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
+	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
 
 	app.StartWorker()
 	assert.True(t, app.worker.Started())
@@ -595,7 +505,7 @@ func TestStartWorker(t *testing.T) {
 func TestRegisterRPCJob(t *testing.T) {
 	t.Run("register_once", func(t *testing.T) {
 		builderConfig := config.NewDefaultPitayaConfig()
-		app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig)
+		app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig)
 		app.StartWorker()
 
 		err := app.RegisterRPCJob(nil)
@@ -604,7 +514,7 @@ func TestRegisterRPCJob(t *testing.T) {
 
 	t.Run("register_twice", func(t *testing.T) {
 		builderConfig := config.NewDefaultPitayaConfig()
-		app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig)
+		app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig)
 		app.StartWorker()
 
 		err := app.RegisterRPCJob(nil)

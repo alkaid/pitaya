@@ -17,6 +17,7 @@ Welcome to Pitaya's documentation!
    communication
    actor-keyed-executor
    configuration
+   logging
    API
    cli
    examples

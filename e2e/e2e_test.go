@@ -1,3 +1,5 @@
+//go:build e2e
+
 // Copyright (c) TFG Co. All Rights Reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -28,12 +30,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/sirupsen/logrus"
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/client"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/helpers"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 )
 
 var update = flag.Bool("update", false, "update server binary")
@@ -71,11 +72,11 @@ func TestHandlerCallToFront(t *testing.T) {
 	sdPrefix := fmt.Sprintf("%s/", uuid.New().String())
 
 	defer helpers.StartServer(t, true, true, "connector", port, sdPrefix, *grpc, false)()
-	c := client.New(logrus.InfoLevel)
+	c := client.New()
 
 	err := c.ConnectTo(fmt.Sprintf("localhost:%d", port))
 	assert.NoError(t, err)
-	defer c.Disconnect()
+	defer c.Disconnect(client.CloseReasonManual)
 
 	for _, table := range tables {
 		t.Run(table.req, func(t *testing.T) {
@@ -94,16 +95,16 @@ func TestGroupFront(t *testing.T) {
 
 	sdPrefix := fmt.Sprintf("%s/", uuid.New().String())
 	defer helpers.StartServer(t, true, true, "connector", port, sdPrefix, *grpc, false)()
-	c1 := client.New(logrus.InfoLevel)
-	c2 := client.New(logrus.InfoLevel)
+	c1 := client.New()
+	c2 := client.New()
 
 	err := c1.ConnectTo(fmt.Sprintf("localhost:%d", port))
 	assert.NoError(t, err)
-	defer c1.Disconnect()
+	defer c1.Disconnect(client.CloseReasonManual)
 
 	err = c2.ConnectTo(fmt.Sprintf("localhost:%d", port))
 	assert.NoError(t, err)
-	defer c2.Disconnect()
+	defer c2.Disconnect(client.CloseReasonManual)
 
 	_, err = c1.SendRequest("connector.testsvc.testbind", []byte{})
 	assert.NoError(t, err)
@@ -142,16 +143,16 @@ func TestKick(t *testing.T) {
 
 	sdPrefix := fmt.Sprintf("%s/", uuid.New().String())
 	defer helpers.StartServer(t, true, true, "connector", port1, sdPrefix, *grpc, false)()
-	c1 := client.New(logrus.InfoLevel)
-	c2 := client.New(logrus.InfoLevel)
+	c1 := client.New()
+	c2 := client.New()
 
 	err := c1.ConnectTo(fmt.Sprintf("localhost:%d", port1))
 	assert.NoError(t, err)
-	defer c1.Disconnect()
+	defer c1.Disconnect(client.CloseReasonManual)
 
 	err = c2.ConnectTo(fmt.Sprintf("localhost:%d", port1))
 	assert.NoError(t, err)
-	defer c2.Disconnect()
+	defer c2.Disconnect(client.CloseReasonManual)
 
 	uid1 := uuid.New().String()
 	_, err = c1.SendRequest("connector.testsvc.testbindid", []byte(uid1))
@@ -174,16 +175,16 @@ func TestSameUIDUserShouldBeKicked(t *testing.T) {
 
 	sdPrefix := fmt.Sprintf("%s/", uuid.New().String())
 	defer helpers.StartServer(t, true, true, "connector", port1, sdPrefix, *grpc, false)()
-	c1 := client.New(logrus.InfoLevel)
-	c2 := client.New(logrus.InfoLevel)
+	c1 := client.New()
+	c2 := client.New()
 
 	err := c1.ConnectTo(fmt.Sprintf("localhost:%d", port1))
 	assert.NoError(t, err)
-	defer c1.Disconnect()
+	defer c1.Disconnect(client.CloseReasonManual)
 
 	err = c2.ConnectTo(fmt.Sprintf("localhost:%d", port1))
 	assert.NoError(t, err)
-	defer c2.Disconnect()
+	defer c2.Disconnect(client.CloseReasonManual)
 
 	uid1 := uuid.New().String()
 	_, err = c1.SendRequest("connector.testsvc.testbindid", []byte(uid1))
@@ -207,16 +208,16 @@ func TestSameUIDUserShouldBeKickedInDifferentServersFromSameType(t *testing.T) {
 	sdPrefix := fmt.Sprintf("%s/", uuid.New().String())
 	defer helpers.StartServer(t, true, true, "connector", port1, sdPrefix, *grpc, false)()
 	defer helpers.StartServer(t, true, true, "connector", port2, sdPrefix, *grpc, false)()
-	c1 := client.New(logrus.InfoLevel)
-	c2 := client.New(logrus.InfoLevel)
+	c1 := client.New()
+	c2 := client.New()
 
 	err := c1.ConnectTo(fmt.Sprintf("localhost:%d", port1))
 	assert.NoError(t, err)
-	defer c1.Disconnect()
+	defer c1.Disconnect(client.CloseReasonManual)
 
 	err = c2.ConnectTo(fmt.Sprintf("localhost:%d", port2))
 	assert.NoError(t, err)
-	defer c2.Disconnect()
+	defer c2.Disconnect(client.CloseReasonManual)
 
 	uid1 := uuid.New().String()
 	go func() {
@@ -245,16 +246,16 @@ func TestSameUIDUserShouldNotBeKickedInDifferentServersFromDiffType(t *testing.T
 	sdPrefix := fmt.Sprintf("%s/", uuid.New().String())
 	defer helpers.StartServer(t, true, true, "connector1", port1, sdPrefix, *grpc, false)()
 	defer helpers.StartServer(t, true, true, "connector2", port2, sdPrefix, *grpc, false)()
-	c1 := client.New(logrus.InfoLevel)
-	c2 := client.New(logrus.InfoLevel)
+	c1 := client.New()
+	c2 := client.New()
 
 	err := c1.ConnectTo(fmt.Sprintf("localhost:%d", port1))
 	assert.NoError(t, err)
-	defer c1.Disconnect()
+	defer c1.Disconnect(client.CloseReasonManual)
 
 	err = c2.ConnectTo(fmt.Sprintf("localhost:%d", port2))
 	assert.NoError(t, err)
-	defer c2.Disconnect()
+	defer c2.Disconnect(client.CloseReasonManual)
 
 	uid1 := uuid.New().String()
 	go func() {
@@ -283,11 +284,11 @@ func TestKickOnBack(t *testing.T) {
 	sdPrefix := fmt.Sprintf("%s/", uuid.New().String())
 	defer helpers.StartServer(t, true, true, "connector", port1, sdPrefix, *grpc, false)()
 	defer helpers.StartServer(t, false, true, "game", 0, sdPrefix, *grpc, false)()
-	c1 := client.New(logrus.DebugLevel)
+	c1 := client.New()
 
 	err := c1.ConnectTo(fmt.Sprintf("localhost:%d", port1))
 	assert.NoError(t, err)
-	defer c1.Disconnect()
+	defer c1.Disconnect(client.CloseReasonManual)
 	go func() {
 		time.Sleep(10 * time.Millisecond)
 		_, err = c1.SendRequest("game.testsvc.testbind", nil)
@@ -313,16 +314,16 @@ func TestPushToUsers(t *testing.T) {
 	defer helpers.StartServer(t, true, true, "connector", port1, sdPrefix, *grpc, false)()
 	port2 := helpers.GetFreePort(t)
 	defer helpers.StartServer(t, true, true, "connector", port2, sdPrefix, *grpc, false)()
-	c1 := client.New(logrus.DebugLevel)
-	c2 := client.New(logrus.DebugLevel)
+	c1 := client.New()
+	c2 := client.New()
 
 	err := c1.ConnectTo(fmt.Sprintf("localhost:%d", port1))
 	assert.NoError(t, err)
-	defer c1.Disconnect()
+	defer c1.Disconnect(client.CloseReasonManual)
 
 	err = c2.ConnectTo(fmt.Sprintf("localhost:%d", port2))
 	assert.NoError(t, err)
-	defer c2.Disconnect()
+	defer c2.Disconnect(client.CloseReasonManual)
 
 	uid1 := uuid.New().String()
 	uid2 := uuid.New().String()
@@ -386,11 +387,11 @@ func TestForwardToBackend(t *testing.T) {
 		{"game.testsvc.testrequestreturnserror", []byte(`woow`), []byte(`{"code":"PIT-555","msg":"somerror"}`)},
 	}
 
-	c := client.New(logrus.InfoLevel)
+	c := client.New()
 
 	err := c.ConnectTo(fmt.Sprintf("localhost:%d", portFront))
 	assert.NoError(t, err)
-	defer c.Disconnect()
+	defer c.Disconnect(client.CloseReasonManual)
 
 	for _, table := range tables {
 		t.Run(table.req, func(t *testing.T) {
@@ -414,16 +415,16 @@ func TestGroupBack(t *testing.T) {
 	defer helpers.StartServer(t, false, true, "game", 0, sdPrefix, *grpc, false)()
 	defer helpers.StartServer(t, true, true, "connector", port1, sdPrefix, *grpc, false)()
 	defer helpers.StartServer(t, true, true, "connector", port2, sdPrefix, *grpc, false)()
-	c1 := client.New(logrus.InfoLevel)
-	c2 := client.New(logrus.InfoLevel)
+	c1 := client.New()
+	c2 := client.New()
 
 	err := c1.ConnectTo(fmt.Sprintf("localhost:%d", port1))
 	assert.NoError(t, err)
-	defer c1.Disconnect()
+	defer c1.Disconnect(client.CloseReasonManual)
 
 	err = c2.ConnectTo(fmt.Sprintf("localhost:%d", port2))
 	assert.NoError(t, err)
-	defer c2.Disconnect()
+	defer c2.Disconnect(client.CloseReasonManual)
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
@@ -470,11 +471,11 @@ func TestUserRPC(t *testing.T) {
 	// set lazy connections
 	defer helpers.StartServer(t, false, true, "game", 0, sdPrefix, *grpc, true)()
 	defer helpers.StartServer(t, true, true, "connector", port1, sdPrefix, *grpc, false)()
-	c1 := client.New(logrus.InfoLevel)
+	c1 := client.New()
 
 	err := c1.ConnectTo(fmt.Sprintf("localhost:%d", port1))
 	assert.NoError(t, err)
-	defer c1.Disconnect()
+	defer c1.Disconnect(client.CloseReasonManual)
 
 	tables := []struct {
 		name  string

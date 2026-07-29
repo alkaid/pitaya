@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"github.com/alkaid/pitaya/v2/session"
-	"os"
 
 	"strings"
 
@@ -76,34 +75,12 @@ func configureFrontend(port int) {
 	}
 }
 
-//func configureJaeger(config *viper.Viper, logger logrus.FieldLogger) {
-//	cfg, err := jaegercfg.FromEnv()
-//	if cfg.ServiceName == "" {
-//		logger.Error("Could not init jaeger tracer without ServiceName, either set environment JAEGER_SERVICE_NAME or cfg.ServiceName = \"my-api\"")
-//		return
-//	}
-//	if err != nil {
-//		logger.Error("Could not parse Jaeger env vars: %s", err.Error())
-//		return
-//	}
-//	options := jaeger.Options{
-//		Disabled:    cfg.Disabled,
-//		Probability: cfg.Sampler.Param,
-//		ServiceName: cfg.ServiceName,
-//	}
-//	jaeger.Configure(options)
-//}
-
 func main() {
 	port := flag.Int("port", 3250, "the port to listen")
 	svType := flag.String("type", "connector", "the server type")
 	isFrontend := flag.Bool("frontend", true, "if server is frontend")
 
 	flag.Parse()
-
-	if os.Getenv("JAEGER_SERVICE_NAME") != "" {
-		//configureJaeger(viper.GetViper(), logrus.New())
-	}
 
 	builder := pitaya.NewDefaultBuilder(*isFrontend, *svType, pitaya.Cluster, map[string]string{}, *config.NewDefaultPitayaConfig())
 	if *isFrontend {

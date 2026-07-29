@@ -1,117 +1,111 @@
 package test
 
 import (
+	"context"
 	"testing"
 
+	"github.com/alkaid/pitaya/v2/networkentity/mocks"
 	"github.com/alkaid/pitaya/v2/session"
-	"github.com/alkaid/pitaya/v2/session/mocks"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 )
 
 func TestStaticGetSessionByUID(t *testing.T) {
-	createSessionMock := func(ctrl *gomock.Controller) session.Session {
-		return mocks.NewMockSession(ctrl)
-	}
-	createNilSession := func(ctrl *gomock.Controller) session.Session {
-		return mocks.NewMockSession(ctrl)
-	}
+	t.Run("Success", func(t *testing.T) {
+		sessionPool := session.NewSessionPool()
+		expectedSession, isNew := sessionPool.NewSession(nil, true)
+		require.True(t, isNew)
 
-	tables := []struct {
-		name    string
-		uid     string
-		factory func(ctrl *gomock.Controller) session.Session
-	}{
-		{"Success", uuid.New().String(), createSessionMock},
-		{"Error", uuid.New().String(), createNilSession},
-	}
+		uid := uuid.New().String()
+		require.NoError(t, expectedSession.Bind(context.Background(), uid, nil, nil))
 
-	for _, row := range tables {
-		t.Run(row.name, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
+		actualSession := sessionPool.GetSessionByUID(uid)
+		require.Equal(t, expectedSession, actualSession)
+	})
 
-			expectedSession := row.factory(ctrl)
-
-			sessionPool := mocks.NewMockSessionPool(ctrl)
-			sessionPool.EXPECT().GetSessionByUID(row.uid).Return(expectedSession)
-
-			session.DefaultSessionPool = sessionPool
-			session := session.GetSessionByUID(row.uid)
-			require.Equal(t, expectedSession, session)
-		})
-	}
+	t.Run("Error", func(t *testing.T) {
+		sessionPool := session.NewSessionPool()
+		require.Nil(t, sessionPool.GetSessionByUID(uuid.New().String()))
+	})
 }
 
 func TestStaticGetSessionByID(t *testing.T) {
-	createSessionMock := func(ctrl *gomock.Controller) session.Session {
-		return mocks.NewMockSession(ctrl)
-	}
-	createNilSession := func(ctrl *gomock.Controller) session.Session {
-		return mocks.NewMockSession(ctrl)
-	}
+	t.Run("Success", func(t *testing.T) {
+		sessionPool := session.NewSessionPool()
+		expectedSession, isNew := sessionPool.NewSession(nil, true)
+		require.True(t, isNew)
 
-	tables := []struct {
-		name    string
-		id      int64
-		factory func(ctrl *gomock.Controller) session.Session
-	}{
-		{"Success", 3, createSessionMock},
-		{"Error", 3, createNilSession},
-	}
+		actualSession := sessionPool.GetSessionByID(expectedSession.ID())
+		require.Equal(t, expectedSession, actualSession)
+	})
 
-	for _, row := range tables {
-		t.Run(row.name, func(t *testing.T) {
-			ctrl := gomock.NewController(t)
-
-			expectedSession := row.factory(ctrl)
-
-			sessionPool := mocks.NewMockSessionPool(ctrl)
-			sessionPool.EXPECT().GetSessionByID(row.id).Return(expectedSession)
-
-			session.DefaultSessionPool = sessionPool
-			session := session.GetSessionByID(row.id)
-			require.Equal(t, expectedSession, session)
-		})
-	}
+	t.Run("Error", func(t *testing.T) {
+		sessionPool := session.NewSessionPool()
+		require.Nil(t, sessionPool.GetSessionByID(3))
+	})
 }
 
 func TestStaticOnSessionBind(t *testing.T) {
-	ctrl := gomock.NewController(t)
+	sessionPool := session.NewSessionPool()
+	expectedSession, isNew := sessionPool.NewSession(nil, true)
+	require.True(t, isNew)
+	callbackData := map[string]string{"source": "test"}
+	called := false
 
-	sessionPool := mocks.NewMockSessionPool(ctrl)
-	sessionPool.EXPECT().OnSessionBind(nil)
+	sessionPool.OnSessionBind(func(_ context.Context, actualSession session.Session, actualCallbackData map[string]string) error {
+		called = true
+		require.Equal(t, expectedSession, actualSession)
+		require.Equal(t, callbackData, actualCallbackData)
+		return nil
+	})
 
-	session.DefaultSessionPool = sessionPool
-	session.OnSessionBind(nil)
+	require.NoError(t, expectedSession.Bind(context.Background(), uuid.New().String(), nil, callbackData))
+	require.True(t, called)
 }
 
 func TestStaticOnAfterSessionBind(t *testing.T) {
-	ctrl := gomock.NewController(t)
+	sessionPool := session.NewSessionPool()
+	expectedSession, isNew := sessionPool.NewSession(nil, true)
+	require.True(t, isNew)
+	callbackData := map[string]string{"source": "test"}
+	called := false
 
-	sessionPool := mocks.NewMockSessionPool(ctrl)
-	sessionPool.EXPECT().OnAfterSessionBind(nil)
+	sessionPool.OnAfterSessionBind(func(_ context.Context, actualSession session.Session, actualCallbackData map[string]string) error {
+		called = true
+		require.Equal(t, expectedSession, actualSession)
+		require.Equal(t, callbackData, actualCallbackData)
+		return nil
+	})
 
-	session.DefaultSessionPool = sessionPool
-	session.OnAfterSessionBind(nil)
+	require.NoError(t, expectedSession.Bind(context.Background(), uuid.New().String(), nil, callbackData))
+	require.True(t, called)
 }
 
 func TestStaticOnSessionClose(t *testing.T) {
-	ctrl := gomock.NewController(t)
+	sessionPool := session.NewSessionPool()
+	called := false
+	sessionPool.OnSessionClose(func(session.Session, map[string]string, session.CloseReason) {
+		called = true
+	})
 
-	sessionPool := mocks.NewMockSessionPool(ctrl)
-	sessionPool.EXPECT().OnSessionClose(nil)
-
-	session.DefaultSessionPool = sessionPool
-	session.OnSessionClose(nil)
+	callbacks := sessionPool.GetSessionCloseCallbacks()
+	require.Len(t, callbacks, 1)
+	callbacks[0](nil, nil, 0)
+	require.True(t, called)
 }
 
 func TestStaticCloseAll(t *testing.T) {
 	ctrl := gomock.NewController(t)
+	entity := mocks.NewMockNetworkEntity(ctrl)
+	entity.EXPECT().Close(nil)
 
-	sessionPool := mocks.NewMockSessionPool(ctrl)
-	sessionPool.EXPECT().CloseAll()
+	sessionPool := session.NewSessionPool()
+	expectedSession, isNew := sessionPool.NewSession(entity, true)
+	require.True(t, isNew)
+	require.EqualValues(t, 1, sessionPool.GetSessionCount())
 
-	session.DefaultSessionPool = sessionPool
-	session.CloseAll()
+	sessionPool.CloseAll()
+	require.Zero(t, sessionPool.GetSessionCount())
+	require.Nil(t, sessionPool.GetSessionByID(expectedSession.ID()))
 }

@@ -21,16 +21,22 @@
 package groups
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/helpers"
-	"go.etcd.io/etcd/tests/v3/integration"
+	"go.etcd.io/etcd/tests/v3/framework/integration"
 )
 
-func setup(t *testing.T) (*integration.ClusterV3, GroupService) {
+func setup(t *testing.T) (*integration.Cluster, GroupService) {
 	cluster, cli := helpers.GetTestEtcd(t)
-	etcdGroupService, err := NewEtcdGroupService(*&config.NewDefaultPitayaConfig().Groups.Etcd, cli)
+
+	clientInstance = nil
+	transactionTimeout = 0
+	etcdOnce = sync.Once{}
+
+	etcdGroupService, err := NewEtcdGroupService(config.NewDefaultPitayaConfig().Groups.Etcd, cli)
 	if err != nil {
 		panic(err)
 	}

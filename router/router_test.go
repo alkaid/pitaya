@@ -65,7 +65,8 @@ func TestDefaultRoute(t *testing.T) {
 
 	router := New()
 
-	retServer := router.defaultRoute(serverType, servers, nil)
+	retServer, err := router.defaultRoute(serverType, servers, nil)
+	assert.NoError(t, err)
 	assert.Equal(t, server, retServer)
 }
 
@@ -92,7 +93,11 @@ func TestRoute(t *testing.T) {
 				Data: []byte{0x01},
 			}, nil)
 			assert.Equal(t, table.server, retServer)
-			assert.Equal(t, table.err, err)
+			if table.err != nil {
+				assert.ErrorIs(t, err, table.err)
+			} else {
+				assert.NoError(t, err)
+			}
 		})
 	}
 }

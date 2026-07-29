@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 
+	"github.com/alkaid/goerrors/apierrors"
 	"github.com/alkaid/pitaya/v2"
 	"github.com/alkaid/pitaya/v2/component"
 	"github.com/alkaid/pitaya/v2/examples/demo/protos"
 	pitayaprotos "github.com/alkaid/pitaya/v2/protos"
+	"google.golang.org/protobuf/types/descriptorpb"
 )
 
 // ConnectorRemote is a remote that will receive rpc's
@@ -66,7 +69,9 @@ func (c *Connector) SetSessionData(ctx context.Context, data *SessionData) (*pro
 	s := c.app.GetSessionFromCtx(ctx)
 	err := s.SetData(data.Data)
 	if err != nil {
-		return nil, pitaya.Error(err, "CN-000", map[string]string{"failed": "set data"})
+		return nil, apierrors.InternalServer("CN-000", err.Error(), "").
+			WithCause(err).
+			WithMetadata(map[string]string{"failed": "set data"})
 	}
 	return reply(200, "success")
 }
@@ -104,15 +109,23 @@ func (c *ConnectorRemote) Docs(ctx context.Context, ddd *pitayaprotos.Doc) (*pit
 }
 
 func (c *ConnectorRemote) Descriptor(ctx context.Context, names *pitayaprotos.ProtoNames) (*pitayaprotos.ProtoDescriptors, error) {
-	descriptors := make([][]byte, len(names.Name))
+	descriptorsByName := make(map[string]*descriptorpb.FileDescriptorProto)
 
-	for i, protoName := range names.Name {
-		desc, err := pitaya.Descriptor(protoName)
-		if err != nil {
+	for _, protoName := range names.Name {
+		if err := pitaya.Descriptor(protoName, descriptorsByName); err != nil {
 			return nil, fmt.Errorf("failed to get descriptor for '%s': %w", protoName, err)
 		}
+	}
 
-		descriptors[i] = desc
+	descriptorNames := make([]string, 0, len(descriptorsByName))
+	for name := range descriptorsByName {
+		descriptorNames = append(descriptorNames, name)
+	}
+	sort.Strings(descriptorNames)
+
+	descriptors := make([]*descriptorpb.FileDescriptorProto, 0, len(descriptorNames))
+	for _, name := range descriptorNames {
+		descriptors = append(descriptors, descriptorsByName[name])
 	}
 
 	return &pitayaprotos.ProtoDescriptors{Desc: descriptors}, nil

@@ -1,57 +1,43 @@
 Tracing
 =======
 
-Pitaya supports tracing using [OpenTracing](http://opentracing.io/).
+Pitaya propagates traces and baggage using [OpenTelemetry](https://opentelemetry.io/).
 
-## Using Jaeger tracing
+## Configure tracing
 
-First set the required environment variables:
-
-```bash
-export JAEGER_DISABLED=false
-export JAEGER_SERVICE_NAME=my-pitaya-server
-export JAEGER_SAMPLER_PARAM=1 #Ajust accordingly
-```
-
-With these environment variables set, you can use the following code to configure Jaeger:
+Start the tracing agent before the application and stop it during shutdown:
 
 ```go
-func configureJaeger(config *viper.Viper, logger logrus.FieldLogger) {
-	cfg, err := jaegercfg.FromEnv()
-	if cfg.ServiceName == "" {
-		logger.Error("Could not init jaeger tracer without ServiceName, either set environment JAEGER_SERVICE_NAME or cfg.ServiceName = \"my-api\"")
-		return
-	}
-	if err != nil {
-		logger.Error("Could not parse Jaeger env vars: %s", err.Error())
-		return
-	}
-	options := jaeger.Options{ // import "github.com/alkaid/pitaya/v2/tracing/jaeger"
-		Disabled:    cfg.Disabled,
-		Probability: cfg.Sampler.Param,
-		ServiceName: cfg.ServiceName,
-	}
-	jaeger.Configure(options)
-}
-```
+import (
+	"context"
 
-Then in your main function:
+	"github.com/alkaid/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/tracing"
+	"go.uber.org/zap"
+)
 
-```go
 func main() {
-    // ...
-    configureJaeger(config, logger)
-    // ...
+	ctx := context.Background()
+	err := tracing.StartAgent(ctx, tracing.Config{
+		Name:     "my-pitaya-server",
+		Endpoint: "localhost:4317",
+		Sampler:  1,
+	})
+	if err != nil {
+		logger.Zap.Fatal("failed to start tracing", zap.Error(err))
+	}
+	defer func() {
+		if err := tracing.StopAgent(); err != nil {
+			logger.Zap.Error("failed to stop tracing", zap.Error(err))
+		}
+	}()
+
+	// Build and start the Pitaya application.
 }
 ```
 
-Ensure to run this Jaeger initialization code in all your server types. Only changing the "JAEGER_SERVICE_NAME" env var between different types.
+`Name` becomes the OpenTelemetry service name. `Sampler` is the trace sampling ratio from `0` to `1`. When `Endpoint` is set, Pitaya exports spans over OTLP/gRPC; leave it empty to install propagation and sampling without an exporter.
 
-## Testing Locally
-```bash
-make run-jaeger-aio
-make run-cluster-example-frontend-tracing
-make run-cluster-example-backend-tracing
-```
+Configure every server type with a distinct service name and point it at an OTLP/gRPC collector such as Jaeger or an OpenTelemetry Collector. The built-in exporter uses an insecure gRPC connection, so keep the collector endpoint on a trusted network.
 
-Then access Jaeger UI at http://localhost:16686
+Additional resource attributes can be supplied through the standard `OTEL_RESOURCE_ATTRIBUTES` environment variable.

@@ -23,9 +23,9 @@ package pitaya
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/acceptor"
 	"github.com/alkaid/pitaya/v2/config"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestPostBuildHooks(t *testing.T) {
@@ -35,7 +35,7 @@ func TestPostBuildHooks(t *testing.T) {
 
 		t.Run("with_post_build_hooks", func(t *testing.T) {
 			called := false
-			builder := NewDefaultBuilder(table.isFrontend, table.serverType, table.serverMode, table.serverMetadata, *builderConfig)
+			builder := newAppTestBuilder(table.isFrontend, table.serverType, table.serverMode, table.serverMetadata, *builderConfig)
 			builder.AddAcceptor(acc)
 			builder.AddPostBuildHook(func(app Pitaya) {
 				called = true
@@ -48,7 +48,7 @@ func TestPostBuildHooks(t *testing.T) {
 
 		t.Run("without_post_build_hooks", func(t *testing.T) {
 			called := false
-			builder := NewDefaultBuilder(table.isFrontend, table.serverType, table.serverMode, table.serverMetadata, *builderConfig)
+			builder := newAppTestBuilder(table.isFrontend, table.serverType, table.serverMode, table.serverMetadata, *builderConfig)
 			builder.AddAcceptor(acc)
 			app := builder.Build()
 

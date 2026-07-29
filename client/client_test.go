@@ -7,13 +7,12 @@ import (
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/helpers"
 	"github.com/alkaid/pitaya/v2/mocks"
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 )
 
 func TestSendRequestShouldTimeout(t *testing.T) {
-	c := New(logrus.InfoLevel, 100*time.Millisecond)
+	c := New(100 * time.Millisecond)
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -35,6 +34,7 @@ func TestSendRequestShouldTimeout(t *testing.T) {
 	pkt, err := c.buildPacket(m)
 	assert.NoError(t, err)
 
+	mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
 	mockConn.EXPECT().Write(pkt)
 
 	c.IncomingMsgChan = make(chan *message.Message, 10)

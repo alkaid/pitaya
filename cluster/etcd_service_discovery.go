@@ -576,7 +576,7 @@ type parallelGetter struct {
 	workChan    chan parallelGetterWork
 }
 
-func newParallelGetter(cli *clientv3.Client, numWorkers int) parallelGetter {
+func newParallelGetter(cli *clientv3.Client, numWorkers int) *parallelGetter {
 	if numWorkers <= 0 {
 		numWorkers = 10
 	}
@@ -588,7 +588,7 @@ func newParallelGetter(cli *clientv3.Client, numWorkers int) parallelGetter {
 		result:     new([]*Server),
 	}
 	p.start()
-	return p
+	return &p
 }
 
 func (p *parallelGetter) start() {

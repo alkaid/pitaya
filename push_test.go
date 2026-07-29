@@ -45,7 +45,7 @@ func TestSendPushToUsersFailsIfErrSerializing(t *testing.T) {
 	mockSerializer := serializemocks.NewMockSerializer(ctrl)
 
 	config := config.NewDefaultPitayaConfig()
-	builder := NewDefaultBuilder(true, "testtype", Cluster, map[string]string{}, *config)
+	builder := newAppTestBuilder(true, "testtype", Cluster, map[string]string{}, *config)
 	builder.Serializer = mockSerializer
 	app := builder.Build()
 
@@ -56,7 +56,7 @@ func TestSendPushToUsersFailsIfErrSerializing(t *testing.T) {
 	mockSerializer.EXPECT().Marshal(data).Return(nil, expectedErr)
 
 	errArr, err := app.SendPushToUsers(route, data, []string{uid}, "test")
-	assert.Equal(t, expectedErr, err)
+	assert.ErrorIs(t, err, expectedErr)
 	assert.Len(t, errArr, 1)
 	assert.Equal(t, errArr[0], uid)
 }
@@ -95,7 +95,7 @@ func TestSendToUsersLocalSession(t *testing.T) {
 			mockSessionPool.EXPECT().GetSessionByUID(uid2).Return(s2).Times(1)
 
 			config := config.NewDefaultPitayaConfig()
-			builder := NewDefaultBuilder(true, "testtype", Standalone, map[string]string{}, *config)
+			builder := newAppTestBuilder(true, "testtype", Standalone, map[string]string{}, *config)
 			builder.SessionPool = mockSessionPool
 			app := builder.Build().(*App)
 			errArr, err := app.SendPushToUsers(route, data, []string{uid1, uid2}, app.server.Type)
@@ -150,7 +150,7 @@ func TestSendToUsersRemoteSession(t *testing.T) {
 			mockSessionPool.EXPECT().GetSessionByUID(uid2).Return(nil).Times(1)
 
 			config := config.NewDefaultPitayaConfig()
-			builder := NewDefaultBuilder(true, "testtype", Cluster, map[string]string{}, *config)
+			builder := newAppTestBuilder(true, "testtype", Cluster, map[string]string{}, *config)
 			builder.SessionPool = mockSessionPool
 			builder.RPCClient = mockRPCClient
 			app := builder.Build()

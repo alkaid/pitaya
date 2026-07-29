@@ -38,7 +38,6 @@ import (
 
 	"github.com/nats-io/nuid"
 
-	gonanoid "github.com/matoous/go-nanoid"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
 	pcontext "github.com/alkaid/pitaya/v2/context"
@@ -47,6 +46,7 @@ import (
 	"github.com/alkaid/pitaya/v2/serialize"
 	"github.com/alkaid/pitaya/v2/serialize/json"
 	"github.com/alkaid/pitaya/v2/serialize/protobuf"
+	gonanoid "github.com/matoous/go-nanoid"
 )
 
 func getLoggerFromArgs(args []reflect.Value) *zap.Logger {
@@ -217,9 +217,8 @@ func LogFieldsFromCtx(ctx context.Context) []zap.Field {
 	return fields
 }
 
-// CtxWithDefaultLogger inserts a default logger on ctx to be used on handlers and remotes.
-// If using logrus, userId, route and requestId will be added as fields.
-// Otherwise the pitaya logger will be used as it is.
+// CtxWithDefaultLogger inserts a logger with userId, route and requestId fields
+// on ctx to be used on handlers and remotes.
 func CtxWithDefaultLogger(ctx context.Context, route, userID string) context.Context {
 	requestID := pcontext.GetFromPropagateCtx(ctx, constants.RequestIDKey)
 	var rID string

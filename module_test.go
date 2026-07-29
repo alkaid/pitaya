@@ -23,9 +23,9 @@ package pitaya
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/component"
 	"github.com/alkaid/pitaya/v2/config"
+	"github.com/stretchr/testify/assert"
 )
 
 type MyMod struct {
@@ -52,7 +52,7 @@ func TestRegisterModule(t *testing.T) {
 	b := &MyMod{}
 
 	config := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *config).(*App)
+	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *config).(*App)
 
 	err := app.RegisterModule(b, "mod")
 	assert.NoError(t, err)
@@ -69,7 +69,7 @@ func TestGetModule(t *testing.T) {
 	b := &MyMod{}
 
 	config := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *config)
+	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *config)
 
 	app.RegisterModule(b, "mod")
 	m, err := app.GetModule("mod")
@@ -82,7 +82,7 @@ func TestGetModule(t *testing.T) {
 
 func TestStartupModules(t *testing.T) {
 	modulesOrder = []string{}
-	app := NewDefaultApp(true, "testtype", Standalone, map[string]string{}, *config.NewDefaultPitayaConfig()).(*App)
+	app := newAppTestApp(true, "testtype", Standalone, map[string]string{}, *config.NewDefaultPitayaConfig()).(*App)
 
 	err := app.RegisterModule(&MyMod{name: "mod1"}, "mod1")
 	assert.NoError(t, err)
@@ -103,7 +103,7 @@ func TestStartupModules(t *testing.T) {
 
 func TestShutdownModules(t *testing.T) {
 	modulesOrder = []string{}
-	app := NewDefaultApp(true, "testtype", Standalone, map[string]string{}, *config.NewDefaultPitayaConfig()).(*App)
+	app := newAppTestApp(true, "testtype", Standalone, map[string]string{}, *config.NewDefaultPitayaConfig()).(*App)
 
 	err := app.RegisterModule(&MyMod{name: "mod1"}, "mod1")
 	assert.NoError(t, err)

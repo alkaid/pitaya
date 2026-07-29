@@ -27,9 +27,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/google/uuid"
-	"github.com/sirupsen/logrus"
-	"github.com/alkaid/viper"
+	"github.com/alkaid/goerrors/apierrors"
 	"github.com/alkaid/pitaya/v2"
 	"github.com/alkaid/pitaya/v2/acceptor"
 	"github.com/alkaid/pitaya/v2/cluster"
@@ -43,6 +41,8 @@ import (
 	"github.com/alkaid/pitaya/v2/serialize/json"
 	"github.com/alkaid/pitaya/v2/serialize/protobuf"
 	"github.com/alkaid/pitaya/v2/session"
+	"github.com/alkaid/viper"
+	"github.com/google/uuid"
 )
 
 // TestSvc service for e2e tests
@@ -87,7 +87,10 @@ func (tr *TestRemoteSvc) RPCTestPtrReturnsPtr(ctx context.Context, req *test.Tes
 
 // RPCTestReturnsError remote for e2e tests
 func (tr *TestRemoteSvc) RPCTestReturnsError(ctx context.Context, data *test.TestRequest) (*test.TestResponse, error) {
-	return nil, pitaya.Error(errors.New("test error"), "PIT-433", map[string]string{"some": "meta"})
+	err := errors.New("test error")
+	return nil, apierrors.InternalServer("PIT-433", err.Error(), "").
+		WithCause(err).
+		WithMetadata(map[string]string{"some": "meta"})
 }
 
 // RPCTestNoArgs remote for e2e tests
@@ -110,9 +113,10 @@ func (t *TestSvc) Init() {
 func (t *TestSvc) TestRequestKickUser(ctx context.Context, userID []byte) (*test.TestResponse, error) {
 	s := t.sessionPool.GetSessionByUID(string(userID))
 	if s == nil {
-		return nil, pitaya.Error(constants.ErrSessionNotFound, "PIT-404")
+		return nil, apierrors.NotFound("PIT-404", constants.ErrSessionNotFound.Error(), "").
+			WithCause(constants.ErrSessionNotFound)
 	}
-	err := s.Kick(ctx)
+	err := s.Kick(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -126,9 +130,10 @@ func (t *TestSvc) TestRequestKickUser(ctx context.Context, userID []byte) (*test
 func (t *TestSvc) TestRequestKickMe(ctx context.Context) (*test.TestResponse, error) {
 	s := t.app.GetSessionFromCtx(ctx)
 	if s == nil {
-		return nil, pitaya.Error(constants.ErrSessionNotFound, "PIT-404")
+		return nil, apierrors.NotFound("PIT-404", constants.ErrSessionNotFound.Error(), "").
+			WithCause(constants.ErrSessionNotFound)
 	}
-	err := s.Kick(ctx)
+	err := s.Kick(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -176,20 +181,21 @@ func (t *TestSvc) TestRequestReceiveReturnsRaw(ctx context.Context, in []byte) (
 
 // TestRequestReturnsError handler for e2e tests
 func (t *TestSvc) TestRequestReturnsError(ctx context.Context, in []byte) ([]byte, error) {
-	return nil, pitaya.Error(errors.New("somerror"), "PIT-555")
+	err := errors.New("somerror")
+	return nil, apierrors.InternalServer("PIT-555", err.Error(), "").WithCause(err)
 }
 
 // TestBind handler for e2e tests
 func (t *TestSvc) TestBind(ctx context.Context) ([]byte, error) {
 	uid := uuid.New().String()
 	s := t.app.GetSessionFromCtx(ctx)
-	err := s.Bind(ctx, uid)
+	err := s.Bind(ctx, uid, nil, nil)
 	if err != nil {
-		return nil, pitaya.Error(err, "PIT-444")
+		return nil, apierrors.InternalServer("PIT-444", err.Error(), "").WithCause(err)
 	}
 	err = t.app.GroupAddMember(ctx, "g1", s.UID())
 	if err != nil {
-		return nil, pitaya.Error(err, "PIT-441")
+		return nil, apierrors.InternalServer("PIT-441", err.Error(), "").WithCause(err)
 	}
 	return []byte("ack"), nil
 }
@@ -197,13 +203,13 @@ func (t *TestSvc) TestBind(ctx context.Context) ([]byte, error) {
 // TestBindID handler for e2e tests
 func (t *TestSvc) TestBindID(ctx context.Context, byteUID []byte) ([]byte, error) {
 	s := t.app.GetSessionFromCtx(ctx)
-	err := s.Bind(ctx, string(byteUID))
+	err := s.Bind(ctx, string(byteUID), nil, nil)
 	if err != nil {
-		return nil, pitaya.Error(err, "PIT-444")
+		return nil, apierrors.InternalServer("PIT-444", err.Error(), "").WithCause(err)
 	}
 	err = t.app.GroupAddMember(ctx, "g1", s.UID())
 	if err != nil {
-		return nil, pitaya.Error(err, "PIT-441")
+		return nil, apierrors.InternalServer("PIT-441", err.Error(), "").WithCause(err)
 	}
 	return []byte("ack"), nil
 }
@@ -272,15 +278,12 @@ func main() {
 	cfg.Set("pitaya.modules.bindingstorage.etcd.endpoints", etcdEndpoints)
 	cfg.Set("pitaya.storage.redis.addrs", redisAddrs)
 	cfg.Set("pitaya.worker.redis.url", redisAddrs)
-
-	l := logrus.New()
-	l.Formatter = &logrus.TextFormatter{}
-	l.SetLevel(logrus.InfoLevel)
+	logLevel := "INFO"
 	if *debug {
-		//l.SetLevel(logrus.DebugLevel)
-		//pitaya.SetLogger(zapw.New(zap.NewDevelopmentConfig()))
+		logLevel = "DEBUG"
 	}
-	//pitaya.SetLogger(logruswrapper.NewWithFieldLogger(l))
+	cfg.Set("pitaya.log.development", *debug)
+	cfg.Set("pitaya.log.level", logLevel)
 
 	app, bs, sessionPool := createApp(*serializer, *port, *grpc, *isFrontend, *svType, pitaya.Cluster, map[string]string{
 		constants.GRPCHostKey: "127.0.0.1",

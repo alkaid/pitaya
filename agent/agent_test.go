@@ -67,6 +67,18 @@ func getCtxWithRequestKeys() context.Context {
 	return pcontext.AddToPropagateCtx(ctx, constants.RouteKey, "route")
 }
 
+func waitForChannelClose(t *testing.T, ch <-chan struct{}, timeout time.Duration) {
+	t.Helper()
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("expected channel to be closed")
+		}
+	case <-time.After(timeout):
+		t.Fatal("timed out waiting for channel to close")
+	}
+}
+
 func TestNewAgent(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
@@ -585,6 +597,7 @@ func TestAgentCloseFailsIfAlreadyClosed(t *testing.T) {
 	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
 	heartbeatAndHandshakeMocks(mockEncoder)
 	mockMessageEncoder := messagemocks.NewMockEncoder(ctrl)
+	mockMessageEncoder.EXPECT().IsCompressionEnabled().AnyTimes()
 	mockSerializer := serializemocks.NewMockSerializer(ctrl)
 	mockSerializer.EXPECT().GetName()
 
@@ -604,6 +617,7 @@ func TestAgentClose(t *testing.T) {
 	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
 	heartbeatAndHandshakeMocks(mockEncoder)
 	mockMessageEncoder := messagemocks.NewMockEncoder(ctrl)
+	mockMessageEncoder.EXPECT().IsCompressionEnabled().AnyTimes()
 	mockSerializer := serializemocks.NewMockSerializer(ctrl)
 	mockSerializer.EXPECT().GetName()
 
@@ -616,32 +630,15 @@ func TestAgentClose(t *testing.T) {
 	err := ag.Session.OnClose(f)
 	assert.NoError(t, err)
 
-	// validate channels are closed
-	stopWrite := false
-	stopHeartbeat := false
-	die := false
-	go func() {
-		for {
-			select {
-			case <-ag.chStopWrite:
-				stopWrite = true
-			case <-ag.chStopHeartbeat:
-				stopHeartbeat = true
-			case <-ag.chDie:
-				die = true
-			}
-		}
-	}()
-
 	mockConn.EXPECT().RemoteAddr()
 	mockConn.EXPECT().Close()
 	err = ag.Close(nil)
 	assert.NoError(t, err)
 	assert.Equal(t, ag.state, constants.StatusClosed)
 	assert.True(t, expected)
-	helpers.ShouldEventuallyReturn(
-		t, func() bool { return stopWrite && stopHeartbeat && die },
-		true, 50*time.Millisecond, 500*time.Millisecond)
+	waitForChannelClose(t, ag.chStopWrite, 500*time.Millisecond)
+	waitForChannelClose(t, ag.chStopHeartbeat, 500*time.Millisecond)
+	waitForChannelClose(t, ag.chDie, 500*time.Millisecond)
 }
 
 func TestAgentRemoteAddr(t *testing.T) {
@@ -932,6 +929,7 @@ func TestAgentHeartbeat(t *testing.T) {
 	heartbeatAndHandshakeMocks(mockEncoder)
 	mockConn := mocks.NewMockPlayerConn(ctrl)
 	mockMessageEncoder := messagemocks.NewMockEncoder(ctrl)
+	mockMessageEncoder.EXPECT().IsCompressionEnabled().AnyTimes()
 	mockSerializer.EXPECT().GetName()
 	sessionPool := session.NewSessionPool()
 	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, 1*time.Second, 1, nil, mockMessageEncoder, nil, sessionPool, "").(*agentImpl)
@@ -940,22 +938,12 @@ func TestAgentHeartbeat(t *testing.T) {
 	mockConn.EXPECT().RemoteAddr().MaxTimes(1)
 	mockConn.EXPECT().Close().MaxTimes(1)
 
-	die := false
-	go func() {
-		for {
-			select {
-			case <-ag.chDie:
-				die = true
-			}
-		}
-	}()
-
 	go ag.heartbeat()
 	for i := 0; i < 2; i++ {
 		pWrite := helpers.ShouldEventuallyReceive(t, ag.chSend, 1100*time.Millisecond).(pendingWrite)
 		assert.Equal(t, pendingWrite{data: hbd}, pWrite)
 	}
-	helpers.ShouldEventuallyReturn(t, func() bool { return die }, true, 500*time.Millisecond, 5*time.Second)
+	waitForChannelClose(t, ag.chDie, 5*time.Second)
 }
 
 func TestAgentHeartbeatExitsIfConnError(t *testing.T) {
@@ -967,6 +955,7 @@ func TestAgentHeartbeatExitsIfConnError(t *testing.T) {
 	heartbeatAndHandshakeMocks(mockEncoder)
 	mockConn := mocks.NewMockPlayerConn(ctrl)
 	mockMessageEncoder := messagemocks.NewMockEncoder(ctrl)
+	mockMessageEncoder.EXPECT().IsCompressionEnabled().AnyTimes()
 	mockSerializer.EXPECT().GetName()
 	sessionPool := session.NewSessionPool()
 	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, 1*time.Second, 1, nil, mockMessageEncoder, nil, sessionPool, "").(*agentImpl)
@@ -975,23 +964,13 @@ func TestAgentHeartbeatExitsIfConnError(t *testing.T) {
 	mockConn.EXPECT().RemoteAddr().MaxTimes(1)
 	mockConn.EXPECT().Close().MaxTimes(1)
 
-	die := false
-	go func() {
-		for {
-			select {
-			case <-ag.chDie:
-				die = true
-			}
-		}
-	}()
-
 	go ag.heartbeat()
 	for i := 0; i < 2; i++ {
 		pWrite := helpers.ShouldEventuallyReceive(t, ag.chSend, 1100*time.Millisecond).(pendingWrite)
 		assert.Equal(t, pendingWrite{data: hbd}, pWrite)
 	}
 
-	helpers.ShouldEventuallyReturn(t, func() bool { return die }, true, 500*time.Millisecond, 2*time.Second)
+	waitForChannelClose(t, ag.chDie, 2*time.Second)
 }
 
 func TestAgentHeartbeatExitsOnStopHeartbeat(t *testing.T) {
@@ -1041,20 +1020,17 @@ func TestAgentWriteChSend(t *testing.T) {
 		metricsReporters: mockMetricsReporters,
 	}
 	ctx := getCtxWithRequestKeys()
-	mockMetricsReporters[0].(*metricsmocks.MockReporter).EXPECT().ReportSummary(metrics.ResponseTime, gomock.Any(), gomock.Any())
+	reported := make(chan struct{})
+	mockMetricsReporters[0].(*metricsmocks.MockReporter).EXPECT().ReportSummary(metrics.ResponseTime, gomock.Any(), gomock.Any()).
+		Do(func(string, map[string]string, float64) { close(reported) })
 
 	expectedPacket := []byte("final")
 
-	var wg sync.WaitGroup
-	wg.Add(1)
 	mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
-	mockConn.EXPECT().Write(expectedPacket).Return(len(expectedPacket), nil).Do(func(b []byte) {
-		time.Sleep(10 * time.Millisecond)
-		wg.Done()
-	})
+	mockConn.EXPECT().Write(expectedPacket).Return(len(expectedPacket), nil)
 	go ag.write()
 	ag.chSend <- pendingWrite{ctx: ctx, data: expectedPacket, err: nil}
-	wg.Wait()
+	waitForChannelClose(t, reported, time.Second)
 }
 
 func TestAgentHandle(t *testing.T) {
@@ -1079,15 +1055,6 @@ func TestAgentHandle(t *testing.T) {
 	mockConn.EXPECT().Write(hbd).Return(0, nil).Times(2)
 	var wg sync.WaitGroup
 	wg.Add(1)
-	closed := false
-	go func() {
-		for {
-			select {
-			case <-ag.chDie:
-				closed = true
-			}
-		}
-	}()
 
 	mockConn.EXPECT().Write(expectedBytes).Return(0, nil).Do(func(d []byte) {
 		wg.Done()
@@ -1102,7 +1069,7 @@ func TestAgentHandle(t *testing.T) {
 	go ag.Handle()
 
 	wg.Wait()
-	helpers.ShouldEventuallyReturn(t, func() bool { return closed }, true, 50*time.Millisecond, 5*time.Second)
+	waitForChannelClose(t, ag.chDie, 5*time.Second)
 }
 
 func TestNatsRPCServerReportMetrics(t *testing.T) {

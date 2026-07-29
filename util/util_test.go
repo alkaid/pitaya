@@ -89,7 +89,7 @@ func TestPcall(t *testing.T) {
 			if table.methodName == "TestFunc" || table.methodName == "TestFunc2RetNoErr" {
 				assert.NoError(t, err)
 			} else {
-				assert.Equal(t, table.err, err)
+				assert.EqualError(t, err, table.err.Error())
 			}
 			assert.IsType(t, table.out, r)
 			assert.Equal(t, table.out, r)

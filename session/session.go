@@ -178,7 +178,7 @@ type sessionImpl struct {
 
 type ReqInFlight struct {
 	m  map[string]string
-	mu sync.RWMutex
+	mu *sync.RWMutex
 }
 
 // SessPublic 供业务层使用的 Session
@@ -397,7 +397,7 @@ func (pool *sessionPoolImpl) NewSession(entity networkentity.NetworkEntity, fron
 		OnCloseCallbacks:    []func(){},
 		IsFrontend:          frontend,
 		pool:                pool,
-		requestsInFlight:    ReqInFlight{m: make(map[string]string)},
+		requestsInFlight:    ReqInFlight{m: make(map[string]string), mu: new(sync.RWMutex)},
 		backends:            map[string]string{},
 		online:              true,
 	}
@@ -1577,6 +1577,8 @@ func (s *sessionImpl) Go(ctx context.Context, task func(ctx context.Context)) {
 }
 
 func (s *sessionImpl) HasRequestsInFlight() bool {
+	s.requestsInFlight.mu.RLock()
+	defer s.requestsInFlight.mu.RUnlock()
 	return len(s.requestsInFlight.m) != 0
 }
 

@@ -18,6 +18,7 @@ import (
 	"github.com/alkaid/pitaya/v2/groups"
 	"github.com/alkaid/pitaya/v2/modules"
 	"github.com/alkaid/pitaya/v2/route"
+	"github.com/alkaid/pitaya/v2/session"
 )
 
 var app pitaya.Pitaya
@@ -50,6 +51,7 @@ func configureFrontend(port int) {
 		route *route.Route,
 		payload []byte,
 		servers map[string]*cluster.Server,
+		session session.Session,
 	) (*cluster.Server, error) {
 		// will return the first server
 		for k := range servers {

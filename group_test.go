@@ -33,7 +33,7 @@ import (
 
 func createGroupTestApp() Pitaya {
 	config := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *config)
+	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *config)
 	return app
 }
 
@@ -380,7 +380,7 @@ func TestBroadcast(t *testing.T) {
 	mockSessionPool.EXPECT().GetSessionByUID(uid2).Return(s2).Times(1)
 
 	config := config.NewDefaultPitayaConfig()
-	builder := NewDefaultBuilder(true, "testtype", Cluster, map[string]string{}, *config)
+	builder := newAppTestBuilder(true, "testtype", Cluster, map[string]string{}, *config)
 	builder.SessionPool = mockSessionPool
 	app := builder.Build()
 

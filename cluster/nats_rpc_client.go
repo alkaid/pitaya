@@ -27,8 +27,6 @@ import (
 	"time"
 
 	"github.com/alkaid/goerrors/apierrors"
-	nats "github.com/nats-io/nats.go"
-	"github.com/samber/lo"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
@@ -40,6 +38,8 @@ import (
 	"github.com/alkaid/pitaya/v2/session"
 	"github.com/alkaid/pitaya/v2/tracing"
 	"github.com/alkaid/pitaya/v2/util"
+	nats "github.com/nats-io/nats.go"
+	"github.com/samber/lo"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )
@@ -164,7 +164,7 @@ func (ns *NatsRPCClient) Publish(
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
-	marshalledData, err1 := proto.Marshal(&req)
+	marshalledData, err1 := proto.Marshal(req)
 	err = err1
 	if err != nil {
 		return nil, errors.WithStack(err)
@@ -296,7 +296,7 @@ func (ns *NatsRPCClient) Call(
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
-	marshalledData, err1 := proto.Marshal(&req)
+	marshalledData, err1 := proto.Marshal(req)
 	err = err1
 	if err != nil {
 		return nil, errors.WithStack(err)
@@ -379,7 +379,7 @@ func (ns *NatsRPCClient) Fork(
 	if err != nil {
 		return errors.WithStack(err)
 	}
-	marshalledData, err1 := proto.Marshal(&req)
+	marshalledData, err1 := proto.Marshal(req)
 	err = err1
 	if err != nil {
 		return errors.WithStack(err)

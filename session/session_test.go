@@ -1532,3 +1532,21 @@ func TestSessionValidateHandshake(t *testing.T) {
 		})
 	}
 }
+
+func TestRequestsInFlightCopySharesLock(t *testing.T) {
+	sess := newTestSession(NewSessionPool(), nil, false).(*sessionImpl)
+	requests := sess.GetRequestsInFlight()
+
+	requests.mu.Lock()
+	acquired := sess.requestsInFlight.mu.TryLock()
+	if acquired {
+		sess.requestsInFlight.mu.Unlock()
+	}
+	requests.mu.Unlock()
+
+	assert.False(t, acquired)
+	sess.SetRequestInFlight("request-id", "route", true)
+	assert.True(t, sess.HasRequestsInFlight())
+	sess.SetRequestInFlight("request-id", "", false)
+	assert.False(t, sess.HasRequestsInFlight())
+}

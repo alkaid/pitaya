@@ -154,7 +154,7 @@ func (gs *GRPCClient) Call(
 		defer metrics.ReportTimingFromCtx(ctxT, gs.metricsReporters, "rpc", err)
 	}
 
-	res, err1 := c.(*grpcClient).call(ctxT, &req)
+	res, err1 := c.(*grpcClient).call(ctxT, req)
 	err = err1
 	if err != nil {
 		return nil, err

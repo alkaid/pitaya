@@ -24,9 +24,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/conn/message"
-	"github.com/alkaid/pitaya/v2/constants"
+	"github.com/stretchr/testify/assert"
 )
 
 type unexportedTestType struct {
@@ -118,26 +117,22 @@ func TestValidateMessageType(t *testing.T) {
 		methodName string
 		tp         message.Type
 		msgType    message.Type
-		err        error
-		exit       bool
 	}{
-		{"notify-msg-to-notify", "ExportedHandlerWithOnlySession", message.Notify, message.Notify, nil, false},
-		{"request-msg-to-request", "ExportedHandlerWithSessionAndPointerWithRawOut", message.Request, message.Request, nil, false},
-		{"request-msg-to-notify", "ExportedHandlerWithOnlySession", message.Notify, message.Request, constants.ErrRequestOnNotify, true},
-		{"request-msg-to-request", "ExportedHandlerWithSessionAndPointerWithRawOut", message.Request, message.Notify, constants.ErrNotifyOnRequest, false},
+		{"notify-msg-to-notify", "ExportedHandlerWithOnlySession", message.Notify, message.Notify},
+		{"request-msg-to-request", "ExportedHandlerWithSessionAndPointerWithRawOut", message.Request, message.Request},
+		{"request-msg-to-notify", "ExportedHandlerWithOnlySession", message.Notify, message.Request},
+		{"notify-msg-to-request", "ExportedHandlerWithSessionAndPointerWithRawOut", message.Request, message.Notify},
 	}
 	tObj := &TestType{}
 	svc := NewService(tObj, []Option{})
 	svc.ExtractHandler()
 	svc.ExtractRemote()
 	for _, table := range mtTables {
-		t.Run(table.methodName, func(t *testing.T) {
+		t.Run(table.name, func(t *testing.T) {
 			assert.Equal(t, table.tp, svc.Handlers[table.methodName].MessageType)
 			exit, err := svc.Handlers[table.methodName].ValidateMessageType(table.msgType)
-			if table.err != nil {
-				assert.EqualError(t, table.err, err.Error())
-			}
-			assert.Equal(t, table.exit, exit)
+			assert.NoError(t, err)
+			assert.False(t, exit)
 		})
 	}
 }

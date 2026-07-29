@@ -82,13 +82,8 @@ func reply(code int32, msg string) *protos.Response {
 
 // Entry is the entrypoint
 func (r *Room) Entry(ctx context.Context, req *protos.LoginReq) (*protos.LoginResponse, error) {
-	// fakeUID := uuid.New().String() // just use s.ID as uid !!!
+	// Actor-keyed login derives identity from the token without binding the frontend session here.
 	fakeUID := req.GetToken()
-	// s := r.app.GetSessionFromCtx(ctx)
-	// err := s.Bind(ctx, fakeUID) // binding session uid
-	// if err != nil {
-	//	return nil, pitaya.Error(err, "ENT-000")
-	// }
 	println("onclient entry %v", fakeUID)
 	return &protos.LoginResponse{
 		Code: 200,

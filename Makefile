@@ -30,7 +30,25 @@ TESTABLE_PACKAGES = `go list ./... | $(GREP_CMD) examples | $(GREP_CMD) constant
 compile-core:
 	@tmpdir="$$(mktemp -d)"; trap 'rm -rf "$$tmpdir"' EXIT; go test -c -o "$$tmpdir/" $(CORE_PACKAGES)
 
-init-toolchain setup-ci build-k6-extension protos-compile protos-compile-demo: export GOWORK = off
+compile-root:
+	@tmpdir="$$(mktemp -d)"; trap 'rm -rf "$$tmpdir"' EXIT; \
+		go list ./... > "$$tmpdir/packages" || exit 1; \
+		while IFS= read -r package; do \
+			go test -c -o "$$tmpdir/package.test" "$$package" || exit 1; \
+		done < "$$tmpdir/packages"
+
+test-unit:
+	@go test ./... -count=1
+
+vet:
+	@go vet ./...
+
+verify-root:
+	@$(MAKE) compile-root
+	@$(MAKE) test-unit
+	@$(MAKE) vet
+
+compile-core compile-root test-unit vet verify-root init-toolchain setup-ci build-k6-extension protos-compile protos-compile-demo: export GOWORK = off
 
 init-toolchain:
 	@go mod download -modfile=$(TOOLS_MOD)
@@ -204,7 +222,7 @@ test-coverage-func coverage-func: test-coverage
 	@echo "\033[1;34m=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\033[0m"
 	@go tool cover -func=coverprofile.out | grep -Ev "100[.]0%"
 
-.PHONY: compile-core init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
+.PHONY: compile-core compile-root test-unit vet verify-root init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 
 mocks: agent-mock session-mock networkentity-mock pitaya-mock serializer-mock metrics-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 

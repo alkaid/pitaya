@@ -1,3 +1,5 @@
+//go:build benchmark
+
 // Copyright (c) TFG Co. All Rights Reserved.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -26,7 +28,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/sirupsen/logrus"
 	"github.com/alkaid/pitaya/v2/client"
 )
 
@@ -38,7 +39,7 @@ var addr = ""
 func getClients(n int) []*client.Client {
 	c := make([]*client.Client, n)
 	for i := 0; i < n; i++ {
-		c[i] = client.New(logrus.FatalLevel)
+		c[i] = client.New()
 		err := c[i].ConnectTo(addr)
 		if err != nil {
 			panic(err)
@@ -59,9 +60,9 @@ func BenchmarkCreateManyClients(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		g := client.New(logrus.FatalLevel)
+		g := client.New()
 		err := g.ConnectTo(addr)
-		defer g.Disconnect()
+		defer g.Disconnect(client.CloseReasonManual)
 		if err != nil {
 			b.Logf("failed to connect %v,i=%v", addr, i)
 			b.Error(err)

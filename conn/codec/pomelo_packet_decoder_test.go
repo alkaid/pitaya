@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/conn/packet"
+	"github.com/stretchr/testify/assert"
 )
 
 var forwardTables = map[string]struct {
@@ -33,8 +33,8 @@ var decodeTables = map[string]struct {
 }{
 	"test_not_enough_bytes": {[]byte{0x01}, nil, nil},
 	"test_error_on_forward": {invalidHeader, nil, packet.ErrWrongPomeloPacketType},
-	"test_forward":          {handshakeHeaderPacket, []*packet.Packet{{packet.Handshake, 1, []byte{0x01}}}, nil},
-	"test_forward_many":     {append(handshakeHeaderPacket, handshakeHeaderPacket...), []*packet.Packet{{packet.Handshake, 1, []byte{0x01}}, {packet.Handshake, 1, []byte{0x01}}}, nil},
+	"test_forward":          {handshakeHeaderPacket, []*packet.Packet{{Type: packet.Handshake, Length: 1, Data: []byte{0x01}}}, nil},
+	"test_forward_many":     {append(handshakeHeaderPacket, handshakeHeaderPacket...), []*packet.Packet{{Type: packet.Handshake, Length: 1, Data: []byte{0x01}}, {Type: packet.Handshake, Length: 1, Data: []byte{0x01}}}, nil},
 }
 
 func TestNewPomeloPacketDecoder(t *testing.T) {

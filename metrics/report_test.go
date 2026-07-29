@@ -23,9 +23,12 @@ package metrics
 import (
 	"context"
 	"errors"
+	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/alkaid/goerrors/apierrors"
 	"github.com/alkaid/pitaya/v2/constants"
 	pcontext "github.com/alkaid/pitaya/v2/context"
 	"github.com/alkaid/pitaya/v2/metrics/mocks"
@@ -77,7 +80,7 @@ func TestReportTimingFromCtx(t *testing.T) {
 			"status": "ok",
 			"type":   expectedType,
 			"key":    "value",
-			"code":   "",
+			"code":   strconv.Itoa(http.StatusOK),
 		}
 
 		mockMetricsReporter.EXPECT().ReportSummary(ResponseTime, expectedTags, gomock.Any())
@@ -102,7 +105,7 @@ func TestReportTimingFromCtx(t *testing.T) {
 			"route":  expectedRoute,
 			"status": "ok",
 			"type":   expectedType,
-			"code":   "",
+			"code":   strconv.Itoa(http.StatusOK),
 		}
 
 		mockMetricsReporter.EXPECT().ReportSummary(ResponseTime, expectedTags, gomock.Any())
@@ -118,8 +121,7 @@ func TestReportTimingFromCtx(t *testing.T) {
 		originalTs := time.Now().UnixNano()
 		expectedRoute := uuid.New().String()
 		expectedType := uuid.New().String()
-		code := "GAME-404"
-		expectedErr := e.NewError(errors.New("error"), code)
+		expectedErr := apierrors.NotFound("GAME-404", "error", "")
 		ctx := pcontext.AddToPropagateCtx(context.Background(), constants.StartTimeKey, originalTs)
 		ctx = pcontext.AddToPropagateCtx(ctx, constants.RouteKey, expectedRoute)
 
@@ -127,7 +129,7 @@ func TestReportTimingFromCtx(t *testing.T) {
 			"route":  expectedRoute,
 			"status": "failed",
 			"type":   expectedType,
-			"code":   code,
+			"code":   strconv.Itoa(http.StatusNotFound),
 		}, gomock.Any())
 
 		ReportTimingFromCtx(ctx, []Reporter{mockMetricsReporter}, expectedType, expectedErr)
@@ -149,7 +151,7 @@ func TestReportTimingFromCtx(t *testing.T) {
 			"route":  expectedRoute,
 			"status": "failed",
 			"type":   expectedType,
-			"code":   e.ErrUnknownCode,
+			"code":   strconv.Itoa(http.StatusInternalServerError),
 		}, gomock.Any())
 
 		ReportTimingFromCtx(ctx, []Reporter{mockMetricsReporter}, expectedType, expectedErr)

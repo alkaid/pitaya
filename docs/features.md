@@ -79,7 +79,7 @@ This module implements functionality needed by the gRPC RPC implementation to en
 
 ## Monitoring
 
-Pitaya has support for metrics reporting, it comes with Prometheus and Statsd support already implemented and has support for custom reporters that implement the `Reporter` interface. Pitaya also comes with support for open tracing compatible frameworks, allowing the easy integration of Jaeger and others.
+Pitaya has support for metrics reporting, it comes with Prometheus and Statsd support already implemented and has support for custom reporters that implement the `Reporter` interface. Pitaya also propagates OpenTelemetry trace context and can export spans to an OTLP/gRPC collector.
 
 The list of metrics reported by the `Reporter` is: 
 

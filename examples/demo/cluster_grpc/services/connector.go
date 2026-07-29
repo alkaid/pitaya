@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/alkaid/goerrors/apierrors"
 	"github.com/alkaid/pitaya/v2"
 	"github.com/alkaid/pitaya/v2/component"
 	"github.com/alkaid/pitaya/v2/examples/demo/protos"
@@ -58,7 +59,9 @@ func (c *Connector) SetSessionData(ctx context.Context, data *SessionData) (*Res
 	s := c.app.GetSessionFromCtx(ctx)
 	err := s.SetData(data.Data)
 	if err != nil {
-		return nil, pitaya.Error(err, "CN-000", map[string]string{"failed": "set data"})
+		return nil, apierrors.InternalServer("CN-000", err.Error(), "").
+			WithCause(err).
+			WithMetadata(map[string]string{"failed": "set data"})
 	}
 	return reply(200, "success")
 }
