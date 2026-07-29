@@ -6,26 +6,29 @@
 
 ## Building the k6 binary
 
+Run this from the Pitaya repository root:
+
 ```shell
-go install go.k6.io/xk6/cmd/xk6@v1.4.7
-GOWORK=off xk6 build v1.8.0 \
+mkdir -p build
+GOWORK=off go run go.k6.io/xk6/cmd/xk6@v1.4.7 build v1.8.0 \
   --build-flags=-trimpath \
   --build-flags="-ldflags=-s -w" \
   --build-flags=-buildvcs=false \
-  --with github.com/alkaid/pitaya/xk6-pitaya=. \
-  --with github.com/alkaid/pitaya/v2=../
+  --with github.com/alkaid/pitaya/xk6-pitaya=./xk6-pitaya \
+  --with github.com/alkaid/pitaya/v2=. \
+  --output ./build/k6
+./build/k6 version
 ```
 
 ## Building the k6 docker image
 
-```shell
-docker build \
-  --build-arg pitaya_revision="$(git rev-parse HEAD)" \
-  -t xk6-pitaya:1.8.0 .
-```
+The image helper stages tracked source from the repository and records the exact
+commit (plus a working-tree digest when dirty) in the OCI revision label:
 
-Set `pitaya_revision` to the Git revision containing both the Pitaya module and
-the `xk6-pitaya` module that you want to build.
+```shell
+./scripts/build-xk6-image.sh xk6-pitaya:1.8.0
+docker run --rm xk6-pitaya:1.8.0 version
+```
 
 ## Example usage
 
@@ -56,8 +59,6 @@ const opts = {
     }
   },
   requestTimeoutMs: 1000,
-  logLevel: "info",
-  serializer: "json",
 }
 
 const pitayaClient = new pitaya.Client(opts)
@@ -93,17 +94,30 @@ export function teardown() {
 
 ## Running the scenario 1 example
 
+The cluster example currently uses Pitaya's default local dependency ports. Start
+an isolated Compose project with those loopback ports explicitly assigned:
+
 ```shell
+PITAYA_NATS_HOST_PORT=4222 \
+PITAYA_ETCD_HOST_PORT=2379 \
+PITAYA_REDIS_HOST_PORT=6379 \
+  docker compose --project-name pitaya-xk6-scenario \
+  --file examples/testing/docker-compose.yml up --detach --wait
+```
 
-# spin up pitaya dependencies
-make ensure-testing-deps
+Run the backend and frontend in separate terminals, then start the scenario:
 
-# run pitaya server, backend and frontend
+```shell
 make run-cluster-example-backend
 make run-cluster-example-frontend
+./build/k6 run ./xk6-pitaya/examples/scenario1.js
+```
 
-# run k6 scenario
-./k6 run ./examples/scenario1.js
+After the scenario, remove only its dependency project:
+
+```shell
+docker compose --project-name pitaya-xk6-scenario \
+  --file examples/testing/docker-compose.yml down --volumes
 ```
 
 # Metrics

@@ -1,16 +1,17 @@
 package helpers
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io/ioutil"
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -94,15 +95,207 @@ func StartProcess(t testing.TB, program string, args ...string) *exec.Cmd {
 	return exec.Command(program, args...)
 }
 
-func waitForServerToBeReady(t testing.TB, out *bufio.Reader) {
-	t.Helper()
-	ShouldEventuallyReturn(t, func() bool {
-		line, _, err := out.ReadLine()
-		if err != nil {
-			t.Fatal(err)
+const (
+	serverReadyMarker         = "all modules started!"
+	processOutputPendingLimit = 64 * 1024
+	processWaitDelay          = 2 * time.Second
+	processTerminateTimeout   = 5 * time.Second
+	processKillWaitTimeout    = 3 * time.Second
+)
+
+type processOutput struct {
+	mu        sync.Mutex
+	pending   string
+	lines     []string
+	limit     int
+	marker    string
+	ready     chan struct{}
+	readyOnce sync.Once
+}
+
+func newProcessOutput(marker string, limit int) *processOutput {
+	return &processOutput{marker: marker, limit: limit, ready: make(chan struct{})}
+}
+
+func (o *processOutput) Write(data []byte) (int, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	o.pending += string(data)
+	for {
+		newline := strings.IndexByte(o.pending, '\n')
+		if newline < 0 {
+			break
 		}
-		return strings.Contains(string(line), "all modules started!")
-	}, true, 100*time.Millisecond, 30*time.Second)
+		o.appendLine(strings.TrimSuffix(o.pending[:newline], "\r"))
+		o.pending = o.pending[newline+1:]
+	}
+	if strings.Contains(o.pending, o.marker) {
+		o.readyOnce.Do(func() { close(o.ready) })
+	}
+	if len(o.pending) > processOutputPendingLimit {
+		o.pending = o.pending[len(o.pending)-processOutputPendingLimit:]
+	}
+	return len(data), nil
+}
+
+func (o *processOutput) appendLine(line string) {
+	if strings.Contains(line, o.marker) {
+		o.readyOnce.Do(func() { close(o.ready) })
+	}
+	if len(line) > processOutputPendingLimit {
+		line = line[len(line)-processOutputPendingLimit:]
+	}
+	o.lines = append(o.lines, line)
+	if len(o.lines) > o.limit {
+		o.lines = append([]string(nil), o.lines[len(o.lines)-o.limit:]...)
+	}
+}
+
+func (o *processOutput) tail() string {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	lines := append([]string(nil), o.lines...)
+	if o.pending != "" {
+		lines = append(lines, o.pending)
+	}
+	if len(lines) > o.limit {
+		lines = lines[len(lines)-o.limit:]
+	}
+	return strings.Join(lines, "\n")
+}
+
+type managedProcess struct {
+	cmd      *exec.Cmd
+	control  *processControl
+	done     chan struct{}
+	output   *processOutput
+	waitErr  error
+	stopOnce sync.Once
+	stopErr  error
+}
+
+func startReadyProcess(cmd *exec.Cmd, marker string, readyTimeout time.Duration) (*managedProcess, error) {
+	output := newProcessOutput(marker, 200)
+	cmd.Stdout = output
+	cmd.Stderr = output
+	cmd.WaitDelay = processWaitDelay
+	prepareProcess(cmd)
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	control, err := newProcessControl(cmd.Process)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, fmt.Errorf("manage process tree: %w", err)
+	}
+
+	process := &managedProcess{cmd: cmd, control: control, done: make(chan struct{}), output: output}
+	go func() {
+		process.waitErr = cmd.Wait()
+		_ = control.release()
+		close(process.done)
+	}()
+
+	timer := time.NewTimer(readyTimeout)
+	defer timer.Stop()
+	select {
+	case <-output.ready:
+		return process, nil
+	case <-process.done:
+		return nil, fmt.Errorf("process exited before readiness: %w\nlast output:\n%s", process.waitErr, output.tail())
+	case <-timer.C:
+		_ = process.Stop()
+		return nil, fmt.Errorf("process readiness timed out after %s\nlast output:\n%s", readyTimeout, output.tail())
+	}
+}
+
+func (p *managedProcess) Stop() error {
+	p.stopOnce.Do(func() {
+		select {
+		case <-p.done:
+			p.recordWaitError(false, false)
+			return
+		default:
+		}
+
+		stopRequested := false
+		hardKill, err := p.control.terminate()
+		if err == nil {
+			stopRequested = true
+		} else if errors.Is(err, os.ErrProcessDone) {
+			if !p.waitForDone(processKillWaitTimeout) {
+				p.stopErr = fmt.Errorf("process wait timed out after %s", processKillWaitTimeout)
+				return
+			}
+			p.recordWaitError(false, false)
+			return
+		} else {
+			p.stopErr = err
+		}
+		if hardKill {
+			if err != nil {
+				return
+			}
+			if !p.waitForDone(processKillWaitTimeout) {
+				p.stopErr = fmt.Errorf("process wait timed out after hard kill after %s", processKillWaitTimeout)
+				return
+			}
+			p.recordWaitError(stopRequested, true)
+			return
+		}
+
+		timer := time.NewTimer(processTerminateTimeout)
+		defer timer.Stop()
+		select {
+		case <-p.done:
+			p.recordWaitError(stopRequested, false)
+			return
+		case <-timer.C:
+			killErr := p.control.kill()
+			if killErr == nil {
+				stopRequested = true
+				hardKill = true
+			} else if !errors.Is(killErr, os.ErrProcessDone) {
+				if p.stopErr == nil {
+					p.stopErr = killErr
+				}
+				return
+			}
+			if !p.waitForDone(processKillWaitTimeout) {
+				if p.stopErr == nil {
+					p.stopErr = fmt.Errorf("process wait timed out after hard kill after %s", processKillWaitTimeout)
+				}
+				return
+			}
+			p.recordWaitError(stopRequested, hardKill)
+		}
+	})
+	return p.stopErr
+}
+
+func (p *managedProcess) waitForDone(timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-p.done:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+func (p *managedProcess) recordWaitError(stopRequested, hardKill bool) {
+	if p.waitErr == nil || p.stopErr != nil {
+		return
+	}
+	if stopRequested && isExpectedProcessExit(p.cmd.ProcessState, hardKill) {
+		return
+	}
+	p.stopErr = p.waitErr
 }
 
 // StartServer starts a server
@@ -138,33 +331,41 @@ func StartServer(
 	}
 	cmd := StartProcess(
 		t,
-		"../examples/testing/server",
+		serverBinary(),
 		args...,
 	)
 
 	// always use a random port for prometheus, to avoid e2e conflicts
-	cmd.Env = []string{
+	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("PITAYA_METRICS_PROMETHEUS_PORT=%d", promPort),
 		fmt.Sprintf("PITAYA_CLUSTER_RPC_CLIENT_GRPC_LAZYCONNECTION=%v", lazyConnection),
+	)
+	if value := os.Getenv("PITAYA_TEST_NATS_URL"); value != "" {
+		cmd.Args = append(cmd.Args, "-natsurl", value)
+	}
+	if value := os.Getenv("PITAYA_TEST_ETCD_URL"); value != "" {
+		cmd.Args = append(cmd.Args, "-etcdurl", value)
+	}
+	if value := os.Getenv("PITAYA_TEST_REDIS_URL"); value != "" {
+		cmd.Args = append(cmd.Args, "-redisurl", value)
 	}
 
-	outPipe, err := cmd.StderrPipe()
+	process, err := startReadyProcess(cmd, serverReadyMarker, 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	err = cmd.Start()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	waitForServerToBeReady(t, bufio.NewReader(outPipe))
 	return func() {
-		err := cmd.Process.Kill()
-		if err != nil {
-			t.Fatal(err)
+		if err := process.Stop(); err != nil {
+			t.Errorf("stop test server: %v\nlast output:\n%s", err, process.output.tail())
 		}
 	}
+}
+
+func serverBinary() string {
+	if binary := os.Getenv("PITAYA_TEST_SERVER_BINARY"); binary != "" {
+		return binary
+	}
+	return "../examples/testing/server"
 }
 
 // FixtureGoldenFileName returns the golden file name on fixtures path

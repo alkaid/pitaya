@@ -55,10 +55,21 @@ func (m *mockAddr) Network() string { return "" }
 func (m *mockAddr) String() string  { return "remote-string" }
 
 func heartbeatAndHandshakeMocks(mockEncoder *codecmocks.MockPacketEncoder) {
+	heartbeatAndHandshakeMocksWithResponse(mockEncoder, hbd, nil)
+}
+
+func heartbeatAndHandshakeMocksWithResponse(mockEncoder *codecmocks.MockPacketEncoder, heartbeatResponse []byte, onHeartbeat func([]byte)) {
 	// heartbeat and handshake if not set by another test
 	mockEncoder.EXPECT().Encode(packet.Type(packet.Handshake), gomock.Not(gomock.Nil())).AnyTimes()
-	mockEncoder.EXPECT().Encode(packet.Type(packet.Heartbeat), gomock.Nil()).AnyTimes()
-	mockEncoder.EXPECT().Encode(packet.Type(packet.Heartbeat), gomock.Not(gomock.Nil())).Return(hbd, nil).AnyTimes()
+	mockEncoder.EXPECT().Encode(packet.Type(packet.Heartbeat), gomock.Nil()).Return(heartbeatResponse, nil).AnyTimes()
+	mockEncoder.EXPECT().Encode(packet.Type(packet.Heartbeat), gomock.Not(gomock.Nil())).DoAndReturn(
+		func(_ packet.Type, data []byte) ([]byte, error) {
+			if onHeartbeat != nil {
+				onHeartbeat(data)
+			}
+			return heartbeatResponse, nil
+		},
+	).AnyTimes()
 	mockEncoder.EXPECT().Encode(packet.Type(packet.HeartbeatAck), gomock.Nil()).AnyTimes()
 }
 
@@ -926,7 +937,11 @@ func TestAgentHeartbeat(t *testing.T) {
 
 	mockSerializer := serializemocks.NewMockSerializer(ctrl)
 	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
-	heartbeatAndHandshakeMocks(mockEncoder)
+	heartbeatPacket := []byte("heartbeat")
+	encodedHeartbeats := make(chan int64, 2)
+	heartbeatAndHandshakeMocksWithResponse(mockEncoder, heartbeatPacket, func(data []byte) {
+		encodedHeartbeats <- int64(binary.BigEndian.Uint64(data))
+	})
 	mockConn := mocks.NewMockPlayerConn(ctrl)
 	mockMessageEncoder := messagemocks.NewMockEncoder(ctrl)
 	mockMessageEncoder.EXPECT().IsCompressionEnabled().AnyTimes()
@@ -938,12 +953,24 @@ func TestAgentHeartbeat(t *testing.T) {
 	mockConn.EXPECT().RemoteAddr().MaxTimes(1)
 	mockConn.EXPECT().Close().MaxTimes(1)
 
-	go ag.heartbeat()
-	for i := 0; i < 2; i++ {
-		pWrite := helpers.ShouldEventuallyReceive(t, ag.chSend, 1100*time.Millisecond).(pendingWrite)
-		assert.Equal(t, pendingWrite{data: hbd}, pWrite)
+	ticks := make(chan time.Time)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ag.heartbeatLoop(ticks)
+	}()
+
+	lastAt := time.Unix(ag.lastAt, 0)
+	for _, tick := range []time.Time{lastAt.Add(time.Second), lastAt.Add(2 * time.Second)} {
+		ticks <- tick
+		pWrite := helpers.ShouldEventuallyReceive(t, ag.chSend).(pendingWrite)
+		assert.Equal(t, pendingWrite{data: heartbeatPacket}, pWrite)
+		assert.Equal(t, tick.UnixMilli(), helpers.ShouldEventuallyReceive(t, encodedHeartbeats).(int64))
 	}
-	waitForChannelClose(t, ag.chDie, 5*time.Second)
+
+	ticks <- lastAt.Add(3 * time.Second)
+	waitForChannelClose(t, done, time.Second)
+	waitForChannelClose(t, ag.chDie, time.Second)
 }
 
 func TestAgentHeartbeatExitsIfConnError(t *testing.T) {
@@ -952,7 +979,8 @@ func TestAgentHeartbeatExitsIfConnError(t *testing.T) {
 
 	mockSerializer := serializemocks.NewMockSerializer(ctrl)
 	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
-	heartbeatAndHandshakeMocks(mockEncoder)
+	heartbeatPacket := []byte("heartbeat")
+	heartbeatAndHandshakeMocksWithResponse(mockEncoder, heartbeatPacket, nil)
 	mockConn := mocks.NewMockPlayerConn(ctrl)
 	mockMessageEncoder := messagemocks.NewMockEncoder(ctrl)
 	mockMessageEncoder.EXPECT().IsCompressionEnabled().AnyTimes()
@@ -963,14 +991,26 @@ func TestAgentHeartbeatExitsIfConnError(t *testing.T) {
 
 	mockConn.EXPECT().RemoteAddr().MaxTimes(1)
 	mockConn.EXPECT().Close().MaxTimes(1)
+	mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
+	mockConn.EXPECT().Write(heartbeatPacket).Return(0, errors.New("connection failed"))
 
-	go ag.heartbeat()
-	for i := 0; i < 2; i++ {
-		pWrite := helpers.ShouldEventuallyReceive(t, ag.chSend, 1100*time.Millisecond).(pendingWrite)
-		assert.Equal(t, pendingWrite{data: hbd}, pWrite)
-	}
+	ticks := make(chan time.Time)
+	heartbeatDone := make(chan struct{})
+	writeDone := make(chan struct{})
+	go func() {
+		defer close(writeDone)
+		ag.write()
+	}()
+	go func() {
+		defer close(heartbeatDone)
+		ag.heartbeatLoop(ticks)
+	}()
 
-	waitForChannelClose(t, ag.chDie, 2*time.Second)
+	ticks <- time.Unix(ag.lastAt, 0).Add(time.Second)
+
+	waitForChannelClose(t, ag.chDie, time.Second)
+	waitForChannelClose(t, writeDone, time.Second)
+	waitForChannelClose(t, heartbeatDone, time.Second)
 }
 
 func TestAgentHeartbeatExitsOnStopHeartbeat(t *testing.T) {
@@ -991,12 +1031,18 @@ func TestAgentHeartbeatExitsOnStopHeartbeat(t *testing.T) {
 	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, 1*time.Second, 1, nil, messageEncoder, nil, sessionPool, "").(*agentImpl)
 	assert.NotNil(t, ag)
 
+	ticks := make(chan time.Time)
+	started := make(chan struct{})
+	done := make(chan struct{})
 	go func() {
-		time.Sleep(500 * time.Millisecond)
-		ag.Close(nil)
+		defer close(done)
+		close(started)
+		ag.heartbeatLoop(ticks)
 	}()
+	<-started
 
-	ag.heartbeat()
+	assert.NoError(t, ag.Close(nil))
+	waitForChannelClose(t, done, time.Second)
 }
 
 func TestAgentWriteChSend(t *testing.T) {

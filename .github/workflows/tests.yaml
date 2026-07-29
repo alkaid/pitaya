@@ -3,6 +3,9 @@ name: Tests
 permissions:
   contents: read
 
+env:
+  GOTOOLCHAIN: local
+
 on:
   push:
     branches:
@@ -10,10 +13,268 @@ on:
   pull_request:
     branches:
     - main
+  workflow_dispatch:
 
 jobs:
-  toolchain-check:
-    name: Toolchain
+  tools-verify:
+    name: Tools Verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: |
+          go.sum
+          tools/go.sum
+          pitaya-cli/go.sum
+          xk6-pitaya/go.sum
+    - name: Download and verify root and tool modules
+      run: |
+        GOWORK=off go mod download
+        GOWORK=off go mod verify
+        GOWORK=off go mod download -modfile=tools/go.mod
+        GOWORK=off go mod verify -modfile=tools/go.mod
+    - name: Verify pinned tools, actions, and images
+      run: make tools-verify
+
+  module-verify:
+    name: Module Verify
+    needs: tools-verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: |
+          go.sum
+          tools/go.sum
+          pitaya-cli/go.sum
+          xk6-pitaya/go.sum
+    - name: Download and verify source modules
+      run: |
+        for module in . pitaya-cli xk6-pitaya; do
+          (
+            cd "$module"
+            GOWORK=off go mod download
+            GOWORK=off go mod verify
+          )
+        done
+    - name: Verify workspace and standalone modules
+      run: make module-verify
+
+  logrus-verify:
+    name: Logrus Verify
+    needs: module-verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: |
+          go.sum
+          tools/go.sum
+          pitaya-cli/go.sum
+          xk6-pitaya/go.sum
+    - name: Download and verify source modules
+      run: |
+        for module in . pitaya-cli xk6-pitaya; do
+          (
+            cd "$module"
+            GOWORK=off go mod download
+            GOWORK=off go mod verify
+          )
+        done
+    - name: Verify first-party Logrus removal
+      run: make logrus-verify
+
+  compile:
+    name: Compile
+    needs: logrus-verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: |
+          go.sum
+          tools/go.sum
+          pitaya-cli/go.sum
+          xk6-pitaya/go.sum
+    - name: Download and verify source modules
+      run: |
+        for module in . pitaya-cli xk6-pitaya; do
+          (
+            cd "$module"
+            GOWORK=off go mod download
+            GOWORK=off go mod verify
+          )
+        done
+    - name: Compile root, CLI, and xk6 packages
+      run: make compile
+
+  unit:
+    name: Unit Test
+    needs: compile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: |
+          go.sum
+          tools/go.sum
+          pitaya-cli/go.sum
+          xk6-pitaya/go.sum
+    - name: Download and verify root module
+      run: |
+        GOWORK=off go mod download
+        GOWORK=off go mod verify
+    - name: Run root unit tests
+      run: make test-unit
+
+  vet:
+    name: Vet
+    needs: compile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: |
+          go.sum
+          tools/go.sum
+          pitaya-cli/go.sum
+          xk6-pitaya/go.sum
+    - name: Download and verify root module
+      run: |
+        GOWORK=off go mod download
+        GOWORK=off go mod verify
+    - name: Vet root packages
+      run: make vet
+
+  consumer:
+    name: Consumer
+    needs:
+    - unit
+    - vet
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: |
+          go.sum
+          tools/go.sum
+          pitaya-cli/go.sum
+          xk6-pitaya/go.sum
+    - name: Download and verify root module
+      run: |
+        GOWORK=off go mod download
+        GOWORK=off go mod verify
+    - name: Test an independent consumer
+      run: make test-consumer
+
+  verify-fast:
+    name: Verify Fast
+    if: ${{ always() }}
+    needs: consumer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+    - name: Aggregate fast-gate result
+      env:
+        CONSUMER_RESULT: ${{ needs.consumer.result }}
+      run: test "$CONSUMER_RESULT" = success
+
+  distribution:
+    name: Distribution
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: |
+          go.sum
+          tools/go.sum
+          pitaya-cli/go.sum
+          xk6-pitaya/go.sum
+    - name: Download and verify source and tool modules
+      run: |
+        for module in . pitaya-cli xk6-pitaya; do
+          (
+            cd "$module"
+            GOWORK=off go mod download
+            GOWORK=off go mod verify
+          )
+        done
+        GOWORK=off go mod download -modfile=tools/go.mod
+        GOWORK=off go mod verify -modfile=tools/go.mod
+    - name: Test versioned installed distributions
+      run: make test-distribution
+
+  coverage:
+    name: Full Package Coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: |
+          go.sum
+          tools/go.sum
+          pitaya-cli/go.sum
+          xk6-pitaya/go.sum
+    - name: Download and verify root and tool modules
+      run: |
+        GOWORK=off go mod download
+        GOWORK=off go mod verify
+        GOWORK=off go mod download -modfile=tools/go.mod
+        GOWORK=off go mod verify -modfile=tools/go.mod
+    - name: Run full-package coverage
+      run: GOWORK=off make coverage
+    - name: Send coverage
+      env:
+        COVERALLS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: GOWORK=off go tool -modfile=tools/go.mod goveralls -coverprofile=coverprofile.out -service=github
+
+  generated-docs:
+    name: Generated Protobuf and Docs
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -28,6 +289,14 @@ jobs:
         cache-dependency-path: |
           go.sum
           tools/go.sum
+          pitaya-cli/go.sum
+          xk6-pitaya/go.sum
+    - name: Download and verify root and tool modules
+      run: |
+        GOWORK=off go mod download
+        GOWORK=off go mod verify
+        GOWORK=off go mod download -modfile=tools/go.mod
+        GOWORK=off go mod verify -modfile=tools/go.mod
     - name: Install protoc 35.1
       env:
         PROTOC_SHA256: 6930ebf62bd4ea607b98fff052596c6ee564b9835b4ce172c75a3f53ae9d91b7
@@ -50,9 +319,10 @@ jobs:
         "$RUNNER_TEMP/docs-venv/bin/python" -m pip install --disable-pip-version-check -r requirements.txt
     - name: Build documentation
       working-directory: docs
-      run: make SPHINXBUILD="$RUNNER_TEMP/docs-venv/bin/sphinx-build" BUILDDIR="$RUNNER_TEMP/docs-build" html
-  unit-test:
-    name: Unit Test
+      run: make SPHINXOPTS="-W --keep-going" SPHINXBUILD="$RUNNER_TEMP/docs-venv/bin/sphinx-build" BUILDDIR="$RUNNER_TEMP/docs-build" html
+
+  dependency-scan:
+    name: Dependency Scan
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -64,19 +334,34 @@ jobs:
         go-version-file: go.mod
         cache-dependency-path: |
           go.sum
-          pitaya-cli/go.sum
           tools/go.sum
+          pitaya-cli/go.sum
           xk6-pitaya/go.sum
-    - name: Setup dependencies
-      run: make setup-ci
-    - name: Run tests
-      run: make test-coverage
-    - name: Send coverage
-      env:
-        COVERALLS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: GOWORK=off go tool -modfile=tools/go.mod goveralls -coverprofile=coverprofile.out -service=github
-  e2e-test-nats:
-    name: Nats Test End to End
+    - name: Download and verify source and tool modules
+      run: |
+        for module in . pitaya-cli xk6-pitaya; do
+          (
+            cd "$module"
+            GOWORK=off go mod download
+            GOWORK=off go mod verify
+          )
+        done
+        GOWORK=off go mod download -modfile=tools/go.mod
+        GOWORK=off go mod verify -modfile=tools/go.mod
+    - name: Scan reachable dependencies
+      run: make scan-deps
+    - name: Upload dependency reports
+      if: ${{ always() }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: govulncheck-${{ github.sha }}
+        path: build/govulncheck/*.json
+        if-no-files-found: error
+        retention-days: 14
+
+  e2e-nats:
+    name: NATS End to End
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -88,26 +373,12 @@ jobs:
         go-version-file: go.mod
         cache-dependency-path: |
           go.sum
-          pitaya-cli/go.sum
           tools/go.sum
-          xk6-pitaya/go.sum
-    - name: Run tests
-      run: make e2e-test-nats
-  e2e-test-grpc:
-    name: GRPC Test End to End
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    steps:
-    - name: Checkout
-      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-    - name: Set up Go
-      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-      with:
-        go-version-file: go.mod
-        cache-dependency-path: |
-          go.sum
           pitaya-cli/go.sum
-          tools/go.sum
           xk6-pitaya/go.sum
-    - name: Run tests
-      run: make e2e-test-grpc
+    - name: Download and verify root module
+      run: |
+        GOWORK=off go mod download
+        GOWORK=off go mod verify
+    - name: Run deterministic NATS end-to-end tests
+      run: make test-e2e-nats

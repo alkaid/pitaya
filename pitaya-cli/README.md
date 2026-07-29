@@ -5,7 +5,9 @@ A Go REPL client for Pitaya.
 
 ## Building from source
 
-The CLI currently builds against the Pitaya module in the same checkout:
+The repository root `go.work` includes both Pitaya and this CLI module, so the
+following commands build the CLI against the Pitaya source in the same
+checkout:
 
 ```sh
 git clone https://github.com/alkaid/pitaya.git
@@ -13,6 +15,10 @@ cd pitaya/pitaya-cli
 mkdir -p out
 go build -o ./out/pitaya-cli .
 ```
+
+A public `go install ...@latest` path is not supported yet. A versioned install
+command will be documented only after a CLI module tag has been published and
+verified.
 
 ## Usage
 

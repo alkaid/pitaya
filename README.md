@@ -43,41 +43,38 @@ make setup
 
 ### Hacking pitaya
 
-Here's one example of running Pitaya:
-
-Start etcd. This command uses Docker Compose to run an etcd container locally:
-```sh
-docker compose -f ./examples/testing/docker-compose.yml up -d etcd
-```
-run the connector frontend server from cluster_grpc example
-```
-make run-cluster-grpc-example-connector
-```
-run the room backend server from the cluster_grpc example
-```
-make run-cluster-grpc-example-room
-```
-
-There should now be two Pitaya servers running: a frontend connector and a backend room. To send requests, use the [pitaya-cli](https://github.com/alkaid/pitaya/tree/main/pitaya-cli) REPL client.
+Build the [pitaya-cli](https://github.com/alkaid/pitaya/tree/main/pitaya-cli)
+REPL client from the current checkout:
 
 ```sh
 make build-cli
 ```
 
-```
-$ ./build/pitaya-cli
-Pitaya REPL Client
->>> connect localhost:3250
-connected!
->>> request room.room.entry
->>> sv-> {"code":0,"result":"ok"}
-```
+The repository workspace makes this build use the Pitaya source from the same
+checkout.
 
 ## Running the tests
+
+Run the fast local verification gate while developing:
+
+```sh
+make verify-fast
 ```
-make test
+
+This checks the pinned tools and module graph, compiles the root, CLI, and xk6
+modules, and runs unit tests, vet, and the external consumer smoke test. It does
+not start Docker or other service dependencies.
+
+Run the NATS end-to-end suite explicitly:
+
+```sh
+make test-e2e-nats
 ```
-This command will run both unit and e2e tests.
+
+The E2E command creates a unique Docker Compose project, starts pinned NATS,
+etcd, and Redis images on dynamic loopback ports, and waits for their health
+checks. It removes that project's containers and volumes when the run finishes;
+on failure, it also prints the service state and recent logs.
 
 ## Building the documentation
 

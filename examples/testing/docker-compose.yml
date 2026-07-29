@@ -1,8 +1,14 @@
 services:
   nats:
     image: nats:2.11.17-alpine@sha256:e4bf19f15fd3218814a4e3c9e0064e1334bd8aa20d5984b9f1a0afd084f8cc00
+    command: ["-m", "8222"]
     ports:
-      - 4222:4222
+      - "127.0.0.1:${PITAYA_NATS_HOST_PORT:-}:4222"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8222/healthz"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
   etcd:
     image: gcr.io/etcd-development/etcd:v3.6.14@sha256:a491baeaa0cb0c9cd89c0062ac44ece53886e3e5bddad18d2daf36678ce665b6
     command:
@@ -12,8 +18,18 @@ services:
       - --listen-client-urls=http://0.0.0.0:2379
       - --advertise-client-urls=http://etcd:2379
     ports:
-      - 2379:2379
+      - "127.0.0.1:${PITAYA_ETCD_HOST_PORT:-}:2379"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/etcdctl", "endpoint", "health"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
   redis:
     image: redis:7.4.10-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
     ports:
-      - 6379:6379
+      - "127.0.0.1:${PITAYA_REDIS_HOST_PORT:-}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 30

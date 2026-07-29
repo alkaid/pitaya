@@ -1,3 +1,8 @@
+.git
+.agents
+build
+coverprofile.out
+
 # Binaries for programs and plugins
 *.exe
 *.dll
@@ -8,11 +13,11 @@
 # Test binary, build with `go test -c`
 *.test
 
-# Output of the go coverage tool, specifically when used with LiteIDE
+# Output of the Go coverage tool
 *.out
 .DS_Store
 
-# Project-local glide cache, RE: https://github.com/Masterminds/glide/issues/736
+# Project-local glide cache
 .glide/
 
 .idea/
@@ -20,7 +25,7 @@ vendor
 debug
 .vscode
 
-# vim temp files
+# Editor temporary files
 *.swp
 *.swo
 

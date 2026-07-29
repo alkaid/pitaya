@@ -524,22 +524,27 @@ func (a *agentImpl) keepClusterCacheAlive() {
 
 func (a *agentImpl) heartbeat() {
 	ticker := time.NewTicker(a.heartbeatTimeout)
+	defer ticker.Stop()
 
-	defer func() {
-		ticker.Stop()
-		a.Close(nil)
-	}()
+	a.heartbeatLoop(ticker.C)
+}
+
+func (a *agentImpl) heartbeatLoop(ticks <-chan time.Time) {
+	defer a.Close(nil)
 
 	for {
 		select {
-		case <-ticker.C:
-			deadline := time.Now().Add(-2 * a.heartbeatTimeout).Unix()
+		case tick, ok := <-ticks:
+			if !ok {
+				return
+			}
+			deadline := tick.Add(-2 * a.heartbeatTimeout).Unix()
 			if atomic.LoadInt64(&a.lastAt) < deadline {
 				logger.Zap.Debug("Session heartbeat timeout", zap.Int64("LastTime", atomic.LoadInt64(&a.lastAt)), zap.Int64("Deadline", deadline))
 				return
 			}
 			bs := make([]byte, 8)
-			binary.BigEndian.PutUint64(bs, uint64(time.Now().UnixMilli()))
+			binary.BigEndian.PutUint64(bs, uint64(tick.UnixMilli()))
 			hbData, err := a.encoder.Encode(packet.Heartbeat, bs)
 			if err != nil {
 				logger.Zap.Error("encode heartbeat failed", zap.Error(err))

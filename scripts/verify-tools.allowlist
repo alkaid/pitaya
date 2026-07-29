@@ -1,0 +1,4 @@
+# expires|owner|file|reference|reason
+2026-12-31|@alkaid|benchmark/high/docker-compose.yml|pitaya-dev:go1.26.5|locally built by the digest-pinned dev.Dockerfile contract
+2026-12-31|@alkaid|deploy/kubernetes/example-frontend.yaml|quay.io/felipejfc/pitaya-example-sv:v1|legacy deployment example image is no longer published as an OCI digest
+2026-12-31|@alkaid|deploy/kubernetes/example-backend.yaml|quay.io/felipejfc/pitaya-example-sv:v1|legacy deployment example image is no longer published as an OCI digest

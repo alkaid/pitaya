@@ -61,7 +61,6 @@ func (mi *ModuleInstance) Exports() modules.Exports {
 // The first argument is an options object with the following fields:
 // - handshakeData: the handshake data to send to the server
 // - requestTimeoutMs: the timeout for requests in milliseconds
-// - logLevel: the log level to use
 func (mi *ModuleInstance) NewClient(call sobek.ConstructorCall) *sobek.Object {
 	rt := mi.vu.Runtime()
 

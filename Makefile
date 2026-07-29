@@ -24,6 +24,7 @@ PROTOC_GEN_GO_ERRORS = $(shell $(GO_TOOL) -n protoc-gen-go-errors)
 XK6_VERSION := v1.4.7
 K6_VERSION := v1.8.0
 DEV_IMAGE := pitaya-dev:go1.26.5
+WORKSPACE := $(abspath go.work)
 
 TESTABLE_PACKAGES = `go list ./... | $(GREP_CMD) examples | $(GREP_CMD) constants | $(GREP_CMD) mocks | $(GREP_CMD) helpers | $(GREP_CMD) interfaces | $(GREP_CMD) protos | $(GREP_CMD) e2e | $(GREP_CMD) benchmark`
 
@@ -31,11 +32,15 @@ compile-core:
 	@tmpdir="$$(mktemp -d)"; trap 'rm -rf "$$tmpdir"' EXIT; go test -c -o "$$tmpdir/" $(CORE_PACKAGES)
 
 compile-root:
-	@tmpdir="$$(mktemp -d)"; trap 'rm -rf "$$tmpdir"' EXIT; \
-		go list ./... > "$$tmpdir/packages" || exit 1; \
-		while IFS= read -r package; do \
-			go test -c -o "$$tmpdir/package.test" "$$package" || exit 1; \
-		done < "$$tmpdir/packages"
+	@./scripts/compile-module.sh .
+
+compile-cli:
+	@./scripts/compile-module.sh pitaya-cli
+
+compile-xk6:
+	@./scripts/compile-module.sh xk6-pitaya
+
+compile: compile-root compile-cli compile-xk6
 
 test-unit:
 	@go test ./... -count=1
@@ -48,7 +53,28 @@ verify-root:
 	@$(MAKE) test-unit
 	@$(MAKE) vet
 
-compile-core compile-root test-unit vet verify-root init-toolchain setup-ci build-k6-extension protos-compile protos-compile-demo: export GOWORK = off
+module-verify:
+	@./scripts/verify-modules.sh
+
+tools-verify:
+	@./scripts/verify-tools.sh
+
+logrus-verify:
+	@./scripts/verify-logrus.sh
+
+test-consumer:
+	@./scripts/test-consumer.sh
+
+test-distribution:
+	@./scripts/test-distribution.sh
+
+verify-fast: tools-verify module-verify logrus-verify compile test-unit vet test-consumer
+
+scan-deps: init-toolchain
+	@./scripts/scan-deps.sh
+
+compile-core compile-root test-unit vet verify-root init-toolchain setup-ci build-k6-extension protos-compile protos-compile-demo scan-deps: export GOWORK = off
+compile-cli compile-xk6: export GOWORK = $(WORKSPACE)
 
 init-toolchain:
 	@go mod download -modfile=$(TOOLS_MOD)
@@ -85,7 +111,7 @@ run-jaeger-aio:
 	@echo "Access jaeger UI @ http://localhost:16686"
 
 run-chat-example:
-	@cd examples/testing && docker compose up -d etcd nats && cd ../demo/chat/ && go run main.go
+	@cd examples/testing && PITAYA_NATS_HOST_PORT=4222 PITAYA_ETCD_HOST_PORT=2379 docker compose up --detach --wait etcd nats && cd ../demo/chat/ && go run main.go
 
 run-cluster-example-frontend-tracing:
 	@PITAYA_METRICS_PROMETHEUS_PORT=9090 JAEGER_SAMPLER_PARAM=1 JAEGER_DISABLED=false JAEGER_SERVICE_NAME=example-frontend JAEGER_AGENT_PORT=6832 go run examples/demo/cluster/main.go
@@ -148,10 +174,10 @@ ensure-testing-bin:
 	@[ -f ./examples/testing/server ] || go build -o ./examples/testing/server ./examples/testing/main.go
 
 ensure-testing-deps:
-	@cd ./examples/testing && docker compose up -d
+	@cd ./examples/testing && PITAYA_NATS_HOST_PORT=4222 PITAYA_ETCD_HOST_PORT=2379 PITAYA_REDIS_HOST_PORT=6379 docker compose up --detach --wait
 
 ensure-e2e-deps-grpc:
-	@cd ./examples/testing && docker compose up -d etcd
+	@cd ./examples/testing && PITAYA_ETCD_HOST_PORT=2379 docker compose up --detach --wait etcd
 
 kill-testing-deps:
 	@cd ./examples/testing && docker compose down; true
@@ -159,15 +185,10 @@ kill-testing-deps:
 kill-jaeger:
 	@docker compose -f ./examples/testing/docker-compose-jaeger.yml down; true
 
-e2e-test: e2e-test-nats e2e-test-grpc
+test-e2e-nats e2e-test-nats:
+	@./scripts/test-e2e-nats.sh
 
-e2e-test-nats: ensure-testing-deps ensure-testing-bin
-	@echo "===============RUNNING E2E NATS TESTS==============="
-	@go test ./e2e/e2e_test.go -update
-
-e2e-test-grpc: ensure-testing-deps ensure-testing-bin
-	@echo "===============RUNNING E2E GRPC TESTS==============="
-	@go test ./e2e/e2e_test.go -update -grpc
+e2e-test: test-e2e-nats
 
 bench-nats-sv:
 	@PITAYA_METRICS_PROMETHEUS_PORT=9098 ./examples/testing/server -type game -frontend=false > /dev/null 2>&1 & echo $$! > back.PID
@@ -199,18 +220,16 @@ benchmark-test-grpc: ensure-e2e-deps-grpc ensure-testing-bin
 	@kill `cat back.PID` && rm back.PID
 	@kill `cat front.PID` && rm front.PID
 
-unit-test-coverage: kill-testing-deps
+unit-test-coverage:
 	@echo "===============RUNNING UNIT TESTS==============="
-	@go test $(TESTABLE_PACKAGES) -coverprofile coverprofile.out
+	@GOWORK=off go test ./... -count=1 -coverprofile coverprofile.out
 
-test: kill-testing-deps test-coverage
-	@make rm-test-temp-files
-	@make ensure-testing-deps
-	@sleep 10
-	@make e2e-test
+test: verify-fast
 
 test-coverage: unit-test-coverage
 	@make rm-test-temp-files
+
+coverage: unit-test-coverage
 
 test-coverage-html: test-coverage
 	@go tool cover -html=coverprofile.out
@@ -222,7 +241,7 @@ test-coverage-func coverage-func: test-coverage
 	@echo "\033[1;34m=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\033[0m"
 	@go tool cover -func=coverprofile.out | grep -Ev "100[.]0%"
 
-.PHONY: compile-core compile-root test-unit vet verify-root init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
+.PHONY: compile-core compile-root compile-cli compile-xk6 compile test-unit vet verify-root module-verify tools-verify logrus-verify test-consumer test-distribution verify-fast scan-deps test-e2e-nats e2e-test-nats e2e-test test coverage init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 
 mocks: agent-mock session-mock networkentity-mock pitaya-mock serializer-mock metrics-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 

@@ -60,13 +60,13 @@ func TestHandlerCallToFront(t *testing.T) {
 		resp []byte
 	}{
 		{"connector.testsvc.testrequestonlysessionreturnsptr", []byte(``), []byte(`{"code":200,"msg":"hello"}`)},
-		{"connector.testsvc.testrequestonlysessionreturnsptrnil", []byte(``), []byte(`{"code":"PIT-000","msg":"reply must not be null"}`)},
-		{"connector.testsvc.testrequestonlysessionreturnsrawnil", []byte(``), []byte(`{"code":"PIT-000","msg":"reply must not be null"}`)},
+		{"connector.testsvc.testrequestonlysessionreturnsptrnil", []byte(``), []byte(`{"code":500,"message":"reply must not be null"}`)},
+		{"connector.testsvc.testrequestonlysessionreturnsrawnil", []byte(``), []byte(`{"code":500,"message":"reply must not be null"}`)},
 		{"connector.testsvc.testrequestreturnsptr", []byte(`{"msg":"good"}`), []byte(`{"code":200,"msg":"good"}`)},
 		{"connector.testsvc.testrequestreturnsraw", []byte(`{"msg":"good"}`), []byte(`good`)},
 		{"connector.testsvc.testrequestreceivereturnsraw", []byte(`woow`), []byte(`woow`)},
-		{"connector.testsvc.nonexistenthandler", []byte(`woow`), []byte(`{"code":"PIT-404","msg":"pitaya/handler: connector.testsvc.nonexistenthandler not found"}`)},
-		{"connector.testsvc.testrequestreturnserror", []byte(`woow`), []byte(`{"code":"PIT-555","msg":"somerror"}`)},
+		{"connector.testsvc.nonexistenthandler", []byte(`woow`), []byte(`{"code":404,"message":"process handle message error"}`)},
+		{"connector.testsvc.testrequestreturnserror", []byte(`woow`), []byte(`{"code":500,"reason":"PIT-555","message":"somerror"}`)},
 	}
 	port := helpers.GetFreePort(t)
 	sdPrefix := fmt.Sprintf("%s/", uuid.New().String())
@@ -383,8 +383,8 @@ func TestForwardToBackend(t *testing.T) {
 		{"game.testsvc.testrequestreturnsptr", []byte(`{"msg":"good"}`), []byte(`{"code":200,"msg":"good"}`)},
 		{"game.testsvc.testrequestreturnsraw", []byte(`{"msg":"good"}`), []byte(`good`)},
 		{"game.testsvc.testrequestreceivereturnsraw", []byte(`woow`), []byte(`woow`)},
-		{"game.testsvc.nonexistenthandler", []byte(`woow`), []byte(`{"code":"PIT-404","msg":"pitaya/handler: game.testsvc.nonexistenthandler not found"}`)},
-		{"game.testsvc.testrequestreturnserror", []byte(`woow`), []byte(`{"code":"PIT-555","msg":"somerror"}`)},
+		{"game.testsvc.nonexistenthandler", []byte(`woow`), []byte(`{"code":404,"message":"process handle message error"}`)},
+		{"game.testsvc.testrequestreturnserror", []byte(`woow`), []byte(`{"code":500,"reason":"PIT-555","message":"somerror"}`)},
 	}
 
 	c := client.New()
@@ -485,12 +485,12 @@ func TestUserRPC(t *testing.T) {
 	}{
 		{"front_to_back", "connector.testsvc.testsendrpc", []byte(`{"route":"game.testremotesvc.rpctestrawptrreturnsptr","data":"thisthis"}`), []byte(`{"code":200,"msg":"got thisthis"}`)},
 		{"back_to_front", "game.testsvc.testsendrpc", []byte(`{"route":"connector.testremotesvc.rpctestrawptrreturnsptr","data":"thisthis"}`), []byte(`{"code":200,"msg":"got thisthis"}`)},
-		{"front_to_back_error", "connector.testsvc.testsendrpc", []byte(`{"route":"game.testremotesvc.rpctestreturnserror","data":"thisthis"}`), []byte(`{"code":"PIT-433","msg":"test error","metadata":{"some":"meta"}}`)},
-		{"back_to_front_error", "game.testsvc.testsendrpc", []byte(`{"route":"connector.testremotesvc.rpctestreturnserror","data":"thisthis"}`), []byte(`{"code":"PIT-433","msg":"test error","metadata":{"some":"meta"}}`)},
-		{"same_server", "connector.testsvc.testsendrpc", []byte(`{"route":"connector.testremotesvc.rpctestrawptrreturnsptr","data":"thisthis"}`), []byte(`{"code":"PIT-000","msg":"you are making a rpc that may be processed locally, either specify a different server type or specify a server id"}`)},
+		{"front_to_back_error", "connector.testsvc.testsendrpc", []byte(`{"route":"game.testremotesvc.rpctestreturnserror","data":"thisthis"}`), []byte(`{"code":500,"reason":"PIT-433","message":"test error","metadata":{"some":"meta"}}`)},
+		{"back_to_front_error", "game.testsvc.testsendrpc", []byte(`{"route":"connector.testremotesvc.rpctestreturnserror","data":"thisthis"}`), []byte(`{"code":500,"reason":"PIT-433","message":"test error","metadata":{"some":"meta"}}`)},
+		{"same_server", "connector.testsvc.testsendrpc", []byte(`{"route":"connector.testremotesvc.rpctestrawptrreturnsptr","data":"thisthis"}`), []byte(`{"code":500,"message":"you are making a rpc that may be processed locally, either specify a different server type or specify a server id"}`)},
 		{"front_to_back_ptr", "connector.testsvc.testsendrpc", []byte(`{"route":"game.testremotesvc.rpctestptrreturnsptr","data":"thisthis"}`), []byte(`{"code":200,"msg":"got thisthis"}`)},
 		{"no_args", "connector.testsvc.testsendrpcnoargs", []byte(`{"route":"game.testremotesvc.rpctestnoargs"}`), []byte(`{"code":200,"msg":"got nothing"}`)},
-		{"not_found", "connector.testsvc.testsendrpc", []byte(`{"route":"game.testremotesvc.rpctestnotfound","data":"thisthis"}`), []byte(`{"code":"PIT-404","msg":"route not found","metadata":{"route":"testremotesvc.rpctestnotfound"}}`)},
+		{"not_found", "connector.testsvc.testsendrpc", []byte(`{"route":"game.testremotesvc.rpctestnotfound","data":"thisthis"}`), []byte(`{"code":404,"message":"route not found","metadata":{"route":"testremotesvc.rpctestnotfound"}}`)},
 	}
 
 	for _, table := range tables {
