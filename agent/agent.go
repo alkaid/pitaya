@@ -33,9 +33,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/alkaid/pitaya/v2/acceptor"
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
-	"github.com/alkaid/pitaya/v2/acceptor"
 	"go.uber.org/zap"
 
 	"go.opentelemetry.io/otel/trace"
@@ -601,7 +601,7 @@ func (a *agentImpl) SendHeartbeatResponse(unixMillTime int64) error {
 	if unixMillTime > 0 {
 		bs := make([]byte, 8)
 		binary.BigEndian.PutUint64(bs, uint64(unixMillTime))
-		hbAckData, err = a.encoder.Encode(packet.HandshakeAck, bs)
+		hbAckData, err = a.encoder.Encode(packet.HeartbeatAck, bs)
 		if err != nil {
 			logger.Zap.Error("encode heartbeat ack error ")
 			hbAckData = hbAck

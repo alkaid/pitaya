@@ -871,6 +871,18 @@ func TestAgentSendHeartbeatResponse(t *testing.T) {
 	pWrite := helpers.ShouldEventuallyReceive(t, ag.chSend).(pendingWrite)
 	assert.NotNil(t, pWrite.ctx)
 	assert.Equal(t, hbAck, pWrite.data)
+
+	const timestamp = int64(123456789)
+	timestampData := make([]byte, 8)
+	binary.BigEndian.PutUint64(timestampData, uint64(timestamp))
+	encodedHeartbeat := []byte("encoded heartbeat")
+	mockEncoder.EXPECT().Encode(packet.Type(packet.HeartbeatAck), timestampData).Return(encodedHeartbeat, nil)
+
+	err = ag.SendHeartbeatResponse(timestamp)
+	assert.NoError(t, err)
+	pWrite = helpers.ShouldEventuallyReceive(t, ag.chSend).(pendingWrite)
+	assert.NotNil(t, pWrite.ctx)
+	assert.Equal(t, encodedHeartbeat, pWrite.data)
 }
 
 func TestAnswerWithError(t *testing.T) {
