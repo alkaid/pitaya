@@ -2,7 +2,7 @@ syntax = "proto3";
 
 //package protos;
 package demo.pb.protos;
-option go_package = "examples/demo/cluster_protobuf/protos";
+option go_package = "examples/demo/cluster_ak/protos";
 // Response represents a rpc message
 message Response {
   int32 Code = 1;

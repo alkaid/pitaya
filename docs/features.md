@@ -104,7 +104,7 @@ The list of metrics reported by the `Reporter` is:
 
 ### Custom Metrics
 
-Besides pitaya default monitoring, it is possible to create new metrics. If using only Statsd reporter, no configuration is needed. If using Prometheus, it is necessary do add a configuration specifying the metrics parameters. More details on [doc](configuration.html#metrics-reporting) and this [example](https://github.com/topfreegames/pitaya/tree/master/examples/demo/custom_metrics).
+Besides pitaya default monitoring, it is possible to create new metrics. If using only Statsd reporter, no configuration is needed. If using Prometheus, it is necessary do add a configuration specifying the metrics parameters. More details are available in {ref}`metrics-reporting` and this [example](https://github.com/topfreegames/pitaya/tree/master/examples/demo/custom_metrics).
 
 ## Pipelines
 
@@ -187,4 +187,3 @@ Callbacks can be added to some session lifecycle changes, such as closing and bi
 ### Backend sessions
 
 Backend sessions have access to the sessions through the handler's methods, but they have some limitations and special characteristics. Changes to session variables must be pushed to the frontend server by calling `s.PushToFront` (this is not needed for `s.Bind` operations), setting callbacks to session lifecycle operations is also not allowed. One can also not retrieve a session by user ID from a backend server.
-

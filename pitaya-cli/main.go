@@ -22,24 +22,30 @@ package main
 
 import (
 	"flag"
-	"sync"
+	"log"
+	"os"
 
 	"github.com/alkaid/pitaya/v2/client"
 	"github.com/alkaid/pitaya/v2/session"
 )
 
 var (
-	pClient        client.PitayaClient
-	disconnectedCh chan bool
-	docsString     string
-	fileName       string
-	pushInfo       map[string]string
-	wait           sync.WaitGroup
-	prettyJSON     bool
-	handshake      *session.HandshakeData
+	pClient          client.PitayaClient
+	activeConnection *serverConnection
+	docsString       string
+	fileName         string
+	pushInfo         map[string]string
+	prettyJSON       bool
+	handshake        *session.HandshakeData
 )
 
 func main() {
+	if code := run(); code != 0 {
+		os.Exit(code)
+	}
+}
+
+func run() int {
 	flag.StringVar(&docsString, "docs", "", "documentation route")
 	flag.StringVar(&fileName, "filename", "", "file with commands")
 	flag.BoolVar(&prettyJSON, "pretty", false, "print pretty jsons")
@@ -55,11 +61,16 @@ func main() {
 			"age": 30,
 		},
 	}
+	pushInfo = make(map[string]string)
 
 	switch {
 	case fileName != "":
-		executeFromFile(fileName)
+		if err := executeFromFile(fileName); err != nil {
+			log.Printf("error: %s", err)
+			return 1
+		}
+		return 0
 	default:
-		repl()
+		return repl()
 	}
 }

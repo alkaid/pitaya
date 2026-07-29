@@ -228,6 +228,8 @@ Connection
     - bool
     - If true, ignores rate limiting even when added with WithWrappers
 
+.. _metrics-reporting:
+
 Metrics Reporting
 =================
 

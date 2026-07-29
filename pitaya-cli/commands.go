@@ -28,10 +28,11 @@ import (
 	"github.com/alkaid/pitaya/v2/client"
 )
 
-func connect(logger Log, addr string, onMessageCallback func([]byte)) (err error) {
+func connect(logger Log, addr string, callbacks serverCallbacks) (err error) {
 	if pClient != nil && pClient.ConnectedStatus() {
 		return errors.New("already connected")
 	}
+	waitForMessageReader()
 
 	switch {
 	case docsString != "":
@@ -45,6 +46,8 @@ func connect(logger Log, addr string, onMessageCallback func([]byte)) (err error
 	if err != nil {
 		return err
 	}
+	connection := newServerConnection(pClient)
+	registerDisconnectHandler(connection)
 
 	if err = tryConnect(addr); err != nil {
 		logger.Println("Failed to connect!")
@@ -52,10 +55,24 @@ func connect(logger Log, addr string, onMessageCallback func([]byte)) (err error
 	}
 
 	logger.Println("connected!")
-	disconnectedCh = make(chan bool, 1)
-	go readServerMessages(onMessageCallback)
+	activeConnection = connection
+	go readServerMessages(connection, callbacks)
 
 	return nil
+}
+
+func registerDisconnectHandler(connection *serverConnection) {
+	connection.pitayaClient.OnDisconnected(func(client.CloseReason) {
+		connection.signalDisconnected()
+	})
+}
+
+func waitForMessageReader() {
+	if activeConnection == nil {
+		return
+	}
+	activeConnection.waitForReader()
+	activeConnection = nil
 }
 
 func setHandshake(logger Log, args []string) error {
@@ -106,17 +123,22 @@ func push(logger Log, args []string) error {
 	return nil
 }
 
-func request(logger Log, args []string) error {
+func request(_ Log, args []string) error {
+	_, err := sendRequest(args)
+	return err
+}
+
+func sendRequest(args []string) (uint, error) {
 	if pClient == nil {
-		return errors.New("not connected")
+		return 0, errors.New("not connected")
 	}
 
 	if !pClient.ConnectedStatus() {
-		return errors.New("not connected")
+		return 0, errors.New("not connected")
 	}
 
 	if len(args) < 1 {
-		return errors.New(`request should be in the format: request {route} [data]`)
+		return 0, errors.New(`request should be in the format: request {route} [data]`)
 	}
 
 	route := args[0]
@@ -126,12 +148,7 @@ func request(logger Log, args []string) error {
 		data = []byte(strings.Join(args[1:], ""))
 	}
 
-	_, err := pClient.SendRequest(route, data)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return pClient.SendRequest(route, data)
 }
 
 func notify(logger Log, args []string) error {
@@ -161,10 +178,16 @@ func notify(logger Log, args []string) error {
 }
 
 func disconnect() {
-	if pClient.ConnectedStatus() {
-		disconnectedCh <- true
-		pClient.Disconnect(client.CloseReasonManual)
+	if activeConnection == nil {
+		return
 	}
+	if activeConnection.pitayaClient.ConnectedStatus() {
+		activeConnection.pitayaClient.Disconnect(client.CloseReasonManual)
+	} else {
+		activeConnection.signalDisconnected()
+	}
+	activeConnection.waitForReader()
+	activeConnection = nil
 }
 
 func routes(logger Log) error {

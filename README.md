@@ -1,42 +1,43 @@
-# pitaya [![Build Status][7]][8] [![Coverage Status][9]][10] [![GoDoc][1]][2] [![Docs][11]][12] [![Go Report Card][3]][4] [![MIT licensed][5]][6]
+# pitaya [![Build Status][7]][8] [![Go Reference][1]][2] [![Docs][11]][12] [![Go Report Card][3]][4] [![MIT licensed][5]][6]
 
-*WARNING*: The [version v1.x](https://github.com/topfreegames/pitaya/tree/v1) of pitaya is deprecated, complete guide of the new version v2.x can be found [here](https://github.com/topfreegames/pitaya/issues/240).
-The current README is for version v2.x, make sure you look at branch v1 if you'd like to see the documentation for the older version.
+*WARNING*: [Version v1.x](https://github.com/alkaid/pitaya/tree/v1) is deprecated. See the [v2 migration guide](https://github.com/topfreegames/pitaya/issues/240) for details.
+This README covers v2.x. See the v1 branch for the older documentation.
 
 ---
 
-[1]: https://godoc.org/github.com/topfreegames/pitaya?status.svg
-[2]: https://godoc.org/github.com/topfreegames/pitaya
-[3]: https://goreportcard.com/badge/github.com/topfreegames/pitaya
-[4]: https://goreportcard.com/report/github.com/topfreegames/pitaya
+[1]: https://pkg.go.dev/badge/github.com/alkaid/pitaya/v2.svg
+[2]: https://pkg.go.dev/github.com/alkaid/pitaya/v2
+[3]: https://goreportcard.com/badge/github.com/alkaid/pitaya
+[4]: https://goreportcard.com/report/github.com/alkaid/pitaya
 [5]: https://img.shields.io/badge/license-MIT-blue.svg
 [6]: LICENSE
-[7]: https://github.com/topfreegames/pitaya/actions/workflows/tests.yaml/badge.svg
-[8]: https://github.com/topfreegames/pitaya/actions/workflows/tests.yaml
-[9]: https://coveralls.io/repos/github/topfreegames/pitaya/badge.svg?branch=master
-[10]: https://coveralls.io/github/topfreegames/pitaya?branch=master
+[7]: https://github.com/alkaid/pitaya/actions/workflows/tests.yaml/badge.svg
+[8]: https://github.com/alkaid/pitaya/actions/workflows/tests.yaml
 [11]: https://readthedocs.org/projects/pitaya/badge/?version=latest
 [12]: https://pitaya.readthedocs.io/en/latest/?badge=latest
 
-Pitaya is an simple, fast and lightweight game server framework with clustering support and client libraries for iOS, Android, Unity and others through the [C SDK](https://github.com/topfreegames/libpitaya).
+Pitaya is a fast, lightweight game server framework with clustering support and client libraries for iOS, Android, Unity, and other platforms through the [C SDK](https://github.com/topfreegames/libpitaya).
 It provides a basic development framework for distributed multiplayer games and server-side applications.
 
 ## Getting Started
 
 ### Prerequisites
 
-* [Go](https://golang.org/) >= 1.16
-* [etcd](https://github.com/coreos/etcd) (optional, used for service discovery)
-* [nats](https://github.com/nats-io/nats.go) (optional, used for sending and receiving rpc)
-* [docker](https://www.docker.com) (optional, used for running etcd and nats dependencies on containers)
+* [Go](https://go.dev/) 1.26.5 or newer
+* [etcd](https://github.com/etcd-io/etcd) (optional, used for service discovery)
+* [NATS](https://github.com/nats-io/nats-server) (optional, used for sending and receiving RPCs)
+* [Docker](https://www.docker.com/) with [Docker Compose v2](https://docs.docker.com/compose/) (optional, used to run etcd and NATS in containers)
+* [protoc 35.1](https://github.com/protocolbuffers/protobuf/releases/tag/v35.1) (only required to regenerate protobuf files; Go plugins are pinned in [`tools/go.mod`](./tools/go.mod))
+* [Python 3.12 or newer](https://www.python.org/) (only required to build the documentation)
 
 ### Installing
-clone the repo
+Clone the repository:
+```sh
+git clone https://github.com/alkaid/pitaya.git
+cd pitaya
 ```
-git clone https://github.com/topfreegames/pitaya.git
-```
-setup pitaya dependencies
-```
+Initialize the submodules and pinned Go tools:
+```sh
 make setup
 ```
 
@@ -44,9 +45,9 @@ make setup
 
 Here's one example of running Pitaya:
 
-Start etcd (This command requires docker-compose and will run an etcd container locally. An etcd may be run without docker if preferred.)
-```
-cd ./examples/testing && docker-compose up -d etcd
+Start etcd. This command uses Docker Compose to run an etcd container locally:
+```sh
+docker compose -f ./examples/testing/docker-compose.yml up -d etcd
 ```
 run the connector frontend server from cluster_grpc example
 ```
@@ -57,10 +58,14 @@ run the room backend server from the cluster_grpc example
 make run-cluster-grpc-example-room
 ```
 
-Now there should be 2 pitaya servers running, a frontend connector and a backend room. To send requests, use a REPL client for pitaya [pitaya-cli](https://github.com/topfreegames/pitaya/tree/main/pitaya-cli).
+There should now be two Pitaya servers running: a frontend connector and a backend room. To send requests, use the [pitaya-cli](https://github.com/alkaid/pitaya/tree/main/pitaya-cli) REPL client.
+
+```sh
+make build-cli
+```
 
 ```
-$ pitaya-cli
+$ ./build/pitaya-cli
 Pitaya REPL Client
 >>> connect localhost:3250
 connected!
@@ -73,6 +78,17 @@ connected!
 make test
 ```
 This command will run both unit and e2e tests.
+
+## Building the documentation
+
+Build the documentation in an isolated Python environment:
+
+```sh
+cd docs
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+make SPHINXBUILD=.venv/bin/sphinx-build html
+```
 
 ## Contributing
 #TODO
@@ -96,11 +112,11 @@ If you have found a security vulnerability, please email security@tfgco.com
   + [libpitaya](https://github.com/topfreegames/libpitaya)
   + [pitaya-admin](https://github.com/topfreegames/pitaya-admin)
   + [pitaya-bot](https://github.com/topfreegames/pitaya-bot)
-  + [pitaya-cli](https://github.com/topfreegames/pitaya/tree/main/pitaya-cli)
+  + [pitaya-cli](https://github.com/alkaid/pitaya/tree/main/pitaya-cli)
   + [pitaya-protos](https://github.com/topfreegames/pitaya-protos)
 
 - Documents
-  + [API Reference](https://godoc.org/github.com/topfreegames/pitaya)
+  + [API Reference](https://pkg.go.dev/github.com/alkaid/pitaya/v2)
   + [In-depth documentation](https://pitaya.readthedocs.io/en/latest/)
 
 - Demo

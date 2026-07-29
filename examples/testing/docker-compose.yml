@@ -1,16 +1,19 @@
-version: '3'
 services:
   nats:
-    image: nats
+    image: nats:2.11.17-alpine@sha256:e4bf19f15fd3218814a4e3c9e0064e1334bd8aa20d5984b9f1a0afd084f8cc00
     ports:
       - 4222:4222
   etcd:
-    image: bitnami/etcd
-    environment:
-      - ALLOW_NONE_AUTHENTICATION=yes
+    image: gcr.io/etcd-development/etcd:v3.6.14@sha256:a491baeaa0cb0c9cd89c0062ac44ece53886e3e5bddad18d2daf36678ce665b6
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd
+      - --data-dir=/var/lib/etcd/default.etcd
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
     ports:
       - 2379:2379
   redis:
-    image: redis
+    image: redis:7.4.10-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
     ports:
       - 6379:6379

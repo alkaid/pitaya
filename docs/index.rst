@@ -12,6 +12,8 @@ Welcome to Pitaya's documentation!
 
    overview
    features
+   builder
+   handshake-validators
    communication
    actor-keyed-executor
    configuration

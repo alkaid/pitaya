@@ -3,23 +3,39 @@ ifeq ($(OS), Windows_NT)
 	XK6_BIN := k6.exe
 	MKFOLDER := if not exist "build" mkdir build
 	GREP_CMD := findstr /V
+	GOWORK_OFF := set "GOWORK=off" &&
 else
 	BIN := pitaya-cli
 	XK6_BIN := k6
 	MKFOLDER := mkdir -p build
 	GREP_CMD := grep -v
+	GOWORK_OFF := GOWORK=off
 endif
 
 MOCKGEN := go tool mockgen
+TOOLS_MOD := tools/go.mod
+GO_TOOL = $(GOWORK_OFF) go tool -modfile=$(TOOLS_MOD)
+PROTOC := protoc
+PROTOC_VERSION := 35.1
+PROTOC_GEN_GO = $(shell $(GO_TOOL) -n protoc-gen-go)
+PROTOC_GEN_GO_GRPC = $(shell $(GO_TOOL) -n protoc-gen-go-grpc)
+PROTOC_GEN_GO_ERRORS = $(shell $(GO_TOOL) -n protoc-gen-go-errors)
+XK6_VERSION := v1.4.7
+K6_VERSION := v1.8.0
+DEV_IMAGE := pitaya-dev:go1.26.5
 
 TESTABLE_PACKAGES = `go list ./... | $(GREP_CMD) examples | $(GREP_CMD) constants | $(GREP_CMD) mocks | $(GREP_CMD) helpers | $(GREP_CMD) interfaces | $(GREP_CMD) protos | $(GREP_CMD) e2e | $(GREP_CMD) benchmark`
 
-init-toolchain:
-	#download protoc  url=https://github.com/protocolbuffers/protobuf/releases  then add bin to PATH
-	@go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-	@go install github.com/alkaid/goerrors/cmd/protoc-gen-go-errors@latest
+init-toolchain setup-ci build-k6-extension protos-compile protos-compile-demo: export GOWORK = off
 
-setup: init-submodules
+init-toolchain:
+	@go mod download -modfile=$(TOOLS_MOD)
+
+check-protoc:
+	@version="$$($(PROTOC) --version 2>/dev/null)" || { echo "protoc $(PROTOC_VERSION) is required"; exit 1; }; \
+		test "$$version" = "libprotoc $(PROTOC_VERSION)" || { echo "protoc $(PROTOC_VERSION) is required (found $$version)"; exit 1; }
+
+setup: init-submodules init-toolchain
 	@go mod tidy
 
 build-cli:
@@ -29,26 +45,25 @@ build-cli:
 
 build-k6-extension:
 	@$(MKFOLDER)
-	@xk6 build --with github.com/alkaid/pitaya/xk6-pitaya=./xk6-pitaya/ --with github.com/alkaid/pitaya/v2=./ --with google.golang.org/grpc=google.golang.org/grpc@v1.54.1 --output ./build/$(XK6_BIN)
+	@go run go.k6.io/xk6/cmd/xk6@$(XK6_VERSION) build $(K6_VERSION) --build-flags=-trimpath --build-flags="-ldflags=-s -w" --build-flags=-buildvcs=false --with github.com/alkaid/pitaya/xk6-pitaya=./xk6-pitaya/ --with github.com/alkaid/pitaya/v2=./ --output ./build/$(XK6_BIN)
 	@echo "build pitaya k6 extension at ./build/$(XK6_BIN)"
 
 init-submodules:
-	@git submodule init
+	@git submodule update --init --recursive
 
-setup-ci:
-	@go get github.com/mattn/goveralls
-	@go get -u github.com/wadey/gocovmerge
+setup-ci: init-toolchain
+	@go mod download
 
 setup-protobuf-macos:
 	@brew install protobuf
-	@go get github.com/golang/protobuf/protoc-gen-go
+	@$(MAKE) check-protoc
 
 run-jaeger-aio:
-	@docker-compose -f ./examples/testing/docker-compose-jaeger.yml up -d
+	@docker compose -f ./examples/testing/docker-compose-jaeger.yml up -d
 	@echo "Access jaeger UI @ http://localhost:16686"
 
 run-chat-example:
-	@cd examples/testing && docker-compose up -d etcd nats && cd ../demo/chat/ && go run main.go
+	@cd examples/testing && docker compose up -d etcd nats && cd ../demo/chat/ && go run main.go
 
 run-cluster-example-frontend-tracing:
 	@PITAYA_METRICS_PROMETHEUS_PORT=9090 JAEGER_SAMPLER_PARAM=1 JAEGER_DISABLED=false JAEGER_SERVICE_NAME=example-frontend JAEGER_AGENT_PORT=6832 go run examples/demo/cluster/main.go
@@ -89,19 +104,19 @@ run-custom-metrics-example:
 run-rate-limiting-example:
 	@go run examples/demo/rate_limiting/main.go
 
-protos-compile-demo:
-	@protoc -I examples/demo/protos examples/demo/protos/*.proto --go_out=.
-	@protoc -I examples/testing/protos examples/testing/protos/*.proto --go_out=.
-	@protoc -I examples/demo/cluster_protobuf/protos examples/demo/cluster_protobuf/protos/*.proto --go_out=.
-	@protoc -I examples/demo/worker/protos examples/demo/worker/protos/*.proto --go_out=.
-	@#protoc -I examples/demo/cluster_ak/protos examples/demo/cluster_ak/protos/*.proto --go_out=.
+protos-compile-demo: check-protoc init-toolchain
+	@$(PROTOC) --plugin=protoc-gen-go=$(PROTOC_GEN_GO) -I examples/demo/protos examples/demo/protos/*.proto --go_out=.
+	@$(PROTOC) --plugin=protoc-gen-go=$(PROTOC_GEN_GO) -I examples/testing/protos examples/testing/protos/*.proto --go_out=.
+	@$(PROTOC) --plugin=protoc-gen-go=$(PROTOC_GEN_GO) -I examples/demo/cluster_protobuf/protos examples/demo/cluster_protobuf/protos/*.proto --go_out=.
+	@$(PROTOC) --plugin=protoc-gen-go=$(PROTOC_GEN_GO) -I examples/demo/worker/protos examples/demo/worker/protos/*.proto --go_out=.
+	@$(PROTOC) --plugin=protoc-gen-go=$(PROTOC_GEN_GO) -I examples/demo/cluster_ak/protos examples/demo/cluster_ak/protos/*.proto --go_out=.
 
 #https://developers.google.com/protocol-buffers/docs/reference/go-generated
-protos-compile:
-	@cd benchmark/testdata && ./gen_proto.sh
-	@protoc --proto_path=. --proto_path=./pitaya-protos/lib/alkaid/goerrors pitaya-protos/*.proto --go_out=. --go_opt=paths=import --go-errors_out=.
-	@protoc --proto_path=. --proto_path=./pitaya-protos/lib/alkaid/goerrors pitaya-protos/*.proto --go-grpc_out=.
-	@protoc -I pitaya-protos/test pitaya-protos/test/*.proto --go_out=protos/test --go_opt=paths=import
+protos-compile: check-protoc init-toolchain
+	@cd benchmark/testdata && PROTOC="$(PROTOC)" ./gen_proto.sh
+	@$(PROTOC) --plugin=protoc-gen-go=$(PROTOC_GEN_GO) --plugin=protoc-gen-go-errors=$(PROTOC_GEN_GO_ERRORS) --proto_path=. --proto_path=./pitaya-protos/lib/alkaid/goerrors pitaya-protos/*.proto --go_out=. --go_opt=paths=import --go-errors_out=.
+	@$(PROTOC) --plugin=protoc-gen-go-grpc=$(PROTOC_GEN_GO_GRPC) --proto_path=. --proto_path=./pitaya-protos/lib/alkaid/goerrors pitaya-protos/*.proto --go-grpc_out=.
+	@$(PROTOC) --plugin=protoc-gen-go=$(PROTOC_GEN_GO) -I pitaya-protos/test pitaya-protos/test/*.proto --go_out=protos/test --go_opt=paths=source_relative
 
 rm-test-temp-files:
 	@rm -f cluster/127.0.0.1* 127.0.0.1*
@@ -111,16 +126,16 @@ ensure-testing-bin:
 	@[ -f ./examples/testing/server ] || go build -o ./examples/testing/server ./examples/testing/main.go
 
 ensure-testing-deps:
-	@cd ./examples/testing && docker-compose up -d
+	@cd ./examples/testing && docker compose up -d
 
 ensure-e2e-deps-grpc:
-	@cd ./examples/testing && docker-compose up -d etcd
+	@cd ./examples/testing && docker compose up -d etcd
 
 kill-testing-deps:
-	@cd ./examples/testing && docker-compose down; true
+	@cd ./examples/testing && docker compose down; true
 
 kill-jaeger:
-	@docker-compose -f ./examples/testing/docker-compose-jaeger.yml down; true
+	@docker compose -f ./examples/testing/docker-compose-jaeger.yml down; true
 
 e2e-test: e2e-test-nats e2e-test-grpc
 
@@ -178,18 +193,14 @@ test-coverage: unit-test-coverage
 test-coverage-html: test-coverage
 	@go tool cover -html=coverprofile.out
 
-merge-profiles:
-	@rm -f coverage-all.out
-	@gocovmerge *.out > coverage-all.out
-
-test-coverage-func coverage-func: test-coverage merge-profiles
+test-coverage-func coverage-func: test-coverage
 	@echo
 	@echo "\033[1;34m=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\033[0m"
 	@echo "\033[1;34mFunctions NOT COVERED by Tests\033[0m"
 	@echo "\033[1;34m=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\033[0m"
-	@go tool cover -func=coverage-all.out | egrep -v "100.0[%]"
+	@go tool cover -func=coverprofile.out | grep -Ev "100[.]0%"
 
-.PHONY: mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
+.PHONY: init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 
 mocks: agent-mock session-mock networkentity-mock pitaya-mock serializer-mock metrics-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 
@@ -238,10 +249,10 @@ codec-mock:
 	@$(MOCKGEN) -destination=conn/codec/mocks/packet_decoder.go -package=mocks github.com/alkaid/pitaya/v2/conn/codec PacketDecoder
 
 build-dev-image:
-	@docker build . -f dev.Dockerfile -t pitaya-dev:latest --build-arg GOPROXY=https://goproxy.io,direct --build-arg GOPRIVATE=git.mycompany.com,github.com/my/private
+	@docker build . -f dev.Dockerfile -t $(DEV_IMAGE) --build-arg GOPROXY=https://goproxy.io,direct --build-arg GOPRIVATE=git.mycompany.com,github.com/my/private
 
 ensure-dev-image-exists:
-	@docker images | grep pitaya-dev || make build-dev-image
+	@docker image inspect $(DEV_IMAGE) >/dev/null 2>&1 || $(MAKE) build-dev-image
 
 test-many-clients-in-container:ensure-dev-image-exists
-	@docker run pitaya-dev go test -v benchmark/benchmark_test.go -bench=CreateManyClients -benchmem -benchtime=50x
+	@docker run --rm $(DEV_IMAGE) go test -v benchmark/benchmark_test.go -bench=CreateManyClients -benchmem -benchtime=50x

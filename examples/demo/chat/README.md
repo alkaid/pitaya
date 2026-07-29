@@ -1,7 +1,7 @@
 # pitaya-chat-demo
-chat room demo base on [pitaya](https://github.com/topfreegames/pitaya) in 100 lines
+chat room demo base on [pitaya](https://github.com/alkaid/pitaya) in 100 lines
 
-refs: https://github.com/topfreegames/pitaya
+refs: https://github.com/alkaid/pitaya
 
 ## Required
 - golang
@@ -9,7 +9,7 @@ refs: https://github.com/topfreegames/pitaya
 
 ## Run
 ```
-docker-compose -f ../../testing/docker-compose.yml up -d etcd nats
+docker compose -f ../../testing/docker-compose.yml up -d etcd nats
 go run main.go
 ```
 

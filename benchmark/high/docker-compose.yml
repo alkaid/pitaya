@@ -1,7 +1,6 @@
-version: '2'
 services:
   nats:
-    image: nats
+    image: nats:2.11.17-alpine@sha256:e4bf19f15fd3218814a4e3c9e0064e1334bd8aa20d5984b9f1a0afd084f8cc00
     ports:
       - "8222:8222"
     command: "--cluster_name NATS --cluster nats://0.0.0.0:6222 --http_port 8222 "
@@ -12,27 +11,34 @@ services:
 #  nats pub -s "nats://nats-2:4222" hello second
 
 #  nats-1:
-#    image: nats
+#    image: nats:2.11.17-alpine@sha256:e4bf19f15fd3218814a4e3c9e0064e1334bd8aa20d5984b9f1a0afd084f8cc00
 #    command: "--cluster_name NATS --cluster nats://0.0.0.0:6222 --routes=nats://nats:6222"
 #    depends_on: ["nats"]
 #    networks: ["high-testing"]
 #  nats-2:
-#    image: nats
+#    image: nats:2.11.17-alpine@sha256:e4bf19f15fd3218814a4e3c9e0064e1334bd8aa20d5984b9f1a0afd084f8cc00
 #    command: "--cluster_name NATS --cluster nats://0.0.0.0:6222 --routes=nats://nats:6222"
 #    depends_on: ["nats"]
 #    networks: ["high-testing"]
   etcd:
-    image: appcelerator/etcd
+    image: gcr.io/etcd-development/etcd:v3.6.14@sha256:a491baeaa0cb0c9cd89c0062ac44ece53886e3e5bddad18d2daf36678ce665b6
+    command:
+      - /usr/local/bin/etcd
+      - --name=etcd
+      - --data-dir=/var/lib/etcd/default.etcd
+      - --listen-client-urls=http://0.0.0.0:2379
+      - --advertise-client-urls=http://etcd:2379
 #    ports:
 #      - "2379:2379"
   redis:
-    image: redis
+    image: redis:7.4.10-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
     ports:
       - "6379:6379"
   netutils:
-    image: getsatheeshin/network-utils-image
+    image: nicolaka/netshoot:v0.16@sha256:b09d9b21381f47a79b3cbcb30da25266dc17186ea00ae65e99fdc51396f48e70
+    command: ["tail", "-f", "/dev/null"]
   pitaya-bench-frontend:
-    image: pitaya-dev
+    image: pitaya-dev:go1.26.5
     ports:
       - "32222:32222"
     depends_on:
@@ -52,14 +58,14 @@ services:
 #      net.netfilter.nf_conntrack_max: 1048576
     command: ./examples/testing/server -type connector -frontend=true -natsurl=nats://nats:4222 -etcdurl=etcd:2379 -redisurl=redis:6379 -debug=true
   pitaya-bench-backend:
-    image: pitaya-dev
+    image: pitaya-dev:go1.26.5
     depends_on:
       - nats
       - etcd
       - redis
     command: ./examples/testing/server -type game -frontend=false -natsurl=nats://nats:4222 -etcdurl=etcd:2379 -redisurl=redis:6379
   pitaya-bench-client:
-    image: pitaya-dev
+    image: pitaya-dev:go1.26.5
     scale: 3
     ulimits:
       nofile:

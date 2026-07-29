@@ -1,20 +1,25 @@
 pitaya-cli
 ==================
 
-A REPL cli client made in go for pitaya.
+A Go REPL client for Pitaya.
 
-## Installing
+## Building from source
 
-```
-go install github.com/alkaid/pitaya/pitaya-cli/v2@latest
+The CLI currently builds against the Pitaya module in the same checkout:
+
+```sh
+git clone https://github.com/alkaid/pitaya.git
+cd pitaya/pitaya-cli
+mkdir -p out
+go build -o ./out/pitaya-cli .
 ```
 
 ## Usage
 
-For cli flags, run `pitaya-cli --help`
+For CLI flags, run `./out/pitaya-cli --help`.
 
 ```
-$ pitaya-cli
+$ ./out/pitaya-cli
 
 Pitaya REPL Client
 >>> help
@@ -44,8 +49,8 @@ a short example of both routes:
 import (
 	// ...
 
-	"github.com/topfreegames/pitaya"
-	"github.com/topfreegames/pitaya/protos"
+	"github.com/alkaid/pitaya/v2"
+	"github.com/alkaid/pitaya/v2/protos"
 )
 
 // Docs handler
@@ -80,9 +85,9 @@ func (c *MyHandler) Descriptors(ctx context.Context, names *protos.ProtoNames) (
 }
 ```
 
-When initializing the CLI, you have to provide the docs route as the following:
+When initializing the CLI, provide the docs route as follows:
 ```
-pitaya-cli -docs connector.docsHandler.docs
+./out/pitaya-cli -docs connector.docsHandler.docs
 ```
 
 NOTE: The descriptors handler is automatically discovered by the client.
@@ -90,7 +95,7 @@ It must only follow the signature mentioned earlier.
 
 A full example of running pitaya-cli with protobuf:
 ```
-pitaya-cli -docs connector.docsHandler.docs
+./out/pitaya-cli -docs connector.docsHandler.docs
 >>> push connector.playerHandler.matchfound protos.FindMatchPush
 >>> connect localhost:30124
 >>> request connector.playerHandler.create
@@ -127,4 +132,4 @@ request connector.playerHandler.create
 request connector.playerHandler.findmatch {"RoomType":"xxxx"}
 ```
 
-Then run: `pitaya-cli --filename commands.txt`
+Then run `./out/pitaya-cli --filename commands.txt`.

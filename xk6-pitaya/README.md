@@ -1,21 +1,31 @@
 # xk6-pitaya
 
-`xk6-pitaya` is a [k6](https://go.k6.io/k6) extension that provides a [Pitaya](https://github.com/topfreegames/pitaya) client implementation.
+`xk6-pitaya` is a [k6](https://go.k6.io/k6) extension that provides a [Pitaya](https://github.com/alkaid/pitaya) client implementation.
 
 # Usage
 
 ## Building the k6 binary
 
 ```shell
-xk6 build --with github.com/topfreegames/xk6-pitaya=. --with github.com/topfreegames/pitaya/v2=../
+go install go.k6.io/xk6/cmd/xk6@v1.4.7
+GOWORK=off xk6 build v1.8.0 \
+  --build-flags=-trimpath \
+  --build-flags="-ldflags=-s -w" \
+  --build-flags=-buildvcs=false \
+  --with github.com/alkaid/pitaya/xk6-pitaya=. \
+  --with github.com/alkaid/pitaya/v2=../
 ```
 
 ## Building the k6 docker image
 
 ```shell
-docker build --build-arg pitaya_revision=ac6eb29bdb -t xk6-pitaya
-# change the pitaya_revision to the revision you want to use
+docker build \
+  --build-arg pitaya_revision="$(git rev-parse HEAD)" \
+  -t xk6-pitaya:1.8.0 .
 ```
+
+Set `pitaya_revision` to the Git revision containing both the Pitaya module and
+the `xk6-pitaya` module that you want to build.
 
 ## Example usage
 
@@ -122,4 +132,4 @@ All k6 documentation also applies to this extension. See https://k6.io/docs/ for
 
 # Running distributed tests
 
-It is possible to run distributed tests using k6 and this extension. To do so you can refer to the [k6 documentation](https://k6.io/docs/testing-guides/running-distributed-tests/) and use the binary generated from this repo as the k6 binary. There's a prebuilt docker image available at [tfgco/xk6-pitaya](https://hub.docker.com/r/tfgco/xk6-pitaya) that you can use as well.
+It is possible to run distributed tests using k6 and this extension. To do so you can refer to the [k6 documentation](https://k6.io/docs/testing-guides/running-distributed-tests/) and use the binary or container image generated from this repo.

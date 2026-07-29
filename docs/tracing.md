@@ -3,7 +3,7 @@ Tracing
 
 Pitaya supports tracing using [OpenTracing](http://opentracing.io/).
 
-### Using Jaeger tracing
+## Using Jaeger tracing
 
 First set the required environment variables:
 
@@ -47,7 +47,7 @@ func main() {
 
 Ensure to run this Jaeger initialization code in all your server types. Only changing the "JAEGER_SERVICE_NAME" env var between different types.
 
-### Testing Locally
+## Testing Locally
 ```bash
 make run-jaeger-aio
 make run-cluster-example-frontend-tracing

@@ -25,12 +25,38 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 
-	"github.com/abiosoft/ishell/v2"
 	"github.com/alkaid/pitaya/v2/client"
-	"github.com/mitchellh/go-homedir"
+	"github.com/alkaid/pitaya/v2/conn/message"
 )
+
+type serverConnection struct {
+	pitayaClient client.PitayaClient
+	disconnected chan struct{}
+	readerDone   chan struct{}
+	disconnect   sync.Once
+}
+
+func newServerConnection(pitayaClient client.PitayaClient) *serverConnection {
+	return &serverConnection{
+		pitayaClient: pitayaClient,
+		disconnected: make(chan struct{}),
+		readerDone:   make(chan struct{}),
+	}
+}
+
+func (c *serverConnection) signalDisconnected() {
+	c.disconnect.Do(func() {
+		close(c.disconnected)
+	})
+}
+
+func (c *serverConnection) waitForReader() {
+	<-c.readerDone
+}
 
 func protoClient(log Log, addr string) error {
 	log.Println("Using protobuf client")
@@ -64,27 +90,57 @@ func tryConnect(addr string) error {
 	return fmt.Errorf("failed to connect to %s", addr)
 }
 
-func readServerMessages(callback func(data []byte)) {
-	channel := pClient.MsgChannel()
+func readServerMessages(connection *serverConnection, callbacks serverCallbacks) {
+	defer close(connection.readerDone)
+	if callbacks.onDisconnect != nil {
+		defer callbacks.onDisconnect()
+	}
+
+	channel := connection.pitayaClient.MsgChannel()
 	for {
 		select {
-		case <-disconnectedCh:
-			close(disconnectedCh)
+		case <-connection.disconnected:
+			drainServerMessages(channel, callbacks)
 			return
-		case m := <-channel:
-			callback(parseData(m.Data))
+		case m, ok := <-channel:
+			if !ok {
+				return
+			}
+			deliverServerMessage(m, callbacks)
 		}
 	}
 }
 
-func configure(c *ishell.Shell) {
-	historyPath := os.Getenv("PITAYACLI_HISTORY_PATH")
-	if historyPath == "" {
-		home, _ := homedir.Dir()
-		historyPath = fmt.Sprintf("%s/.pitayacli_history", home)
+func drainServerMessages(channel <-chan *message.Message, callbacks serverCallbacks) {
+	for {
+		select {
+		case m, ok := <-channel:
+			if !ok {
+				return
+			}
+			deliverServerMessage(m, callbacks)
+		default:
+			return
+		}
+	}
+}
+
+func deliverServerMessage(message *message.Message, callbacks serverCallbacks) {
+	if callbacks.onMessage != nil {
+		callbacks.onMessage(message)
+	}
+}
+
+func historyFilePath() string {
+	if path := os.Getenv("PITAYACLI_HISTORY_PATH"); path != "" {
+		return path
 	}
 
-	c.SetHistoryPath(historyPath)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".pitayacli_history")
 }
 
 func parseData(data []byte) []byte {

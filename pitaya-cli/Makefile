@@ -1,7 +1,14 @@
+GO ?= go
+GOOS ?= $(shell $(GO) env GOOS)
+GOARCH ?= $(shell $(GO) env GOARCH)
+BINARY_EXT = $(if $(filter windows,$(GOOS)),.exe,)
+OUTPUT ?= ./out/pitaya-cli-$(GOOS)-$(GOARCH)$(BINARY_EXT)
+
+.PHONY: build build-linux
+
 build:
-	@mkdir -p out
-	@go build -o ./out/pitaya-cli-darwin ./...
+	@mkdir -p "$(dir $(OUTPUT))"
+	@GOOS="$(GOOS)" GOARCH="$(GOARCH)" $(GO) build -o "$(OUTPUT)" .
 
 build-linux:
-	@mkdir -p out
-	@GOOS=linux GOARCH=amd64 go build -o ./out/pitaya-cli-linux ./main.go
+	@$(MAKE) build GOOS=linux GOARCH=amd64

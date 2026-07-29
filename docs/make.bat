@@ -7,6 +7,9 @@ REM Command file for Sphinx documentation
 if "%SPHINXBUILD%" == "" (
 	set SPHINXBUILD=sphinx-build
 )
+if "%SPHINXOPTS%" == "" (
+	set SPHINXOPTS=-W --keep-going
+)
 set SOURCEDIR=.
 set BUILDDIR=_build
 set SPHINXPROJ=Pitaya

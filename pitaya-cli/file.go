@@ -25,73 +25,94 @@ import (
 	"errors"
 	"log"
 	"os"
-	"strings"
+
+	"github.com/alkaid/pitaya/v2/conn/message"
 )
 
-func executeFromFile(fileName string) {
+func executeFromFile(fileName string) error {
 	logger := log.New(os.Stdout, "", log.LstdFlags)
-
-	var err error
-	defer func() {
-		if err != nil {
-			logger.Printf("error: %s", err.Error())
-		}
-	}()
-
-	var file *os.File
-	file, err = os.Open(fileName)
+	file, err := os.Open(fileName)
 	if err != nil {
-		return
+		return err
+	}
+	defer file.Close()
+
+	responses := make(chan uint, 16)
+	callbacks := serverCallbacks{
+		onMessage: func(response *message.Message) {
+			logger.Printf("sv-> %s", string(parseData(response.Data)))
+			if response.Type == message.Response {
+				responses <- response.ID
+			}
+		},
 	}
 
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), maxCommandBytes)
 	for scanner.Scan() {
 		command := scanner.Text()
-		err = executeCommand(logger, command)
+		err = executeCommand(logger, command, callbacks, responses)
 		if err != nil {
-			return
+			return err
 		}
 	}
 
-	err = scanner.Err()
+	return scanner.Err()
+}
+
+func executeCommand(logger Log, command string, callbacks serverCallbacks, responses <-chan uint) error {
+	parsed, err := parseCommandLine(command)
 	if err != nil {
-		return
+		return err
+	}
+
+	if parsed.name == "request" {
+		connection := activeConnection
+		requestID, err := sendRequest(parsed.args)
+		if err != nil {
+			return err
+		}
+		if connection == nil {
+			return errors.New("not connected")
+		}
+		return waitForResponse(requestID, responses, connection.readerDone)
+	}
+
+	_, err = dispatchCommand(logger, parsed, callbacks, false)
+	return err
+}
+
+func waitForResponse(requestID uint, responses <-chan uint, disconnected <-chan struct{}) error {
+	for {
+		select {
+		case responseID, ok := <-responses:
+			if !ok {
+				return errors.New("response channel closed while waiting for response")
+			}
+			if responseID == requestID {
+				return nil
+			}
+		case <-disconnected:
+			if queuedResponseMatches(requestID, responses) {
+				return nil
+			}
+			return errors.New("connection closed while waiting for response")
+		}
 	}
 }
 
-func executeCommand(logger Log, command string) error {
-	parts := strings.Split(command, " ")
-
-	switch parts[0] {
-	case "connect":
-		return connect(logger, parts[1], func(data []byte) {
-			log.Printf("sv-> %s\n", string(data))
-			wait.Done()
-		})
-
-	case "sethandshake":
-		return setHandshake(logger, parts[1:])
-
-	case "request":
-		wait.Add(1)
-		if err := request(logger, parts[1:]); err != nil {
-			return err
+func queuedResponseMatches(requestID uint, responses <-chan uint) bool {
+	for {
+		select {
+		case responseID, ok := <-responses:
+			if !ok {
+				return false
+			}
+			if responseID == requestID {
+				return true
+			}
+		default:
+			return false
 		}
-		wait.Wait()
-		return nil
-
-	case "notify":
-		return notify(logger, parts[1:])
-
-	case "push":
-		return push(logger, parts[1:])
-	case "routes":
-		return routes(logger)
-	case "disconnect":
-		disconnect()
-		return nil
-
-	default:
-		return errors.New("command not found")
 	}
 }
