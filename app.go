@@ -644,10 +644,6 @@ func (app *App) initSysRemotes() {
 		component.WithName("sys"),
 		component.WithNameFunc(strings.ToLower),
 	)
-	app.Register(sys,
-		component.WithName("sys"),
-		component.WithNameFunc(strings.ToLower),
-	)
 }
 
 func (app *App) periodicMetrics() {

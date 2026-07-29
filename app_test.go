@@ -22,7 +22,6 @@ package pitaya
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -38,17 +37,15 @@ import (
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/helpers"
-	"github.com/alkaid/pitaya/v2/logger"
-	"github.com/alkaid/pitaya/v2/logger/logrus"
 	"github.com/alkaid/pitaya/v2/route"
 	"github.com/alkaid/pitaya/v2/router"
 	"github.com/alkaid/pitaya/v2/session/mocks"
 	"github.com/alkaid/pitaya/v2/timer"
 	"github.com/alkaid/viper"
-	"github.com/google/uuid"
-	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/stretchr/testify/assert"
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/mock/gomock"
+	"google.golang.org/protobuf/types/descriptorpb"
 )
 
 var (
@@ -99,21 +96,6 @@ func TestAddAcceptor(t *testing.T) {
 	}
 }
 
-func TestSetDebug(t *testing.T) {
-	builderConfig := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
-	app.SetDebug(true)
-	assert.Equal(t, true, app.debug)
-	app.SetDebug(false)
-	assert.Equal(t, false, app.debug)
-}
-
-func TestSetLogger(t *testing.T) {
-	l := logrus.New()
-	SetLogger(l)
-	assert.Equal(t, l, logger.Log)
-}
-
 func TestGetDieChan(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
 	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
@@ -156,10 +138,18 @@ func TestSetHeartbeatInterval(t *testing.T) {
 }
 
 func TestInitSysRemotes(t *testing.T) {
-	builderConfig := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
+	ctrl := gomock.NewController(t)
+	sessionPool := mocks.NewMockSessionPool(ctrl)
+	sessionPool.EXPECT().OnSessionBind(gomock.Any()).Times(1)
+	sessionPool.EXPECT().OnSessionClose(gomock.Any()).Times(1)
+	sessionPool.EXPECT().OnBindBackend(gomock.Any()).Times(1)
+	sessionPool.EXPECT().OnKickBackend(gomock.Any()).Times(1)
+
+	app := newTestAppForComponents(sessionPool)
 	app.initSysRemotes()
-	assert.NotNil(t, app.remoteComp[0])
+	assert.Empty(t, app.handlerComp)
+	assert.Len(t, app.remoteComp, 1)
+	app.startupComponents()
 }
 
 func TestSetDictionary(t *testing.T) {
@@ -342,36 +332,6 @@ func TestStartAndListenCluster(t *testing.T) {
 	}, nil, 10*time.Millisecond, 100*time.Millisecond)
 }
 
-func TestError(t *testing.T) {
-	t.Parallel()
-
-	tables := []struct {
-		name     string
-		err      error
-		code     string
-		metadata map[string]string
-	}{
-		{"nil_metadata", errors.New(uuid.New().String()), uuid.New().String(), nil},
-		{"empty_metadata", errors.New(uuid.New().String()), uuid.New().String(), map[string]string{}},
-		{"non_empty_metadata", errors.New(uuid.New().String()), uuid.New().String(), map[string]string{"key": uuid.New().String()}},
-	}
-
-	for _, table := range tables {
-		t.Run(table.name, func(t *testing.T) {
-			var err *e.Error
-			if table.metadata != nil {
-				err = Error(table.err, table.code, table.metadata)
-			} else {
-				err = Error(table.err, table.code)
-			}
-			assert.NotNil(t, err)
-			assert.Equal(t, table.code, err.Code)
-			assert.Equal(t, table.err.Error(), err.Message)
-			assert.Equal(t, table.metadata, err.Metadata)
-		})
-	}
-}
-
 func TestGetSessionFromCtx(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	ss := mocks.NewMockSession(ctrl)
@@ -407,20 +367,23 @@ func TestGetFromPropagateCtx(t *testing.T) {
 }
 
 func TestExtractSpan(t *testing.T) {
-	span := opentracing.StartSpan("op", opentracing.ChildOf(nil))
-	ctx := opentracing.ContextWithSpan(context.Background(), span)
-	spanCtx, err := ExtractSpan(ctx)
-	assert.NoError(t, err)
-	assert.Equal(t, span.Context(), spanCtx)
+	want := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{1},
+		SpanID:  trace.SpanID{2},
+	})
+	ctx := trace.ContextWithSpanContext(context.Background(), want)
+	extractedCtx, got := ExtractSpan(ctx)
+	assert.Equal(t, want, got)
+	assert.Equal(t, want, trace.SpanContextFromContext(extractedCtx))
 }
 
 func TestDescriptor(t *testing.T) {
-	bts, err := Descriptor("kick.proto")
+	descriptors := make(map[string]*descriptorpb.FileDescriptorProto)
+	err := Descriptor("protos.KickMsg", descriptors)
 	assert.NoError(t, err)
-	assert.NotNil(t, bts)
+	assert.NotEmpty(t, descriptors)
 
-	bts, err = Descriptor("not_exists.proto")
-	assert.Nil(t, bts)
+	err = Descriptor("kick.proto", descriptors)
 	assert.EqualError(t, constants.ErrProtodescriptor, err.Error())
 }
 

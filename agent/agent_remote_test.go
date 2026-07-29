@@ -47,6 +47,12 @@ type someStruct struct {
 	A string
 }
 
+func newRemoteTestServiceDiscovery(ctrl *gomock.Controller) *clustermocks.MockServiceDiscovery {
+	mockSD := clustermocks.NewMockServiceDiscovery(ctrl)
+	mockSD.EXPECT().GetSelfServer().Return(cluster.NewServer("", "backend", false)).AnyTimes()
+	return mockSD
+}
+
 func TestNewRemote(t *testing.T) {
 	uid := uuid.New().String()
 	ss := &protos.Session{Uid: uid}
@@ -57,13 +63,13 @@ func TestNewRemote(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockRPCClient := clustermocks.NewMockRPCClient(ctrl)
-	mockSD := clustermocks.NewMockServiceDiscovery(ctrl)
+	mockSD := newRemoteTestServiceDiscovery(ctrl)
 	mockSerializer := serializemocks.NewMockSerializer(ctrl)
 	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
 	mockMessageEncoder := messagemocks.NewMockEncoder(ctrl)
 
 	sessionPool := session.NewSessionPool()
-	remote, err := NewRemote(ss, reply, mockRPCClient, mockEncoder, mockSerializer, mockSD, frontendID, mockMessageEncoder, sessionPool)
+	remote, err := NewRemote(ss, reply, mockRPCClient, mockEncoder, mockSerializer, mockSD, frontendID, mockMessageEncoder, sessionPool, protos.RPCType_User)
 	assert.NoError(t, err)
 	assert.NotNil(t, remote)
 	assert.IsType(t, make(chan struct{}), remote.chDie)
@@ -78,26 +84,38 @@ func TestNewRemote(t *testing.T) {
 }
 
 func TestNewRemoteFailsIfFailedToSetEncodedData(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
 	ss := &protos.Session{Data: []byte("invalid")}
+	mockSD := newRemoteTestServiceDiscovery(ctrl)
 
 	sessionPool := session.NewSessionPool()
-	remote, err := NewRemote(ss, "", nil, nil, nil, nil, "", nil, sessionPool)
+	remote, err := NewRemote(ss, "", nil, nil, nil, mockSD, "", nil, sessionPool, protos.RPCType_User)
 	assert.Equal(t, errors.New("invalid character 'i' looking for beginning of value").Error(), err.Error())
 	assert.Nil(t, remote)
 }
 
 func TestAgentRemoteClose(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockSD := newRemoteTestServiceDiscovery(ctrl)
 	sessionPool := session.NewSessionPool()
-	remote, err := NewRemote(nil, "", nil, nil, nil, nil, "", nil, sessionPool)
+	remote, err := NewRemote(&protos.Session{}, "", nil, nil, nil, mockSD, "", nil, sessionPool, protos.RPCType_User)
 	assert.NoError(t, err)
 	assert.NotNil(t, remote)
-	err = remote.Close()
+	err = remote.Close(nil)
 	assert.NoError(t, err)
 }
 
 func TestAgentRemoteRemoteAddr(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockSD := newRemoteTestServiceDiscovery(ctrl)
 	sessionPool := session.NewSessionPool()
-	remote, err := NewRemote(nil, "", nil, nil, nil, nil, "", nil, sessionPool)
+	remote, err := NewRemote(&protos.Session{}, "", nil, nil, nil, mockSD, "", nil, sessionPool, protos.RPCType_User)
 	assert.NoError(t, err)
 	assert.NotNil(t, remote)
 	addr := remote.RemoteAddr()
@@ -132,9 +150,9 @@ func TestAgentRemotePush(t *testing.T) {
 			fSvID := "123id"
 			ss := &protos.Session{Uid: table.uid}
 			mockSerializer := serializemocks.NewMockSerializer(ctrl)
-			mockSD := clustermocks.NewMockServiceDiscovery(ctrl)
+			mockSD := newRemoteTestServiceDiscovery(ctrl)
 			sessionPool := session.NewSessionPool()
-			remote, err := NewRemote(ss, "", table.rpcClient, nil, mockSerializer, mockSD, fSvID, nil, sessionPool)
+			remote, err := NewRemote(ss, "", table.rpcClient, nil, mockSerializer, mockSD, fSvID, nil, sessionPool, protos.RPCType_User)
 			assert.NoError(t, err)
 			assert.NotNil(t, remote)
 
@@ -161,7 +179,11 @@ func TestAgentRemotePush(t *testing.T) {
 				mockSD.EXPECT().GetServer(fSvID).Return(cluster.NewServer(fSvID, "connector", true), nil)
 			}
 			err = remote.Push(route, table.data)
-			assert.Equal(t, table.err, err)
+			if table.err != nil {
+				assert.EqualError(t, err, table.err.Error())
+			} else {
+				assert.NoError(t, err)
+			}
 		})
 	}
 }
@@ -172,12 +194,12 @@ func TestKickRemote(t *testing.T) {
 
 	rpcClient := clustermocks.NewMockRPCClient(ctrl)
 	ss := &protos.Session{Uid: uuid.New().String()}
-	mockSD := clustermocks.NewMockServiceDiscovery(ctrl)
+	mockSD := newRemoteTestServiceDiscovery(ctrl)
 	mockSerializer := serializemocks.NewMockSerializer(ctrl)
 	frontID := uuid.New().String()
 
 	sessionPool := session.NewSessionPool()
-	remote, err := NewRemote(ss, "", rpcClient, nil, mockSerializer, mockSD, frontID, nil, sessionPool)
+	remote, err := NewRemote(ss, "", rpcClient, nil, mockSerializer, mockSD, frontID, nil, sessionPool, protos.RPCType_User)
 	assert.NoError(t, err)
 
 	mockSD.EXPECT().GetServer(frontID)
@@ -220,8 +242,9 @@ func TestAgentRemoteResponseMID(t *testing.T) {
 			mockSerializer := serializemocks.NewMockSerializer(ctrl)
 			mockRPCClient := clustermocks.NewMockRPCClient(ctrl)
 			messageEncoder := message.NewMessagesEncoder(false)
+			mockSD := newRemoteTestServiceDiscovery(ctrl)
 			sessionPool := session.NewSessionPool()
-			remote, err := NewRemote(ss, reply, mockRPCClient, mockEnconder, mockSerializer, nil, "", messageEncoder, sessionPool)
+			remote, err := NewRemote(ss, reply, mockRPCClient, mockEnconder, mockSerializer, mockSD, "", messageEncoder, sessionPool, protos.RPCType_User)
 			assert.NoError(t, err)
 			assert.NotNil(t, remote)
 
@@ -258,7 +281,11 @@ func TestAgentRemoteResponseMID(t *testing.T) {
 			} else {
 				err = remote.ResponseMID(nil, table.mid, table.data)
 			}
-			assert.Equal(t, table.err, err)
+			if table.err != nil {
+				assert.EqualError(t, err, table.err.Error())
+			} else {
+				assert.NoError(t, err)
+			}
 		})
 	}
 }
@@ -287,12 +314,12 @@ func TestAgentRemoteSendRequest(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 
-			mockSD := clustermocks.NewMockServiceDiscovery(ctrl)
+			mockSD := newRemoteTestServiceDiscovery(ctrl)
 			mockSerializer := serializemocks.NewMockSerializer(ctrl)
 			mockRPCClient := clustermocks.NewMockRPCClient(ctrl)
 			mockMessageEncoder := messagemocks.NewMockEncoder(ctrl)
 			sessionPool := session.NewSessionPool()
-			remote, err := NewRemote(nil, "", mockRPCClient, nil, mockSerializer, mockSD, "", mockMessageEncoder, sessionPool)
+			remote, err := NewRemote(&protos.Session{}, "", mockRPCClient, nil, mockSerializer, mockSD, "", mockMessageEncoder, sessionPool, protos.RPCType_User)
 			assert.NoError(t, err)
 			assert.NotNil(t, remote)
 
@@ -322,7 +349,11 @@ func TestAgentRemoteSendRequest(t *testing.T) {
 			}
 
 			resp, err := remote.SendRequest(nil, table.serverID, table.reqRoute, table.data)
-			assert.Equal(t, table.err, err)
+			if table.err != nil {
+				assert.EqualError(t, err, table.err.Error())
+			} else {
+				assert.NoError(t, err)
+			}
 			assert.Equal(t, table.resp, resp)
 		})
 	}

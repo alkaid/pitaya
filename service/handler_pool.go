@@ -3,8 +3,8 @@ package service
 import (
 	"context"
 	"fmt"
-	"github.com/alkaid/pitaya/v2/logger"
 	"reflect"
+	"strings"
 	"sync"
 
 	"go.uber.org/zap"
@@ -14,12 +14,25 @@ import (
 	"github.com/alkaid/pitaya/v2/component"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
+	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/pipeline"
 	"github.com/alkaid/pitaya/v2/route"
 	"github.com/alkaid/pitaya/v2/serialize"
 	"github.com/alkaid/pitaya/v2/session"
 	"github.com/alkaid/pitaya/v2/util"
 )
+
+const reservedHandlerServiceName = "sys"
+
+func isReservedHandlerServiceName(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), reservedHandlerServiceName)
+}
+
+func handlerNotFoundError(rt *route.Route) error {
+	return apierrors.NotFound("", "process handle message error", "").WithCause(
+		fmt.Errorf("pitaya/handler: %s not found", rt.String()),
+	)
+}
 
 // HandlerPool ...
 type HandlerPool struct {
@@ -74,6 +87,9 @@ func (h *HandlerPool) ProcessHandlerMessage(
 	}
 	ctx = context.WithValue(ctx, constants.SessionCtxKey, session)
 	ctx = util.CtxWithDefaultLogger(ctx, rt.String(), session.UID())
+	if isReservedHandlerServiceName(rt.Service) {
+		return nil, handlerNotFoundError(rt)
+	}
 
 	// 拦截器优先工作
 	interceptor, err1 := h.getInterceptor(rt)

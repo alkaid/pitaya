@@ -13,6 +13,7 @@ else
 endif
 
 MOCKGEN := go tool mockgen
+CORE_PACKAGES := . ./agent ./remote ./service
 TOOLS_MOD := tools/go.mod
 GO_TOOL = $(GOWORK_OFF) go tool -modfile=$(TOOLS_MOD)
 PROTOC := protoc
@@ -25,6 +26,9 @@ K6_VERSION := v1.8.0
 DEV_IMAGE := pitaya-dev:go1.26.5
 
 TESTABLE_PACKAGES = `go list ./... | $(GREP_CMD) examples | $(GREP_CMD) constants | $(GREP_CMD) mocks | $(GREP_CMD) helpers | $(GREP_CMD) interfaces | $(GREP_CMD) protos | $(GREP_CMD) e2e | $(GREP_CMD) benchmark`
+
+compile-core:
+	@tmpdir="$$(mktemp -d)"; trap 'rm -rf "$$tmpdir"' EXIT; go test -c -o "$$tmpdir/" $(CORE_PACKAGES)
 
 init-toolchain setup-ci build-k6-extension protos-compile protos-compile-demo: export GOWORK = off
 
@@ -200,7 +204,7 @@ test-coverage-func coverage-func: test-coverage
 	@echo "\033[1;34m=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\033[0m"
 	@go tool cover -func=coverprofile.out | grep -Ev "100[.]0%"
 
-.PHONY: init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
+.PHONY: compile-core init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 
 mocks: agent-mock session-mock networkentity-mock pitaya-mock serializer-mock metrics-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 

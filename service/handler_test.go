@@ -28,6 +28,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/alkaid/goerrors/apierrors"
 	agentmocks "github.com/alkaid/pitaya/v2/agent/mocks"
 	"github.com/alkaid/pitaya/v2/cluster"
 	"github.com/alkaid/pitaya/v2/component"
@@ -36,12 +37,10 @@ import (
 	"github.com/alkaid/pitaya/v2/conn/packet"
 	"github.com/alkaid/pitaya/v2/constants"
 	pcontext "github.com/alkaid/pitaya/v2/context"
-	"github.com/alkaid/pitaya/v2/helpers"
 	"github.com/alkaid/pitaya/v2/metrics"
 	metricsmocks "github.com/alkaid/pitaya/v2/metrics/mocks"
 	connmock "github.com/alkaid/pitaya/v2/mocks"
 	"github.com/alkaid/pitaya/v2/pipeline"
-	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/route"
 	"github.com/alkaid/pitaya/v2/serialize/json"
 	serializemocks "github.com/alkaid/pitaya/v2/serialize/mocks"
@@ -113,8 +112,6 @@ func TestNewHandlerService(t *testing.T) {
 	assert.Equal(t, sv, svc.server)
 	assert.Equal(t, remoteSvc, svc.remoteService)
 	assert.Equal(t, mockAgentFactory, svc.agentFactory)
-	assert.NotNil(t, svc.chLocalProcess)
-	assert.NotNil(t, svc.chRemoteProcess)
 	assert.Equal(t, handlerHooks, svc.handlerHooks)
 	assert.Equal(t, handlerPool, svc.handlerPool)
 }
@@ -155,16 +152,38 @@ func TestHandlerServiceRegisterFailsIfNoHandlerMethods(t *testing.T) {
 	assert.Equal(t, errors.New("type NoHandlerRemoteComp has no exported methods of handler type"), err)
 }
 
+func TestHandlerServiceRegisterRejectsReservedSysName(t *testing.T) {
+	tests := []struct {
+		name    string
+		options []component.Option
+	}{
+		{name: "explicit lowercase", options: []component.Option{component.WithName("sys")}},
+		{name: "explicit mixed case", options: []component.Option{component.WithName("sYs")}},
+		{name: "explicit surrounding whitespace", options: []component.Option{component.WithName(" Sys ")}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handlerPool := NewHandlerPool()
+			svc := NewHandlerService(nil, nil, 0, 0, nil, nil, nil, nil, nil, handlerPool)
+
+			err := svc.Register(&MyComp{}, test.options)
+
+			assert.Error(t, err)
+			assert.Empty(t, svc.services)
+			assert.Empty(t, handlerPool.GetHandlers())
+		})
+	}
+}
+
 func TestHandlerServiceProcessMessage(t *testing.T) {
 	tables := []struct {
-		name  string
-		msg   *message.Message
-		err   interface{}
-		local bool
+		name    string
+		msg     *message.Message
+		wantErr bool
 	}{
-		{"failed_decode", &message.Message{ID: 1, Route: "k.k.k.k"}, &protos.Error{Msg: "invalid route", Code: "PIT-400"}, false},
-		{"local_process", &message.Message{ID: 1, Route: "k.k"}, nil, true},
-		{"remote_process", &message.Message{ID: 1, Route: "k.k.k"}, nil, false},
+		{"failed_decode", &message.Message{ID: 1, Route: "k.k.k.k"}, true},
+		{"local_process", &message.Message{ID: 1, Route: "k.k"}, false},
+		{"remote_process", &message.Message{ID: 1, Route: "backend.k.k"}, false},
 	}
 
 	for _, table := range tables {
@@ -172,32 +191,86 @@ func TestHandlerServiceProcessMessage(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 
-			sv := &cluster.Server{}
+			sv := &cluster.Server{ID: "frontend-1", Type: "frontend"}
 			handlerPool := NewHandlerPool()
 			svc := NewHandlerService(nil, nil, 1, 1, sv, &RemoteService{}, nil, nil, nil, handlerPool)
 
 			mockSession := mocks.NewMockSession(ctrl)
-			mockSession.EXPECT().UID().Return("uid").Times(1)
 			mockAgent := agentmocks.NewMockAgent(ctrl)
-			mockAgent.EXPECT().GetSession().Return(mockSession).Times(2)
+			mockAgent.EXPECT().GetSession().Return(mockSession).AnyTimes()
 
-			if table.err != nil {
-				mockAgent.EXPECT().AnswerWithError(gomock.Any(), table.msg.ID, gomock.Any()).Times(1)
+			var scheduledCtx context.Context
+			if table.wantErr {
+				mockAgent.EXPECT().AnswerWithError(gomock.Any(), table.msg.ID, gomock.Any()).Do(
+					func(_ context.Context, _ uint, err error) {
+						assert.True(t, apierrors.IsBadRequest(err))
+						assert.ErrorContains(t, err, "invalid route")
+					},
+				).Times(1)
+			} else {
+				mockSession.EXPECT().Go(gomock.Any(), gomock.Any()).Do(
+					func(ctx context.Context, task func(context.Context)) {
+						scheduledCtx = ctx
+						assert.NotNil(t, task)
+					},
+				).Times(1)
 			}
 
 			svc.processMessage(mockAgent, table.msg)
 
-			if table.err == nil {
-				var recvMsg unhandledMessage
-				if table.err == nil && table.local {
-					recvMsg = helpers.ShouldEventuallyReceive(t, svc.chLocalProcess).(unhandledMessage)
-				} else if table.err == nil {
-					recvMsg = helpers.ShouldEventuallyReceive(t, svc.chRemoteProcess).(unhandledMessage)
-				}
-				assert.Equal(t, table.msg, recvMsg.msg)
-				assert.NotNil(t, pcontext.GetFromPropagateCtx(recvMsg.ctx, constants.StartTimeKey))
-				assert.Equal(t, table.msg.Route, pcontext.GetFromPropagateCtx(recvMsg.ctx, constants.RouteKey))
+			if !table.wantErr {
+				assert.NotNil(t, pcontext.GetFromPropagateCtx(scheduledCtx, constants.StartTimeKey))
+				assert.Equal(t, table.msg.Route, pcontext.GetFromPropagateCtx(scheduledCtx, constants.RouteKey))
 			}
+		})
+	}
+}
+
+func TestHandlerServiceProcessMessageRejectsReservedSysRoutes(t *testing.T) {
+	tables := []struct {
+		name    string
+		route   string
+		msgType message.Type
+	}{
+		{"local_request", "sys.kick", message.Request},
+		{"local_notify", "sys.pushsession", message.Notify},
+		{"remote_request", "backend.sys.bindsession", message.Request},
+		{"remote_notify", "backend.sys.flushsession", message.Notify},
+		{"default_type_name", "Sys.kick", message.Request},
+		{"mixed_case", "sYs.pushsession", message.Request},
+		{"surrounding_whitespace", " Sys .bindsession", message.Request},
+	}
+
+	for _, table := range tables {
+		t.Run(table.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			mockSession := mocks.NewMockSession(ctrl)
+			mockSession.EXPECT().Go(gomock.Any(), gomock.Any()).Times(0)
+
+			msg := &message.Message{ID: 42, Type: table.msgType, Route: table.route}
+			mockAgent := agentmocks.NewMockAgent(ctrl)
+			mockAgent.EXPECT().GetSession().Return(mockSession).Times(1)
+			mockAgent.EXPECT().AnswerWithError(gomock.Any(), msg.ID, gomock.Any()).Do(
+				func(_ context.Context, _ uint, err error) {
+					assert.True(t, apierrors.IsNotFound(err))
+					assert.ErrorContains(t, err, table.route)
+				},
+			).Times(1)
+
+			svc := NewHandlerService(
+				nil,
+				nil,
+				0,
+				0,
+				&cluster.Server{ID: "frontend-1", Type: "frontend"},
+				&RemoteService{},
+				nil,
+				nil,
+				nil,
+				NewHandlerPool(),
+			)
+
+			svc.processMessage(mockAgent, msg)
 		})
 	}
 }
@@ -212,13 +285,13 @@ func TestHandlerServiceLocalProcess(t *testing.T) {
 	handlerPool.handlers[rt.Short()] = &component.Handler{Receiver: reflect.ValueOf(tObj), Method: m, Type: m.Type.In(2), IsRawArg: true}
 
 	tables := []struct {
-		name string
-		msg  *message.Message
-		rt   *route.Route
-		err  interface{}
+		name    string
+		msg     *message.Message
+		rt      *route.Route
+		wantErr bool
 	}{
-		{"process_handler_msg_err", &message.Message{}, route.NewRoute("bla", "bla", "bla"), &protos.Error{Msg: "pitaya/handler: bla.bla.bla not found", Code: "PIT-404"}},
-		{"success", &message.Message{ID: 1, Data: []byte(`["ok"]`)}, rt, nil},
+		{"process_handler_msg_err", &message.Message{}, route.NewRoute("bla", "bla", "bla"), true},
+		{"success", &message.Message{ID: 1, Data: []byte(`["ok"]`)}, rt, false},
 	}
 	for _, table := range tables {
 		t.Run(table.name, func(t *testing.T) {
@@ -235,10 +308,14 @@ func TestHandlerServiceLocalProcess(t *testing.T) {
 
 			ctx := context.Background()
 
-			if table.err != nil {
-				mockAgent.EXPECT().AnswerWithError(gomock.Any(), table.msg.ID, gomock.Any())
+			if table.wantErr {
+				mockAgent.EXPECT().AnswerWithError(gomock.Any(), table.msg.ID, gomock.Any()).Do(
+					func(_ context.Context, _ uint, err error) {
+						assert.True(t, apierrors.IsNotFound(err))
+					},
+				)
 			} else {
-				mockSession.EXPECT().ResponseMID(ctx, table.msg.ID, table.msg.Data, gomock.Any()).Return(nil).Times(1)
+				mockSession.EXPECT().ResponseMID(ctx, table.msg.ID, table.msg.Data).Return(nil).Times(1)
 				mockSession.EXPECT().ID().Return(int64(1)).Times(1)
 			}
 
@@ -265,13 +342,12 @@ func TestHandlerServiceProcessPacketHandshake(t *testing.T) {
 			defer ctrl.Finish()
 
 			mockSession := mocks.NewMockSession(ctrl)
-			mockSession.EXPECT().ID().Return(int64(1)).Times(1)
+			mockSession.EXPECT().ID().Return(int64(1)).AnyTimes()
 
 			mockAgent := agentmocks.NewMockAgent(ctrl)
-			mockAgent.EXPECT().GetSession().Return(mockSession).Times(1)
+			mockAgent.EXPECT().GetSession().Return(mockSession).AnyTimes()
 
 			if table.validator != nil {
-				mockAgent.EXPECT().GetSession().Return(mockSession).Times(1)
 				mockSession.EXPECT().ValidateHandshake(gomock.Any()).DoAndReturn(func(data *session.HandshakeData) error {
 					return table.validator(data)
 				}).Times(1)
@@ -280,18 +356,15 @@ func TestHandlerServiceProcessPacketHandshake(t *testing.T) {
 			if table.errStr == "" {
 				handshakeData := &session.HandshakeData{}
 				_ = encjson.Unmarshal(table.packet.Data, handshakeData)
-				mockAgent.EXPECT().GetSession().Return(mockSession).Times(2)
-				mockAgent.EXPECT().IPVersion().Return(constants.IPv4).Times(1)
 				mockAgent.EXPECT().RemoteAddr().Return(&mockAddr{})
 				mockAgent.EXPECT().SetStatus(table.socketStatus).Times(1)
 				mockAgent.EXPECT().SendHandshakeResponse().Return(nil).Times(1)
 				mockAgent.EXPECT().SetLastAt().Times(1)
 
 				mockSession.EXPECT().SetHandshakeData(handshakeData).Times(1)
-				mockSession.EXPECT().Set(constants.IPVersionKey, constants.IPv4).Times(1)
 			} else {
-				mockAgent.EXPECT().SendHandshakeErrorResponse().Times(1)
-				mockAgent.EXPECT().Close().Times(1)
+				mockAgent.EXPECT().SendHandshakeErrorResponse().Return(nil).Times(1)
+				mockAgent.EXPECT().Close(nil).Return(nil).Times(1)
 			}
 
 			handlerPool := NewHandlerPool()
@@ -333,7 +406,7 @@ func TestHandlerServiceProcessPacketHeartbeat(t *testing.T) {
 
 	mockAgent := agentmocks.NewMockAgent(ctrl)
 	gomock.InOrder(
-		mockAgent.EXPECT().SendHeartbeatResponse(),
+		mockAgent.EXPECT().SendHeartbeatResponse(int64(0)).Return(nil),
 		mockAgent.EXPECT().SetLastAt(),
 	)
 
@@ -374,8 +447,7 @@ func TestHandlerServiceProcessPacketData(t *testing.T) {
 				mockAgent.EXPECT().RemoteAddr().Return(&mockAddr{})
 			} else {
 				if table.errStr == "" {
-					mockAgent.EXPECT().GetSession().Return(mockSession).Times(2)
-					mockSession.EXPECT().UID().Return("uid").Times(1)
+					mockAgent.EXPECT().GetSession().Return(mockSession).Times(1)
 
 					mockAgent.EXPECT().AnswerWithError(gomock.Any(), msgID, gomock.Any()).Times(1)
 					mockAgent.EXPECT().SetLastAt().Times(1)
@@ -425,13 +497,11 @@ func TestHandlerServiceHandle(t *testing.T) {
 	mockSession.EXPECT().ValidateHandshake(gomock.Any()).Times(1)
 	mockSession.EXPECT().UID().Return("uid").Times(1)
 	mockSession.EXPECT().ID().Return(int64(1)).Times(2)
-	mockSession.EXPECT().Set(constants.IPVersionKey, constants.IPv4)
-	mockSession.EXPECT().Close()
+	mockSession.EXPECT().Close(nil)
 
 	mockAgent.EXPECT().String().Return("")
 	mockAgent.EXPECT().SetStatus(constants.StatusHandshake)
-	mockAgent.EXPECT().GetSession().Return(mockSession).Times(7)
-	mockAgent.EXPECT().IPVersion().Return(constants.IPv4)
+	mockAgent.EXPECT().GetSession().Return(mockSession).Times(6)
 	mockAgent.EXPECT().RemoteAddr().Return(&mockAddr{}).AnyTimes()
 	mockAgent.EXPECT().SetLastAt().Do(func() {
 		wg.Done()

@@ -23,15 +23,14 @@ package remote
 import (
 	"context"
 	"fmt"
-	"github.com/alkaid/goerrors/apierrors"
 	"strconv"
 
+	"github.com/alkaid/goerrors/apierrors"
 	"github.com/pkg/errors"
-	"github.com/alkaid/pitaya/v2/util"
-
-	"github.com/alkaid/pitaya/v2/co"
+	"go.uber.org/zap"
 
 	"github.com/alkaid/pitaya/v2/cluster"
+	"github.com/alkaid/pitaya/v2/co"
 	"github.com/alkaid/pitaya/v2/component"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/logger"
@@ -39,7 +38,7 @@ import (
 	"github.com/alkaid/pitaya/v2/route"
 	"github.com/alkaid/pitaya/v2/service"
 	"github.com/alkaid/pitaya/v2/session"
-	"go.uber.org/zap"
+	"github.com/alkaid/pitaya/v2/util"
 )
 
 // Sys contains logic for handling sys remotes
@@ -359,7 +358,7 @@ func (s *Sys) PushSession(ctx context.Context, sessionData *protos.Session) (*pr
 	}
 	if sess.UID() != sessionData.Uid {
 		// 不应该到该分支,到这说明有bug
-		return nil, fmt.Errorf("uid not equal.src=%d,dest=%d", sess.UID(), sessionData.Uid)
+		return nil, fmt.Errorf("uid not equal.src=%s,dest=%s", sess.UID(), sessionData.Uid)
 	}
 	if err := sess.SetDataEncoded(sessionData.Data); err != nil {
 		return nil, err

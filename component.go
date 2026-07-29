@@ -21,6 +21,8 @@
 package pitaya
 
 import (
+	"reflect"
+
 	"github.com/alkaid/pitaya/v2/component"
 	"github.com/alkaid/pitaya/v2/logger"
 	"go.uber.org/zap"
@@ -64,25 +66,31 @@ func (app *App) RegisterRemoteInterceptor(serviceName string, interceptor *compo
 	app.remoteService.RegisterInterceptor(serviceName, interceptor)
 }
 
+func uniqueComponents(group []regComp, seen map[component.Component]struct{}) []component.Component {
+	components := make([]component.Component, 0)
+	for _, registered := range group {
+		comp := registered.comp
+		if reflect.TypeOf(comp).Comparable() {
+			if _, ok := seen[comp]; ok {
+				continue
+			}
+			seen[comp] = struct{}{}
+		}
+		components = append(components, comp)
+	}
+	return components
+}
+
 func (app *App) startupComponents() {
-	// handler component initialize hooks
-	for _, c := range app.handlerComp {
-		c.comp.Init()
-	}
-
-	// handler component after initialize hooks
-	for _, c := range app.handlerComp {
-		c.comp.AfterInit()
-	}
-
-	// remote component initialize hooks
-	for _, c := range app.remoteComp {
-		c.comp.Init()
-	}
-
-	// remote component after initialize hooks
-	for _, c := range app.remoteComp {
-		c.comp.AfterInit()
+	seen := make(map[component.Component]struct{})
+	for _, group := range [][]regComp{app.handlerComp, app.remoteComp} {
+		components := uniqueComponents(group, seen)
+		for _, comp := range components {
+			comp.Init()
+		}
+		for _, comp := range components {
+			comp.AfterInit()
+		}
 	}
 
 	// register all components
@@ -110,24 +118,14 @@ func (app *App) startupComponents() {
 }
 
 func (app *App) shutdownComponents() {
-	// reverse call `BeforeShutdown` hooks
-	length := len(app.handlerComp)
-	for i := length - 1; i >= 0; i-- {
-		app.handlerComp[i].comp.BeforeShutdown()
-	}
-
-	// reverse call `Shutdown` hooks
-	for i := length - 1; i >= 0; i-- {
-		app.handlerComp[i].comp.Shutdown()
-	}
-
-	length = len(app.remoteComp)
-	for i := length - 1; i >= 0; i-- {
-		app.remoteComp[i].comp.BeforeShutdown()
-	}
-
-	// reverse call `Shutdown` hooks
-	for i := length - 1; i >= 0; i-- {
-		app.remoteComp[i].comp.Shutdown()
+	seen := make(map[component.Component]struct{})
+	for _, group := range [][]regComp{app.handlerComp, app.remoteComp} {
+		components := uniqueComponents(group, seen)
+		for i := len(components) - 1; i >= 0; i-- {
+			components[i].BeforeShutdown()
+		}
+		for i := len(components) - 1; i >= 0; i-- {
+			components[i].Shutdown()
+		}
 	}
 }

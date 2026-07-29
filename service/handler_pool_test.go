@@ -27,9 +27,9 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/alkaid/goerrors/apierrors"
 	"github.com/alkaid/pitaya/v2/component"
 	"github.com/alkaid/pitaya/v2/conn/message"
-	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/pipeline"
 	"github.com/alkaid/pitaya/v2/protos/test"
 	"github.com/alkaid/pitaya/v2/route"
@@ -38,6 +38,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestGetHandlerExists(t *testing.T) {
@@ -96,10 +97,9 @@ func TestProcessHandlerMessage(t *testing.T) {
 		out          []byte
 		err          error
 	}{
-		{"invalid_route", route.NewRoute("", "no", "no"), nil, nil, nil, message.Request, nil, false, nil, e.NewError(errors.New("pitaya/handler: no.no not found"), e.ErrNotFoundCode)},
-		{"invalid_msg_type", rt, nil, nil, nil, message.Request, nil, false, nil, e.NewError(errInvalidMsg, e.ErrInternalCode)},
-		{"request_on_notify", rt, nil, nil, nil, message.Notify, message.Request, false, nil, e.NewError(constants.ErrRequestOnNotify, e.ErrBadRequestCode)},
-		{"failed_handle_args_unmarshal", rt, nil, errors.New("some error"), &test.SomeStruct{}, message.Request, message.Request, false, nil, e.NewError(errors.New("some error"), e.ErrBadRequestCode)},
+		{"invalid_route", route.NewRoute("", "no", "no"), nil, nil, nil, message.Request, nil, false, nil, apierrors.NotFound("", "process handle message error", "").WithCause(errors.New("pitaya/handler: no.no not found"))},
+		{"invalid_msg_type", rt, nil, nil, nil, message.Request, nil, false, nil, apierrors.FromError(errInvalidMsg)},
+		{"failed_handle_args_unmarshal", rt, nil, errors.New("some error"), &test.SomeStruct{}, message.Request, message.Request, false, nil, apierrors.BadRequest("", "process handle message error", "").WithCause(errors.New("some error"))},
 		{"failed_pcall", rtErr, nil, nil, &test.SomeStruct{A: 1, B: "ok"}, message.Request, message.Request, false, nil, errors.New("HandlerPointerErr")},
 		{"failed_serialize_return", rtSt, errors.New("ser ret error"), nil, &test.SomeStruct{A: 1, B: "ok"}, message.Request, message.Request, false, []byte("failed"), nil},
 		{"ok", rt, nil, nil, &test.SomeStruct{}, message.Request, message.Request, false, []byte("ok"), nil},
@@ -141,7 +141,7 @@ func TestProcessHandlerMessageBrokenBeforePipeline(t *testing.T) {
 	handlerPool := NewHandlerPool()
 	handlerPool.handlers[rt.Short()] = &component.Handler{}
 	expected := errors.New("oh noes")
-	before := func(ctx context.Context, in interface{}) (context.Context, interface{}, error) {
+	before := func(ctx context.Context, _ route.Route, in interface{}) (context.Context, interface{}, error) {
 		return ctx, nil, expected
 	}
 	beforeHandler := pipeline.NewChannel()
@@ -166,7 +166,7 @@ func TestProcessHandlerMessageBrokenAfterPipeline(t *testing.T) {
 	handlerPool := NewHandlerPool()
 	handlerPool.handlers[rt.Short()] = &component.Handler{Receiver: reflect.ValueOf(tObj), Method: m, Type: m.Type.In(2)}
 
-	after := func(ctx context.Context, out interface{}, err error) (interface{}, error) {
+	after := func(ctx context.Context, _ route.Route, _ interface{}, out interface{}, err error) (interface{}, error) {
 		return nil, errors.New("oh noes")
 	}
 	afterHandler := pipeline.NewAfterChannel()
@@ -190,4 +190,73 @@ func TestProcessHandlerMessageBrokenAfterPipeline(t *testing.T) {
 	out, err := handlerPool.ProcessHandlerMessage(nil, rt, mockSerializer, handlerHooks, ss, nil, message.Request, false)
 	assert.Nil(t, out)
 	assert.Equal(t, errors.New("oh noes"), err)
+}
+
+type sysHandlerSideEffect struct {
+	calls *int
+}
+
+func (h *sysHandlerSideEffect) Handle(context.Context) {
+	(*h.calls)++
+}
+
+func TestProcessHandlerMessageRejectsReservedSysRouteBeforeDispatch(t *testing.T) {
+	for _, serviceName := range []string{"sys", "Sys", "sYs", " sys "} {
+		t.Run(serviceName, func(t *testing.T) {
+			for _, msgType := range []message.Type{message.Request, message.Notify} {
+				t.Run(msgType.String(), func(t *testing.T) {
+					for _, dispatch := range []string{"interceptor", "handler"} {
+						t.Run(dispatch, func(t *testing.T) {
+							ctrl := gomock.NewController(t)
+							ss := session_mocks.NewMockSession(ctrl)
+							ss.EXPECT().UID().Return("uid").AnyTimes()
+							ss.EXPECT().ID().Return(int64(1)).AnyTimes()
+
+							calls := 0
+							handlerPool := NewHandlerPool()
+							switch dispatch {
+							case "interceptor":
+								handlerPool.RegisterInterceptor(serviceName, &component.Interceptor{
+									InterceptorFun: func(context.Context, route.Route, []byte) (proto.Message, error) {
+										calls++
+										return nil, nil
+									},
+								})
+							case "handler":
+								receiver := &sysHandlerSideEffect{calls: &calls}
+								method, ok := reflect.TypeOf(receiver).MethodByName("Handle")
+								assert.True(t, ok)
+								handlerPool.Register(serviceName, "method", &component.Handler{
+									Receiver: reflect.ValueOf(receiver),
+									Method:   method,
+								})
+							}
+
+							hooks := pipeline.NewHandlerHooks()
+							hooks.BeforeHandler.PushBack(func(ctx context.Context, _ route.Route, in interface{}) (context.Context, interface{}, error) {
+								calls++
+								return ctx, in, nil
+							})
+
+							out, err := handlerPool.ProcessHandlerMessage(
+								context.Background(),
+								route.NewRoute("", serviceName, "method"),
+								nil,
+								hooks,
+								ss,
+								nil,
+								msgType,
+								false,
+							)
+
+							assert.Nil(t, out)
+							assert.Error(t, err)
+							assert.True(t, apierrors.IsNotFound(err), "reserved routes should be indistinguishable from missing routes")
+							assert.Zero(t, calls)
+						})
+					}
+				})
+			}
+		})
+	}
 }

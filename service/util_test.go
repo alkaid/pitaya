@@ -34,6 +34,7 @@ import (
 	"github.com/alkaid/pitaya/v2/pipeline"
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/protos/test"
+	"github.com/alkaid/pitaya/v2/route"
 	"github.com/alkaid/pitaya/v2/serialize/mocks"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -183,8 +184,9 @@ func TestGetMsgType(t *testing.T) {
 
 func TestExecuteBeforePipelineEmpty(t *testing.T) {
 	expected := []byte("ok")
+	rt := route.NewRoute("", "service", "method")
 	beforeHandler := pipeline.NewChannel()
-	_, res, err := beforeHandler.ExecuteBeforePipeline(nil, expected)
+	_, res, err := beforeHandler.ExecuteBeforePipeline(nil, rt, expected)
 	assert.NoError(t, err)
 	assert.Equal(t, expected, res)
 }
@@ -194,13 +196,16 @@ func TestExecuteBeforePipelineSuccess(t *testing.T) {
 	data := []byte("ok")
 	expected1 := []byte("oh noes 1")
 	expected2 := []byte("oh noes 2")
-	before1 := func(ctx context.Context, in interface{}) (context.Context, interface{}, error) {
+	rt := route.NewRoute("", "service", "method")
+	before1 := func(ctx context.Context, gotRoute route.Route, in interface{}) (context.Context, interface{}, error) {
 		assert.Equal(t, c, ctx)
+		assert.Equal(t, *rt, gotRoute)
 		assert.Equal(t, data, in)
 		return ctx, expected1, nil
 	}
-	before2 := func(ctx context.Context, in interface{}) (context.Context, interface{}, error) {
+	before2 := func(ctx context.Context, gotRoute route.Route, in interface{}) (context.Context, interface{}, error) {
 		assert.Equal(t, c, ctx)
+		assert.Equal(t, *rt, gotRoute)
 		assert.Equal(t, expected1, in)
 		return ctx, expected2, nil
 	}
@@ -210,7 +215,7 @@ func TestExecuteBeforePipelineSuccess(t *testing.T) {
 	beforeHandler.PushBack(before2)
 	defer beforeHandler.Clear()
 
-	_, res, err := beforeHandler.ExecuteBeforePipeline(c, data)
+	_, res, err := beforeHandler.ExecuteBeforePipeline(c, rt, data)
 	assert.NoError(t, err)
 	assert.Equal(t, expected2, res)
 }
@@ -218,22 +223,25 @@ func TestExecuteBeforePipelineSuccess(t *testing.T) {
 func TestExecuteBeforePipelineError(t *testing.T) {
 	c := context.Background()
 	expected := errors.New("oh noes")
-	before := func(ctx context.Context, in interface{}) (context.Context, interface{}, error) {
+	rt := route.NewRoute("", "service", "method")
+	before := func(ctx context.Context, gotRoute route.Route, in interface{}) (context.Context, interface{}, error) {
 		assert.Equal(t, c, ctx)
+		assert.Equal(t, *rt, gotRoute)
 		return ctx, nil, expected
 	}
 	beforeHandler := pipeline.NewChannel()
 	beforeHandler.PushFront(before)
 	defer beforeHandler.Clear()
 
-	_, _, err := beforeHandler.ExecuteBeforePipeline(c, []byte("ok"))
+	_, _, err := beforeHandler.ExecuteBeforePipeline(c, rt, []byte("ok"))
 	assert.Equal(t, expected, err)
 }
 
 func TestExecuteAfterPipelineEmpty(t *testing.T) {
 	expected := []byte("whatever")
+	rt := route.NewRoute("", "service", "method")
 	afterHandler := pipeline.NewAfterChannel()
-	res, err := afterHandler.ExecuteAfterPipeline(nil, expected, nil)
+	res, err := afterHandler.ExecuteAfterPipeline(nil, rt, nil, expected, nil)
 	assert.Equal(t, expected, res)
 	assert.Nil(t, err)
 }
@@ -245,14 +253,20 @@ func TestExecuteAfterPipelineSuccess(t *testing.T) {
 	expected2 := []byte("oh noes 2")
 	err0 := errors.New("start with this")
 	err1 := errors.New("send this error")
-	after1 := func(ctx context.Context, out interface{}, err error) (interface{}, error) {
+	rt := route.NewRoute("", "service", "method")
+	input := []byte("input")
+	after1 := func(ctx context.Context, gotRoute route.Route, in interface{}, out interface{}, err error) (interface{}, error) {
 		assert.Equal(t, c, ctx)
+		assert.Equal(t, *rt, gotRoute)
+		assert.Equal(t, input, in)
 		assert.Equal(t, data, out)
 		assert.Equal(t, err0, err)
 		return expected1, err1
 	}
-	after2 := func(ctx context.Context, out interface{}, err error) (interface{}, error) {
+	after2 := func(ctx context.Context, gotRoute route.Route, in interface{}, out interface{}, err error) (interface{}, error) {
 		assert.Equal(t, c, ctx)
+		assert.Equal(t, *rt, gotRoute)
+		assert.Equal(t, input, in)
 		assert.Equal(t, expected1, out)
 		assert.Equal(t, err1, err)
 		return expected2, nil
@@ -262,22 +276,24 @@ func TestExecuteAfterPipelineSuccess(t *testing.T) {
 	afterHandler.PushBack(after2)
 	defer afterHandler.Clear()
 
-	res, err := afterHandler.ExecuteAfterPipeline(c, []byte("ok"), err0)
+	res, err := afterHandler.ExecuteAfterPipeline(c, rt, input, []byte("ok"), err0)
 	assert.Equal(t, expected2, res)
 	assert.Nil(t, err)
 }
 
 func TestExecuteAfterPipelineError(t *testing.T) {
 	c := context.Background()
-	after := func(ctx context.Context, out interface{}, err error) (interface{}, error) {
+	rt := route.NewRoute("", "service", "method")
+	after := func(ctx context.Context, gotRoute route.Route, in interface{}, out interface{}, err error) (interface{}, error) {
 		assert.Equal(t, c, ctx)
+		assert.Equal(t, *rt, gotRoute)
 		return nil, errors.New("oh noes")
 	}
 	afterHandler := pipeline.NewAfterChannel()
 	afterHandler.PushFront(after)
 	defer afterHandler.Clear()
 
-	res, err := afterHandler.ExecuteAfterPipeline(c, []byte("ok"), nil)
+	res, err := afterHandler.ExecuteAfterPipeline(c, rt, nil, []byte("ok"), nil)
 	assert.Nil(t, res)
 	assert.Equal(t, errors.New("oh noes"), err)
 }
@@ -310,7 +326,11 @@ func TestSerializeReturn(t *testing.T) {
 			}
 			out, err := serializeReturn(mockSerializer, table.in)
 			assert.Equal(t, table.out, out)
-			assert.Equal(t, table.errGetErrorPayload, err)
+			if table.errGetErrorPayload == nil {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorIs(t, err, table.errGetErrorPayload)
+			}
 		})
 	}
 }

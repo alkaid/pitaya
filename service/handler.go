@@ -136,6 +136,9 @@ func (h *HandlerService) Dispatch(thread int) {
 // Register registers components
 func (h *HandlerService) Register(comp component.Component, opts []component.Option) error {
 	s := component.NewService(comp, opts)
+	if isReservedHandlerServiceName(s.Name) {
+		return fmt.Errorf("handler: service name %q is reserved", s.Name)
+	}
 
 	if _, ok := h.services[s.Name]; ok {
 		return fmt.Errorf("handler: service already defined: %s", s.Name)
@@ -315,6 +318,10 @@ func (h *HandlerService) processMessage(a agent.Agent, msg *message.Message) {
 	if err != nil {
 		logger.Zap.Error("Failed to decode route", zap.Error(err))
 		a.AnswerWithError(ctx, msg.ID, apierrors.BadRequest("", "Failed to decode route", "").WithCause(err))
+		return
+	}
+	if isReservedHandlerServiceName(r.Service) {
+		a.AnswerWithError(ctx, msg.ID, handlerNotFoundError(r))
 		return
 	}
 
