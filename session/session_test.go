@@ -28,6 +28,8 @@ import (
 	"fmt"
 	"math/rand"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -60,6 +62,15 @@ func (ma *mockAddr) String() string  { return "192.0.2.1:25" }
 func newTestSession(pool SessionPool, entity networkentity.NetworkEntity, frontend bool, uid ...string) Session {
 	session, _ := pool.NewSession(entity, frontend, uid...)
 	return session
+}
+
+func expectEntityCloseCounter(entity *mocks.MockNetworkEntity, count *atomic.Int64) {
+	recordClose := func(map[string]string, ...int) error {
+		count.Add(1)
+		return nil
+	}
+	entity.EXPECT().Close(gomock.Any()).DoAndReturn(recordClose).AnyTimes()
+	entity.EXPECT().Close(gomock.Any(), gomock.Any()).DoAndReturn(recordClose).AnyTimes()
 }
 
 type hgetallCache struct {
@@ -129,13 +140,14 @@ func TestCloseAll(t *testing.T) {
 
 			entity = mocks.NewMockNetworkEntity(ctrl)
 			for _, s := range table.sessions() {
-				sessionPool.sessionsByID.Store(s.ID(), s)
-				sessionPool.sessionsByUID.Store(s.UID(), s)
+				assert.NoError(t, sessionPool.StoreSessionLocal(s))
 			}
 
 			table.mock()
 
 			sessionPool.CloseAll()
+			assert.Zero(t, sessionPool.GetSessionCount())
+			assert.Zero(t, sessionPool.GetUserCount())
 		})
 	}
 }
@@ -205,7 +217,7 @@ func TestGetSessionByUIDExists(t *testing.T) {
 
 	sessionPool := NewSessionPool().(*sessionPoolImpl)
 	expectedSS := newTestSession(sessionPool, nil, true, uid)
-	sessionPool.sessionsByUID.Store(uid, expectedSS)
+	assert.NoError(t, sessionPool.StoreSessionLocal(expectedSS))
 
 	ss := sessionPool.GetSessionByUID(uid)
 	assert.Equal(t, expectedSS, ss)
@@ -230,6 +242,33 @@ func TestKick(t *testing.T) {
 	entity.EXPECT().Close(nil)
 	err := ss.Kick(c, nil)
 	assert.NoError(t, err)
+}
+
+func TestKickClosesReentrantEntityOnce(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	entity := mocks.NewMockNetworkEntity(ctrl)
+	ctx := context.Background()
+	entity.EXPECT().Kick(ctx)
+
+	pool := NewSessionPool().(*sessionPoolImpl)
+	var ss Session
+	var closeCount atomic.Int64
+	entity.EXPECT().Close(nil).DoAndReturn(func(map[string]string, ...int) error {
+		closeCount.Add(1)
+		ss.Close(nil)
+		return nil
+	}).AnyTimes()
+
+	ss = newTestSession(pool, entity, true)
+	uid := uuid.New().String()
+	assert.NoError(t, ss.Bind(ctx, uid, nil, nil))
+
+	assert.NoError(t, ss.Kick(ctx, nil))
+	assert.EqualValues(t, 1, closeCount.Load())
+	assert.Nil(t, pool.GetSessionByUID(uid))
+	assert.Nil(t, pool.GetSessionByID(ss.ID()))
+	assert.Zero(t, pool.GetSessionCount())
+	assert.Zero(t, pool.GetUserCount())
 }
 
 func TestSessionUpdateEncodedData(t *testing.T) {
@@ -531,13 +570,96 @@ func TestSessionBindFrontend(t *testing.T) {
 	assert.Equal(t, val, ss)
 }
 
+func TestSessionBindFailurePreservesExistingBinding(t *testing.T) {
+	pool := NewSessionPool().(*sessionPoolImpl)
+	ss := newTestSession(pool, nil, true)
+	uid := uuid.New().String()
+	assert.NoError(t, ss.Bind(context.Background(), uid, nil, nil))
+
+	bindErr := errors.New("bind callback failed")
+	pool.OnSessionBind(func(context.Context, Session, map[string]string) error {
+		return bindErr
+	})
+	err := ss.Bind(context.Background(), uid, nil, nil)
+
+	assert.ErrorIs(t, err, bindErr)
+	assert.Equal(t, uid, ss.UID())
+	assert.Equal(t, ss, pool.GetSessionByUID(uid))
+	assert.EqualValues(t, 1, pool.GetSessionCount())
+	assert.EqualValues(t, 1, pool.GetUserCount())
+}
+
+func TestSessionBindRejectsReentrantAttempt(t *testing.T) {
+	pool := NewSessionPool().(*sessionPoolImpl)
+	ss := newTestSession(pool, nil, true)
+	uid := uuid.New().String()
+	var reentrantErr error
+	pool.OnSessionBind(func(ctx context.Context, session Session, _ map[string]string) error {
+		reentrantErr = session.Bind(ctx, uid, nil, nil)
+		return nil
+	})
+
+	err := ss.Bind(context.Background(), uid, nil, nil)
+
+	assert.NoError(t, err)
+	assert.ErrorIs(t, reentrantErr, constants.ErrSessionAlreadyBound)
+	assert.Equal(t, uid, ss.UID())
+	assert.Equal(t, ss, pool.GetSessionByUID(uid))
+	assert.EqualValues(t, 1, pool.GetSessionCount())
+	assert.EqualValues(t, 1, pool.GetUserCount())
+}
+
+func TestSessionBindCallbackCannotStorePartialBinding(t *testing.T) {
+	pool := NewSessionPool().(*sessionPoolImpl)
+	ss := newTestSession(pool, nil, true)
+	uid := uuid.New().String()
+	bindErr := errors.New("bind callback failed")
+	var storeErr error
+	pool.OnSessionBind(func(_ context.Context, session Session, _ map[string]string) error {
+		storeErr = pool.StoreSessionLocal(session)
+		return bindErr
+	})
+
+	err := ss.Bind(context.Background(), uid, nil, nil)
+
+	assert.ErrorIs(t, err, bindErr)
+	assert.ErrorIs(t, storeErr, constants.ErrSessionAlreadyBound)
+	assert.Empty(t, ss.UID())
+	assert.Nil(t, pool.GetSessionByUID(uid))
+	assert.Equal(t, ss, pool.GetSessionByID(ss.ID()))
+	assert.EqualValues(t, 1, pool.GetSessionCount())
+	assert.Zero(t, pool.GetUserCount())
+}
+
+func TestSessionBindCallbackCannotRemoveRegistration(t *testing.T) {
+	pool := NewSessionPool().(*sessionPoolImpl)
+	ss := newTestSession(pool, nil, true)
+	uid := uuid.New().String()
+	pool.OnSessionBind(func(_ context.Context, session Session, _ map[string]string) error {
+		pool.RemoveSessionLocal(session)
+		return nil
+	})
+
+	err := ss.Bind(context.Background(), uid, nil, nil)
+
+	assert.NoError(t, err)
+	assert.Equal(t, uid, ss.UID())
+	assert.Equal(t, ss, pool.GetSessionByUID(uid))
+	assert.Equal(t, ss, pool.GetSessionByID(ss.ID()))
+	assert.EqualValues(t, 1, pool.GetSessionCount())
+	assert.EqualValues(t, 1, pool.GetUserCount())
+}
+
 func TestSessionBindBackend(t *testing.T) {
 	tables := []struct {
-		name string
-		err  error
+		name       string
+		bindErr    error
+		clusterErr error
+		wantUID    bool
 	}{
-		{"successful_bind_in_front", nil},
-		{"failed_bind_in_front", errors.New("failed bind in front")},
+		{"successful_bind_in_front", nil, nil, true},
+		{"failed_bind_in_front", errors.New("failed bind in front"), nil, false},
+		{"failed_cluster_load_after_bind", nil, errors.New("failed cluster load"), true},
 	}
 
 	for _, table := range tables {
@@ -546,7 +668,7 @@ func TestSessionBindBackend(t *testing.T) {
 			defer ctrl.Finish()
 			mockEntity := mocks.NewMockNetworkEntity(ctrl)
 			sessionPool := NewSessionPool().(*sessionPoolImpl)
-			sessionPool.storage = &hgetallCache{fields: map[string]string{fieldKeyOnline: "1"}}
+			sessionPool.storage = &hgetallCache{fields: map[string]string{fieldKeyOnline: "1"}, err: table.clusterErr}
 			ss := newTestSession(sessionPool, mockEntity, false).(*sessionImpl)
 			assert.NotNil(t, ss)
 
@@ -566,12 +688,20 @@ func TestSessionBindBackend(t *testing.T) {
 			expectedRequestData, err := proto.Marshal(expectedBindMsg)
 			assert.NoError(t, err)
 
-			mockEntity.EXPECT().SendRequest(ctx, frontendID, constants.SessionBindRoute, expectedRequestData).Return(&protos.Response{}, table.err)
+			mockEntity.EXPECT().SendRequest(ctx, frontendID, constants.SessionBindRoute, expectedRequestData).Return(&protos.Response{}, table.bindErr)
 
 			err = ss.Bind(ctx, uid, nil, nil)
-			assert.Equal(t, table.err, err)
+			expectedErr := table.bindErr
+			if expectedErr == nil {
+				expectedErr = table.clusterErr
+			}
+			if expectedErr == nil {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorIs(t, err, expectedErr)
+			}
 
-			if table.err == nil {
+			if table.wantUID {
 				assert.Equal(t, uid, ss.uid)
 			} else {
 				assert.Empty(t, ss.uid)
@@ -630,8 +760,8 @@ func TestSessionClose(t *testing.T) {
 			assert.NotNil(t, ss)
 
 			if table.uid != "" {
-				sessionPool.sessionsByUID.Store(table.uid, ss)
 				ss.uid = table.uid
+				assert.NoError(t, sessionPool.StoreSessionLocal(ss))
 			}
 
 			mockEntity.EXPECT().Close(nil)
@@ -644,8 +774,313 @@ func TestSessionClose(t *testing.T) {
 				_, ok = sessionPool.sessionsByUID.Load(table.uid)
 				assert.False(t, ok)
 			}
+			assert.Zero(t, sessionPool.GetSessionCount())
+			assert.Zero(t, sessionPool.GetUserCount())
 		})
 	}
+}
+
+func TestSessionCloseAfterRebindPreservesReplacement(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	oldEntity := mocks.NewMockNetworkEntity(ctrl)
+	newEntity := mocks.NewMockNetworkEntity(ctrl)
+	var oldCloseCount atomic.Int64
+	expectEntityCloseCounter(oldEntity, &oldCloseCount)
+
+	pool := NewSessionPool().(*sessionPoolImpl)
+	uid := uuid.New().String()
+	oldSession := newTestSession(pool, oldEntity, true)
+	assert.NoError(t, oldSession.Bind(context.Background(), uid, nil, nil))
+
+	newSession := newTestSession(pool, newEntity, true)
+	assert.NoError(t, newSession.Bind(context.Background(), uid, nil, nil))
+	assert.Equal(t, newSession, pool.GetSessionByUID(uid))
+	assert.EqualValues(t, 1, pool.GetSessionCount())
+	assert.EqualValues(t, 1, pool.GetUserCount())
+
+	// The connection handler can still close the replaced session after Bind closed it.
+	oldSession.Close(nil)
+
+	assert.Equal(t, newSession, pool.GetSessionByUID(uid))
+	assert.EqualValues(t, 1, pool.GetSessionCount())
+	assert.EqualValues(t, 1, pool.GetUserCount())
+	assert.EqualValues(t, 1, oldCloseCount.Load())
+}
+
+func TestSessionCloseAfterCallbackClearRemovesRegisteredUID(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	entity := mocks.NewMockNetworkEntity(ctrl)
+	entity.EXPECT().Close(nil)
+
+	pool := NewSessionPool().(*sessionPoolImpl)
+	ss := newTestSession(pool, entity, true)
+	uid := uuid.New().String()
+	assert.NoError(t, ss.Bind(context.Background(), uid, nil, nil))
+	assert.NoError(t, ss.OnClose(ss.Clear))
+
+	// Agent.Close runs these callbacks before HandlerService defers Session.Close.
+	for _, callback := range ss.GetOnCloseCallbacks() {
+		callback()
+	}
+	assert.Empty(t, ss.UID())
+	ss.Close(nil)
+
+	assert.Nil(t, pool.GetSessionByUID(uid))
+	assert.Nil(t, pool.GetSessionByID(ss.ID()))
+	assert.Zero(t, pool.GetSessionCount())
+	assert.Zero(t, pool.GetUserCount())
+}
+
+func TestSessionCloseIsIdempotent(t *testing.T) {
+	t.Run("sequential", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		entity := mocks.NewMockNetworkEntity(ctrl)
+		var closeCount atomic.Int64
+		expectEntityCloseCounter(entity, &closeCount)
+
+		pool := NewSessionPool().(*sessionPoolImpl)
+		ss := newTestSession(pool, entity, true)
+		assert.NoError(t, ss.Bind(context.Background(), uuid.New().String(), nil, nil))
+
+		ss.Close(nil)
+		ss.Close(nil)
+
+		assert.Zero(t, pool.GetSessionCount())
+		assert.Zero(t, pool.GetUserCount())
+		assert.EqualValues(t, 1, closeCount.Load())
+	})
+
+	t.Run("concurrent", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		entity := mocks.NewMockNetworkEntity(ctrl)
+		var closeCount atomic.Int64
+		expectEntityCloseCounter(entity, &closeCount)
+
+		pool := NewSessionPool().(*sessionPoolImpl)
+		ss := newTestSession(pool, entity, true)
+		assert.NoError(t, ss.Bind(context.Background(), uuid.New().String(), nil, nil))
+
+		const closers = 32
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(closers)
+		for range closers {
+			go func() {
+				defer wg.Done()
+				<-start
+				ss.Close(nil)
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		assert.Zero(t, pool.GetSessionCount())
+		assert.Zero(t, pool.GetUserCount())
+		assert.EqualValues(t, 1, closeCount.Load())
+	})
+}
+
+func TestSessionCloseWithoutUIDDoesNotChangeUserCount(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	entity := mocks.NewMockNetworkEntity(ctrl)
+	var closeCount atomic.Int64
+	expectEntityCloseCounter(entity, &closeCount)
+
+	pool := NewSessionPool().(*sessionPoolImpl)
+	ss := newTestSession(pool, entity, true)
+	ss.Close(nil)
+	ss.Close(nil)
+
+	assert.Zero(t, pool.GetSessionCount())
+	assert.Zero(t, pool.GetUserCount())
+	assert.EqualValues(t, 1, closeCount.Load())
+}
+
+func TestSessionBindConcurrentCloseDoesNotRestoreClosedSession(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	entity := mocks.NewMockNetworkEntity(ctrl)
+	var closeCount atomic.Int64
+	expectEntityCloseCounter(entity, &closeCount)
+
+	pool := NewSessionPool().(*sessionPoolImpl)
+	bindEntered := make(chan struct{})
+	resumeBind := make(chan struct{})
+	pool.OnSessionBind(func(context.Context, Session, map[string]string) error {
+		close(bindEntered)
+		<-resumeBind
+		return nil
+	})
+
+	ss := newTestSession(pool, entity, true)
+	uid := uuid.New().String()
+	bindErr := make(chan error, 1)
+	go func() {
+		bindErr <- ss.Bind(context.Background(), uid, nil, nil)
+	}()
+
+	<-bindEntered
+	ss.Close(nil)
+	close(resumeBind)
+	err := <-bindErr
+
+	assert.ErrorIs(t, err, constants.ErrCloseClosedSession)
+	assert.Nil(t, pool.GetSessionByUID(uid))
+	assert.Nil(t, pool.GetSessionByID(ss.ID()))
+	assert.Zero(t, pool.GetSessionCount())
+	assert.Zero(t, pool.GetUserCount())
+	assert.EqualValues(t, 1, closeCount.Load())
+}
+
+func TestCloseAllConcurrentRebindDoesNotRestoreClosedSession(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	oldEntity := mocks.NewMockNetworkEntity(ctrl)
+	newEntity := mocks.NewMockNetworkEntity(ctrl)
+	var oldCloseCount atomic.Int64
+	var newCloseCount atomic.Int64
+	expectEntityCloseCounter(oldEntity, &oldCloseCount)
+	expectEntityCloseCounter(newEntity, &newCloseCount)
+
+	pool := NewSessionPool().(*sessionPoolImpl)
+	uid := uuid.New().String()
+	oldSession := newTestSession(pool, oldEntity, true)
+	assert.NoError(t, oldSession.Bind(context.Background(), uid, nil, nil))
+
+	bindEntered := make(chan struct{})
+	resumeBind := make(chan struct{})
+	pool.OnSessionBind(func(context.Context, Session, map[string]string) error {
+		close(bindEntered)
+		<-resumeBind
+		return nil
+	})
+	newSession := newTestSession(pool, newEntity, true)
+	bindErr := make(chan error, 1)
+	go func() {
+		bindErr <- newSession.Bind(context.Background(), uid, nil, nil)
+	}()
+
+	<-bindEntered
+	closeAllDone := make(chan struct{})
+	go func() {
+		pool.CloseAll()
+		close(closeAllDone)
+	}()
+	<-closeAllDone
+	close(resumeBind)
+	err := <-bindErr
+
+	assert.ErrorIs(t, err, constants.ErrCloseClosedSession)
+	assert.Nil(t, pool.GetSessionByUID(uid))
+	assert.Nil(t, pool.GetSessionByID(oldSession.ID()))
+	assert.Nil(t, pool.GetSessionByID(newSession.ID()))
+	assert.Zero(t, pool.GetSessionCount())
+	assert.Zero(t, pool.GetUserCount())
+	assert.EqualValues(t, 1, oldCloseCount.Load())
+	assert.EqualValues(t, 1, newCloseCount.Load())
+}
+
+func TestRemoveSessionLocalPreservesReplacement(t *testing.T) {
+	pool := NewSessionPool().(*sessionPoolImpl)
+	uid := uuid.New().String()
+	oldSession := newTestSession(pool, nil, false).(*sessionImpl)
+	oldSession.uid = uid
+	replacement := newTestSession(pool, nil, false).(*sessionImpl)
+	replacement.uid = uid
+
+	assert.NoError(t, pool.StoreSessionLocal(oldSession))
+	assert.NoError(t, pool.StoreSessionLocal(oldSession))
+	assert.NoError(t, pool.StoreSessionLocal(replacement))
+	assert.Equal(t, replacement, pool.GetSessionByUID(uid))
+	assert.EqualValues(t, 2, pool.GetSessionCount())
+	assert.EqualValues(t, 1, pool.GetUserCount())
+
+	pool.RemoveSessionLocal(oldSession)
+	pool.RemoveSessionLocal(oldSession)
+
+	assert.Equal(t, replacement, pool.GetSessionByUID(uid))
+	assert.Nil(t, pool.GetSessionByID(oldSession.ID()))
+	assert.Equal(t, replacement, pool.GetSessionByID(replacement.ID()))
+	assert.EqualValues(t, 1, pool.GetSessionCount())
+	assert.EqualValues(t, 1, pool.GetUserCount())
+}
+
+func TestStoreSessionLocalRejectsClosedSession(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	entity := mocks.NewMockNetworkEntity(ctrl)
+	entity.EXPECT().Close(nil)
+
+	pool := NewSessionPool().(*sessionPoolImpl)
+	ss := newTestSession(pool, entity, true)
+	uid := uuid.New().String()
+	assert.NoError(t, ss.Bind(context.Background(), uid, nil, nil))
+	ss.Close(nil)
+
+	err := pool.StoreSessionLocal(ss)
+
+	assert.ErrorIs(t, err, constants.ErrCloseClosedSession)
+	assert.Nil(t, pool.GetSessionByUID(uid))
+	assert.Nil(t, pool.GetSessionByID(ss.ID()))
+	assert.Zero(t, pool.GetSessionCount())
+	assert.Zero(t, pool.GetUserCount())
+}
+
+func TestStoreAndRemoveSessionLocalAreAtomic(t *testing.T) {
+	t.Run("remove before store", func(t *testing.T) {
+		pool := NewSessionPool().(*sessionPoolImpl)
+		ss := newTestSession(pool, nil, false).(*sessionImpl)
+		uid := uuid.New().String()
+		ss.uid = uid
+
+		pool.RemoveSessionLocal(ss)
+		assert.Zero(t, pool.GetSessionCount())
+		assert.Zero(t, pool.GetUserCount())
+
+		assert.NoError(t, pool.StoreSessionLocal(ss))
+		assert.Equal(t, ss, pool.GetSessionByUID(uid))
+		assert.Equal(t, ss, pool.GetSessionByID(ss.ID()))
+		assert.EqualValues(t, 1, pool.GetSessionCount())
+		assert.EqualValues(t, 1, pool.GetUserCount())
+	})
+
+	t.Run("concurrent", func(t *testing.T) {
+		const iterations = 100
+		for i := range iterations {
+			pool := NewSessionPool().(*sessionPoolImpl)
+			ss := newTestSession(pool, nil, false).(*sessionImpl)
+			uid := uuid.New().String()
+			ss.uid = uid
+
+			start := make(chan struct{})
+			storeErr := make(chan error, 1)
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				<-start
+				storeErr <- pool.StoreSessionLocal(ss)
+			}()
+			go func() {
+				defer wg.Done()
+				<-start
+				pool.RemoveSessionLocal(ss)
+			}()
+			close(start)
+			wg.Wait()
+
+			assert.NoError(t, <-storeErr, "iteration %d", i)
+			byUID := pool.GetSessionByUID(uid)
+			byID := pool.GetSessionByID(ss.ID())
+			assert.Equal(t, byUID == nil, byID == nil, "iteration %d", i)
+			if byUID == nil {
+				assert.Zero(t, pool.GetSessionCount(), "iteration %d", i)
+				assert.Zero(t, pool.GetUserCount(), "iteration %d", i)
+			} else {
+				assert.Equal(t, ss, byUID, "iteration %d", i)
+				assert.Equal(t, ss, byID, "iteration %d", i)
+				assert.EqualValues(t, 1, pool.GetSessionCount(), "iteration %d", i)
+				assert.EqualValues(t, 1, pool.GetUserCount(), "iteration %d", i)
+			}
+		}
+	})
 }
 
 func TestSessionCloseFrontendWithSubscription(t *testing.T) {
@@ -673,6 +1108,7 @@ func TestSessionCloseFrontendWithSubscription(t *testing.T) {
 	ss.SetSubscriptions([]*nats.Subscription{subs})
 
 	mockEntity.EXPECT().Close(nil)
+	ss.Close(nil)
 	ss.Close(nil)
 
 	helpers.ShouldEventuallyReturn(t, s.NumSubscriptions, initialSubs)

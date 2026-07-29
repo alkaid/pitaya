@@ -86,6 +86,7 @@ type sessionPoolImpl struct {
 	sessionBindCallbacks []OnSessionBindFunc
 	afterBindCallbacks   []OnSessionBindFunc
 	handshakeValidators  map[string]func(data *HandshakeData) error
+	sessionsMutex        sync.RWMutex
 	// SessionCloseCallbacks contains global session close callbacks
 	SessionCloseCallbacks []OnSessionCloseFunc
 	sessionsByUID         sync.Map
@@ -154,9 +155,13 @@ type HandshakeData struct {
 
 type sessionImpl struct {
 	sync.RWMutex                                              // protect data
+	lifecycleMutex      sync.RWMutex                          // protect identity and close state
+	binding             bool                                  // a bind attempt is running callbacks
+	closed              bool                                  // close side effects have started
 	id                  int64                                 // session global unique id
 	uid                 string                                // binding user id
 	uidInt              int64                                 // uid as number
+	registeredUID       string                                // UID key currently registered in the local pool
 	lastTime            int64                                 // last heartbeat time
 	entity              networkentity.NetworkEntity           // low-level network entity
 	data                map[string]any                        // session data store 用户自定义数据
@@ -387,8 +392,16 @@ func (pool *sessionPoolImpl) NewSession(entity networkentity.NetworkEntity, fron
 			return sess, false
 		}
 	}
+	uid := ""
+	uidInt := int64(0)
+	if len(UID) > 0 {
+		uid = UID[0]
+		uidInt = util.ForceIdStrToInt(uid)
+	}
 	s := &sessionImpl{
 		id:                  pool.sessionIDSvc.sessionID(),
+		uid:                 uid,
+		uidInt:              uidInt,
 		entity:              entity,
 		data:                make(map[string]any),
 		handshakeData:       nil,
@@ -403,12 +416,7 @@ func (pool *sessionPoolImpl) NewSession(entity networkentity.NetworkEntity, fron
 	}
 	// sessionstick 的 backend，在 BindBackend()时保存,这里只处理 frontend
 	if frontend {
-		pool.sessionsByID.Store(s.id, s)
-		atomic.AddInt64(&pool.SessionCount, 1)
-	}
-	if len(UID) > 0 {
-		s.uid = UID[0]
-		s.uidInt = util.ForceIdStrToInt(s.uid)
+		pool.storeSessionByID(s)
 	}
 	return s, true
 }
@@ -429,10 +437,14 @@ func NewSessionPool() SessionPool {
 }
 
 func (pool *sessionPoolImpl) GetSessionCount() int64 {
-	return pool.SessionCount
+	pool.sessionsMutex.RLock()
+	defer pool.sessionsMutex.RUnlock()
+	return atomic.LoadInt64(&pool.SessionCount)
 }
 func (pool *sessionPoolImpl) GetUserCount() int64 {
-	return pool.UserCount
+	pool.sessionsMutex.RLock()
+	defer pool.sessionsMutex.RUnlock()
+	return atomic.LoadInt64(&pool.UserCount)
 }
 
 func (pool *sessionPoolImpl) GetSessionCloseCallbacks() []OnSessionCloseFunc {
@@ -442,6 +454,8 @@ func (pool *sessionPoolImpl) GetSessionCloseCallbacks() []OnSessionCloseFunc {
 // GetSessionByUID return a session bound to an user id
 func (pool *sessionPoolImpl) GetSessionByUID(uid string) Session {
 	// TODO: Block this operation in backend servers
+	pool.sessionsMutex.RLock()
+	defer pool.sessionsMutex.RUnlock()
 	if val, ok := pool.sessionsByUID.Load(uid); ok {
 		return val.(Session)
 	}
@@ -451,6 +465,8 @@ func (pool *sessionPoolImpl) GetSessionByUID(uid string) Session {
 // GetSessionByID return a session bound to a frontend server id
 func (pool *sessionPoolImpl) GetSessionByID(id int64) Session {
 	// TODO: Block this operation in backend servers
+	pool.sessionsMutex.RLock()
+	defer pool.sessionsMutex.RUnlock()
 	if val, ok := pool.sessionsByID.Load(id); ok {
 		return val.(Session)
 	}
@@ -542,8 +558,8 @@ func (pool *sessionPoolImpl) OnSessionClose(f OnSessionCloseFunc) {
 
 // CloseAll calls Close on all sessions
 func (pool *sessionPoolImpl) CloseAll() {
-	logger.Log.Infof("closing all sessions, %d sessions", pool.SessionCount)
-	for pool.SessionCount > 0 {
+	logger.Log.Infof("closing all sessions, %d sessions", pool.GetSessionCount())
+	for pool.GetSessionCount() > 0 {
 		pool.sessionsByID.Range(func(_, value interface{}) bool {
 			s := value.(Session)
 			if s.HasRequestsInFlight() {
@@ -559,8 +575,9 @@ func (pool *sessionPoolImpl) CloseAll() {
 				return true
 			}
 		})
-		logger.Log.Debugf("%d sessions remaining", pool.SessionCount)
-		if pool.SessionCount > 0 {
+		remaining := pool.GetSessionCount()
+		logger.Log.Debugf("%d sessions remaining", remaining)
+		if remaining > 0 {
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
@@ -596,16 +613,39 @@ func (pool *sessionPoolImpl) DecodeSessionData(encodedData []byte) (map[string]i
 //	@param session
 //	@return error
 func (pool *sessionPoolImpl) StoreSessionLocal(session Session) error {
-	if len(session.UID()) <= 0 {
-		return errors.WithStack(constants.ErrEmptyUID)
-	}
-	pool.sessionsByUID.Store(session.UID(), session)
-	atomic.AddInt64(&pool.UserCount, 1)
-	if _, ok := pool.sessionsByID.Load(session.ID()); ok {
+	if local, ok := session.(*sessionImpl); ok {
+		local.lifecycleMutex.Lock()
+		defer local.lifecycleMutex.Unlock()
+		if local.closed {
+			return errors.WithStack(constants.ErrCloseClosedSession)
+		}
+		if local.binding {
+			return errors.WithStack(constants.ErrSessionAlreadyBound)
+		}
+		if local.uid == "" {
+			return errors.WithStack(constants.ErrEmptyUID)
+		}
+		pool.sessionsMutex.Lock()
+		defer pool.sessionsMutex.Unlock()
+		if local.registeredUID != "" && local.registeredUID != local.uid {
+			pool.removeSessionByUIDLocked(local.registeredUID, session)
+		}
+		pool.storeSessionByUIDLocked(local.uid, session)
+		pool.storeSessionByIDLocked(session)
+		local.registeredUID = local.uid
 		return nil
 	}
-	pool.sessionsByID.Store(session.ID(), session)
-	atomic.AddInt64(&pool.SessionCount, 1)
+	return pool.storeSessionLocal(session.UID(), session)
+}
+
+func (pool *sessionPoolImpl) storeSessionLocal(uid string, session Session) error {
+	if uid == "" {
+		return errors.WithStack(constants.ErrEmptyUID)
+	}
+	pool.sessionsMutex.Lock()
+	defer pool.sessionsMutex.Unlock()
+	pool.storeSessionByUIDLocked(uid, session)
+	pool.storeSessionByIDLocked(session)
 	return nil
 }
 
@@ -615,15 +655,76 @@ func (pool *sessionPoolImpl) StoreSessionLocal(session Session) error {
 //	@receiver pool
 //	@param session
 func (pool *sessionPoolImpl) RemoveSessionLocal(session Session) {
-	if len(session.UID()) > 0 {
-		pool.sessionsByUID.Delete(session.UID())
-		atomic.AddInt64(&pool.UserCount, -1)
-	}
-	if _, ok := pool.sessionsByID.Load(session.ID()); !ok {
+	if local, ok := session.(*sessionImpl); ok {
+		local.lifecycleMutex.Lock()
+		defer local.lifecycleMutex.Unlock()
+		if local.binding {
+			return
+		}
+		pool.removeSessionLocal(local.registeredUID, session)
+		local.registeredUID = ""
 		return
 	}
+	pool.removeSessionLocal(session.UID(), session)
+}
+
+func (pool *sessionPoolImpl) removeSessionLocal(uid string, session Session) {
+	pool.sessionsMutex.Lock()
+	defer pool.sessionsMutex.Unlock()
+	if uid != "" {
+		pool.removeSessionByUIDLocked(uid, session)
+	}
+	pool.removeSessionByIDLocked(session)
+}
+
+func (pool *sessionPoolImpl) storeSessionByUIDLocked(uid string, session Session) (Session, bool) {
+	previous, loaded := pool.sessionsByUID.Swap(uid, session)
+	if !loaded {
+		atomic.AddInt64(&pool.UserCount, 1)
+		return nil, false
+	}
+	return previous.(Session), true
+}
+
+func (pool *sessionPoolImpl) removeSessionByUID(uid string, session Session) bool {
+	pool.sessionsMutex.Lock()
+	defer pool.sessionsMutex.Unlock()
+	return pool.removeSessionByUIDLocked(uid, session)
+}
+
+func (pool *sessionPoolImpl) removeSessionByUIDLocked(uid string, session Session) bool {
+	if !pool.sessionsByUID.CompareAndDelete(uid, session) {
+		return false
+	}
+	atomic.AddInt64(&pool.UserCount, -1)
+	return true
+}
+
+func (pool *sessionPoolImpl) storeSessionByID(session Session) {
+	pool.sessionsMutex.Lock()
+	defer pool.sessionsMutex.Unlock()
+	pool.storeSessionByIDLocked(session)
+}
+
+func (pool *sessionPoolImpl) storeSessionByIDLocked(session Session) {
+	_, loaded := pool.sessionsByID.Swap(session.ID(), session)
+	if !loaded {
+		atomic.AddInt64(&pool.SessionCount, 1)
+	}
+}
+
+func (pool *sessionPoolImpl) removeSessionByID(session Session) bool {
+	pool.sessionsMutex.Lock()
+	defer pool.sessionsMutex.Unlock()
+	return pool.removeSessionByIDLocked(session)
+}
+
+func (pool *sessionPoolImpl) removeSessionByIDLocked(session Session) bool {
+	if !pool.sessionsByID.CompareAndDelete(session.ID(), session) {
+		return false
+	}
 	atomic.AddInt64(&pool.SessionCount, -1)
-	pool.sessionsByID.Delete(session.ID())
+	return true
 }
 
 func (pool *sessionPoolImpl) SetClusterCache(storage CacheInterface) {
@@ -677,7 +778,9 @@ func (s *sessionImpl) GetFrontendSessionID() int64 {
 
 // GetSubscriptions ...
 func (s *sessionImpl) GetSubscriptions() []*nats.Subscription {
-	return s.Subscriptions
+	s.lifecycleMutex.RLock()
+	defer s.lifecycleMutex.RUnlock()
+	return append([]*nats.Subscription(nil), s.Subscriptions...)
 }
 
 // SetOnCloseCallbacks ...
@@ -692,7 +795,15 @@ func (s *sessionImpl) SetIsFrontend(isFrontend bool) {
 
 // SetSubscriptions ...
 func (s *sessionImpl) SetSubscriptions(subscriptions []*nats.Subscription) {
-	s.Subscriptions = subscriptions
+	s.lifecycleMutex.Lock()
+	if !s.closed {
+		s.Subscriptions = append([]*nats.Subscription(nil), subscriptions...)
+		s.lifecycleMutex.Unlock()
+		return
+	}
+	uid := s.uid
+	s.lifecycleMutex.Unlock()
+	s.drainSubscriptions(uid, subscriptions)
 }
 
 // Push message to client
@@ -713,9 +824,13 @@ func (s *sessionImpl) ID() int64 {
 
 // UID returns uid that bind to current session
 func (s *sessionImpl) UID() string {
+	s.lifecycleMutex.RLock()
+	defer s.lifecycleMutex.RUnlock()
 	return s.uid
 }
 func (s *sessionImpl) UIDInt() int64 {
+	s.lifecycleMutex.RLock()
+	defer s.lifecycleMutex.RUnlock()
 	return s.uidInt
 }
 
@@ -778,13 +893,14 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, custSessData map[str
 	if uid == "" {
 		return constants.ErrIllegalUID
 	}
-	var err error
-	if s.UID() != "" && s.UID() != uid {
-		return errors.WithStack(fmt.Errorf("%w,uid=%s", constants.ErrSessionAlreadyBound, uid))
+	newBinding, err := s.prepareBind(uid)
+	if err != nil {
+		return errors.WithStack(err)
 	}
-
-	s.uid = uid
-	s.uidInt = util.ForceIdStrToInt(s.uid)
+	bindSucceeded := false
+	defer func() {
+		s.finishBind(uid, newBinding, bindSucceeded)
+	}()
 	if len(custSessData) > 0 {
 		err = s.SetData(custSessData)
 		if err != nil {
@@ -794,32 +910,39 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, custSessData map[str
 	for _, cb := range s.pool.sessionBindCallbacks {
 		err = cb(ctx, s, callback)
 		if err != nil {
-			s.uid = ""
-			s.uidInt = 0
 			return err
 		}
+	}
+	if s.isClosed() {
+		return errors.WithStack(constants.ErrCloseClosedSession)
 	}
 
 	// if code running on frontend server
 	if s.IsFrontend {
-		// If a session with the same UID already exists in this frontend server, close it
-		if val, ok := s.pool.sessionsByUID.Load(uid); ok {
+		// Publish the replacement first so the old session cannot remove it while closing.
+		previous, loaded, err := s.registerSessionByUID(uid)
+		if err != nil {
+			return errors.WithStack(err)
+		}
+		bindSucceeded = true
+		if loaded && previous != s {
 			logger.Zap.Warn("session already bind,closing", zap.String("uid", uid))
 			// 应标记为重新绑定使其他服务不执行关闭回调
-			val.(Session).Close(nil, CloseReasonKickRebind)
+			previous.Close(nil, CloseReasonKickRebind)
 		}
-		s.pool.sessionsByUID.Store(uid, s)
-		atomic.AddInt64(&s.pool.UserCount, 1)
+		if s.isClosed() {
+			s.pool.removeSessionByUID(uid, s)
+			return errors.WithStack(constants.ErrCloseClosedSession)
+		}
 	} else {
 		// If frontentID is set this means it is a remote call and the current server
 		// is not the frontend server that received the user request
 		err = s.bindInFront(ctx, callback)
 		if err != nil {
 			logger.Zap.Error("error while trying to push session to front", zap.Error(err))
-			s.uid = ""
-			s.uidInt = 0
 			return err
 		}
+		bindSucceeded = true
 
 		// 绑定成功 同步数据到当前session 否则后续从context中获取的session拿不到boundData数据
 		err = s.ObtainFromCluster()
@@ -839,6 +962,9 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, custSessData map[str
 		//}
 	}
 
+	if s.isClosed() {
+		return errors.WithStack(constants.ErrCloseClosedSession)
+	}
 	return nil
 }
 
@@ -887,9 +1013,7 @@ func (s *sessionImpl) Kick(ctx context.Context, callback map[string]string, reas
 	if err != nil {
 		return err
 	}
-	s.online = false
-	// 不能调用s.Close(),因为s.entity.Close()后handler.go的Handle()的defer里自然会session.close().会导致重复调用
-	return s.entity.Close(callback, reason...)
+	return s.closeOnce(callback, reason...)
 }
 
 // KickBackend
@@ -948,37 +1072,122 @@ func (s *sessionImpl) OnClose(c func()) error {
 // Close terminates current session, session related data will not be released,
 // all related data should be cleared explicitly in Session closed callback
 func (s *sessionImpl) Close(callback map[string]string, reason ...CloseReason) {
-	logger.Zap.Debug("session close", zap.Int64("id", s.ID()), zap.String("uid", s.UID()))
-	atomic.AddInt64(&s.pool.SessionCount, -1)
-	if len(s.UID()) > 0 {
-		s.pool.sessionsByUID.Delete(s.UID())
-		atomic.AddInt64(&s.pool.UserCount, -1)
+	_ = s.closeOnce(callback, reason...)
+}
+
+func (s *sessionImpl) closeOnce(callback map[string]string, reason ...CloseReason) error {
+	uid, subscriptions, ok := s.beginClose()
+	if !ok {
+		return nil
 	}
-	s.online = false
-	s.pool.sessionsByID.Delete(s.ID())
-	// Only remove session by UID if the session ID matches the one being closed. This avoids problems with removing a valid session after the user has already reconnected before this session's heartbeat times out
-	if val, ok := s.pool.sessionsByUID.Load(s.UID()); ok {
-		if (val.(Session)).ID() == s.ID() {
-			s.pool.sessionsByUID.Delete(s.UID())
-		} else {
-			oldSession := val.(Session)
-			logger.Zap.Debug("stored session not equal current session,ignore delete stored session", zap.Int64("oldid", oldSession.ID()), zap.Int64("id", s.ID()), zap.String("uid", s.UID()))
+	logger.Zap.Debug("session close", zap.Int64("id", s.ID()), zap.String("uid", uid))
+	s.pool.removeSessionLocal(uid, s)
+	s.drainSubscriptions(uid, subscriptions)
+	return s.entity.Close(callback, reason...)
+}
+
+func (s *sessionImpl) prepareBind(uid string) (bool, error) {
+	s.lifecycleMutex.Lock()
+	defer s.lifecycleMutex.Unlock()
+	if s.closed {
+		return false, constants.ErrCloseClosedSession
+	}
+	if s.binding {
+		return false, fmt.Errorf("%w,uid=%s", constants.ErrSessionAlreadyBound, uid)
+	}
+	if s.uid != "" {
+		if s.uid != uid {
+			return false, fmt.Errorf("%w,uid=%s", constants.ErrSessionAlreadyBound, uid)
 		}
+		s.binding = true
+		return false, nil
+	}
+	s.uid = uid
+	s.uidInt = util.ForceIdStrToInt(uid)
+	s.binding = true
+	return true, nil
+}
+
+func (s *sessionImpl) finishBind(uid string, newBinding bool, succeeded bool) {
+	s.lifecycleMutex.Lock()
+	defer s.lifecycleMutex.Unlock()
+	s.binding = false
+	if !succeeded && newBinding && !s.closed && s.uid == uid {
+		s.uid = ""
+		s.uidInt = 0
+	}
+}
+
+func (s *sessionImpl) registerSessionByUID(uid string) (Session, bool, error) {
+	s.lifecycleMutex.Lock()
+	defer s.lifecycleMutex.Unlock()
+	if s.closed {
+		return nil, false, constants.ErrCloseClosedSession
+	}
+	if s.uid == "" {
+		return nil, false, constants.ErrEmptyUID
+	}
+	if s.uid != uid {
+		return nil, false, fmt.Errorf("%w,uid=%s", constants.ErrSessionAlreadyBound, uid)
+	}
+
+	s.pool.sessionsMutex.Lock()
+	defer s.pool.sessionsMutex.Unlock()
+	if s.registeredUID != "" && s.registeredUID != uid {
+		s.pool.removeSessionByUIDLocked(s.registeredUID, s)
+	}
+	previous, loaded := s.pool.storeSessionByUIDLocked(uid, s)
+	s.registeredUID = uid
+	return previous, loaded, nil
+}
+
+func (s *sessionImpl) isClosed() bool {
+	s.lifecycleMutex.RLock()
+	defer s.lifecycleMutex.RUnlock()
+	return s.closed
+}
+
+func (s *sessionImpl) beginClose() (string, []*nats.Subscription, bool) {
+	s.lifecycleMutex.Lock()
+	defer s.lifecycleMutex.Unlock()
+	if s.closed {
+		return "", nil, false
+	}
+	s.closed = true
+	s.online = false
+	subscriptions := append([]*nats.Subscription(nil), s.Subscriptions...)
+	s.Subscriptions = nil
+	registeredUID := s.registeredUID
+	s.registeredUID = ""
+	return registeredUID, subscriptions, true
+}
+
+func (s *sessionImpl) drainSubscriptions(uid string, subscriptions []*nats.Subscription) {
+	if !s.IsFrontend {
+		return
 	}
 	// TODO: this logic should be moved to nats rpc server
-	if s.IsFrontend && s.Subscriptions != nil && len(s.Subscriptions) > 0 {
-		// if the user is bound to an userid and nats rpc server is being used we need to unsubscribe
-		for _, sub := range s.Subscriptions {
-			err := sub.Drain()
-			if err != nil {
-				logger.Zap.Error("error Drain to user's messages channel: , this can cause performance and leak issues", zap.Error(err))
-			} else {
-				logger.Zap.Debug("successfully Drain to user's messages channel", zap.String("uid", s.UID()), zap.String("subject", sub.Subject))
-			}
+	for _, sub := range subscriptions {
+		if err := sub.Drain(); err != nil {
+			logger.Zap.Error("error Drain to user's messages channel: , this can cause performance and leak issues", zap.Error(err))
+		} else {
+			logger.Zap.Debug("successfully Drain to user's messages channel", zap.String("uid", uid), zap.String("subject", sub.Subject))
 		}
 	}
-	// 不能返回error,因为这里可能是kick后重复调用了entity.Close
-	s.entity.Close(callback, reason...)
+}
+
+func (s *sessionImpl) setOnline(online bool) {
+	s.lifecycleMutex.Lock()
+	if !s.closed || !online {
+		s.online = online
+	}
+	s.lifecycleMutex.Unlock()
+}
+
+func (s *sessionImpl) lifecycleState() (string, int64, bool) {
+	s.lifecycleMutex.RLock()
+	defer s.lifecycleMutex.RUnlock()
+	return s.uid, s.uidInt, s.online
 }
 
 // RemoteAddr returns the remote network address.
@@ -1290,7 +1499,7 @@ func (s *sessionImpl) Value(key string) interface{} {
 
 func (s *sessionImpl) bindInFront(ctx context.Context, callback map[string]string) error {
 	bindMsg := &protos.BindMsg{
-		Uid:      s.uid,
+		Uid:      s.UID(),
 		Fid:      s.frontendID,
 		Sid:      s.frontendSessionID,
 		Metadata: callback,
@@ -1314,7 +1523,7 @@ func (s *sessionImpl) PushToFront(ctx context.Context) error {
 	// rpcClient.Call虽然会填充session数据,但是frontend接收时不会也不应该把session proto数据覆盖local session,所以这里还是额外传送一份session
 	_, err := s.SendRequestToFrontend(ctx, constants.SessionPushRoute, &protos.Session{
 		Id:   s.frontendSessionID,
-		Uid:  s.uid,
+		Uid:  s.UID(),
 		Data: s.encodedData,
 	})
 	return err
@@ -1322,11 +1531,13 @@ func (s *sessionImpl) PushToFront(ctx context.Context) error {
 
 // Clear releases all data related to current session
 func (s *sessionImpl) Clear() {
-	s.Lock()
-	defer s.Unlock()
-
+	s.lifecycleMutex.Lock()
 	s.uid = ""
 	s.uidInt = 0
+	s.lifecycleMutex.Unlock()
+
+	s.Lock()
+	defer s.Unlock()
 	s.data = map[string]interface{}{}
 	s.updateEncodedData()
 }
@@ -1376,8 +1587,9 @@ func (s *sessionImpl) SendRequest(ctx context.Context, serverID, route string, m
 	return s.entity.SendRequest(ctx, serverID, route, b)
 }
 func (s *sessionImpl) SendRequestToFrontend(ctx context.Context, route string, msg proto.Message) (*protos.Response, error) {
+	uid, _, online := s.lifecycleState()
 	if s.frontendID == "" {
-		return nil, errors.New(fmt.Sprintf("frontendID is nil.sid=%d,uid=%s,online=%t,agent=%s,route=%s", s.ID(), s.uid, s.online, s.entity.NetworkEntityName(), route))
+		return nil, errors.New(fmt.Sprintf("frontendID is nil.sid=%d,uid=%s,online=%t,agent=%s,route=%s", s.ID(), uid, online, s.entity.NetworkEntityName(), route))
 	}
 	return s.SendRequest(ctx, s.frontendID, route, msg)
 }
@@ -1412,13 +1624,15 @@ func (s *sessionImpl) RemoveBackendID(svrType string) {
 	delete(s.backends, svrType)
 }
 func (s *sessionImpl) Online() bool {
-	return s.online
+	_, _, online := s.lifecycleState()
+	return online
 }
 func (s *sessionImpl) ClusterStorageKey() string {
-	if s.uid == "" {
+	uid := s.UID()
+	if uid == "" {
 		return ""
 	}
-	return s.pool.getSessionStorageKey(s.uid)
+	return s.pool.getSessionStorageKey(uid)
 }
 
 func (s *sessionImpl) GetClusterStorage() CacheInterface {
@@ -1426,11 +1640,12 @@ func (s *sessionImpl) GetClusterStorage() CacheInterface {
 }
 
 func (s *sessionImpl) FlushFrontendData() error {
-	if "" == s.uid {
+	uid, _, online := s.lifecycleState()
+	if uid == "" {
 		return errors.WithStack(constants.ErrIllegalUID)
 	}
-	err := s.pool.storage.Hmset(s.ClusterStorageKey(), map[string]string{
-		fieldKeyOnline:         lo.If(s.online, "1").Else("0"),
+	err := s.pool.storage.Hmset(s.pool.getSessionStorageKey(uid), map[string]string{
+		fieldKeyOnline:         lo.If(online, "1").Else("0"),
 		fieldKeyFrontendID:     s.frontendID,
 		fieldKeyFrontendSessID: strconv.FormatInt(s.frontendSessionID, 10),
 		fieldKeyIP:             s.ip,
@@ -1442,10 +1657,11 @@ func (s *sessionImpl) FlushFrontendData() error {
 	return nil
 }
 func (s *sessionImpl) FlushOnline() error {
-	if "" == s.uid {
+	uid, _, online := s.lifecycleState()
+	if uid == "" {
 		return errors.WithStack(constants.ErrIllegalUID)
 	}
-	err := s.pool.storage.Hset(s.ClusterStorageKey(), fieldKeyOnline, lo.If(s.online, "1").Else("0"))
+	err := s.pool.storage.Hset(s.pool.getSessionStorageKey(uid), fieldKeyOnline, lo.If(online, "1").Else("0"))
 	if err != nil {
 		return err
 	}
@@ -1453,7 +1669,8 @@ func (s *sessionImpl) FlushOnline() error {
 }
 
 func (s *sessionImpl) FlushBackendData() error {
-	if "" == s.uid {
+	uid := s.UID()
+	if uid == "" {
 		return errors.WithStack(constants.ErrIllegalUID)
 	}
 	s.bsMutex.RLock()
@@ -1462,7 +1679,7 @@ func (s *sessionImpl) FlushBackendData() error {
 	if err != nil {
 		return errors.WithStack(err)
 	}
-	err = s.pool.storage.Hset(s.ClusterStorageKey(), fieldKeyBackends, string(backends))
+	err = s.pool.storage.Hset(s.pool.getSessionStorageKey(uid), fieldKeyBackends, string(backends))
 	if err != nil {
 		return err
 	}
@@ -1470,10 +1687,11 @@ func (s *sessionImpl) FlushBackendData() error {
 }
 
 func (s *sessionImpl) FlushUserData() error {
-	if "" == s.uid {
+	uid := s.UID()
+	if uid == "" {
 		return errors.WithStack(constants.ErrIllegalUID)
 	}
-	err := s.pool.storage.Hset(s.ClusterStorageKey(), fieldKeyData, string(s.encodedData))
+	err := s.pool.storage.Hset(s.pool.getSessionStorageKey(uid), fieldKeyData, string(s.encodedData))
 	if err != nil {
 		return err
 	}
@@ -1525,14 +1743,14 @@ func (s *sessionImpl) ObtainFromCluster() error {
 		case fieldKeyIP:
 			s.ip = v
 		case fieldKeyOnline:
-			s.online = v == "1"
+			s.setOnline(v == "1")
 		}
 	}
 	return nil
 }
 
 func (s *sessionImpl) reset() {
-	s.online = false
+	s.setOnline(false)
 }
 
 // InitialFromCluster 仅供bind时使用,仅恢复backend绑定关系和用户自定义数据
@@ -1568,8 +1786,9 @@ func FrontendSessHash(frontendID string, sid int64) int64 {
 }
 
 func (s *sessionImpl) Go(ctx context.Context, task func(ctx context.Context)) {
-	if s.uidInt != 0 {
-		co.GoWithUser(ctx, s.uidInt, task)
+	uidInt := s.UIDInt()
+	if uidInt != 0 {
+		co.GoWithUser(ctx, uidInt, task)
 		return
 	}
 	sid := lo.If(s.IsFrontend, s.id).Else(FrontendSessHash(s.frontendID, s.frontendSessionID))
