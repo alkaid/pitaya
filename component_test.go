@@ -44,6 +44,11 @@ type MyComp struct {
 	events              *[]string
 }
 
+type NonComparableComp struct {
+	*MyComp
+	marker []int
+}
+
 func (m *MyComp) record(event string) {
 	if m.events != nil {
 		*m.events = append(*m.events, m.name+"."+event)
@@ -152,6 +157,40 @@ func TestComponentLifecycleRunsOnceAcrossRegistries(t *testing.T) {
 	app.shutdownComponents()
 	assert.Equal(t, 1, comp.beforeShutdownCount)
 	assert.Equal(t, 1, comp.shutdownCount)
+}
+
+func TestNonComparableComponentLifecycleRunsOnceAcrossRegistries(t *testing.T) {
+	app := newTestAppForComponents(nil)
+	comp := NonComparableComp{
+		MyComp: &MyComp{},
+		marker: []int{1},
+	}
+	app.Register(comp)
+	app.RegisterRemote(comp)
+
+	app.startupComponents()
+	assert.Equal(t, 1, comp.initCount)
+	assert.Equal(t, 1, comp.afterInitCount)
+
+	app.shutdownComponents()
+	assert.Equal(t, 1, comp.beforeShutdownCount)
+	assert.Equal(t, 1, comp.shutdownCount)
+}
+
+func TestDistinctNonComparableComponentLifecyclesBothRun(t *testing.T) {
+	app := newTestAppForComponents(nil)
+	first := NonComparableComp{MyComp: &MyComp{}, marker: []int{1}}
+	second := NonComparableComp{MyComp: &MyComp{}, marker: []int{1}}
+	app.Register(first)
+	app.Register(second)
+
+	app.startupComponents()
+	app.shutdownComponents()
+
+	assert.Equal(t, 1, first.initCount)
+	assert.Equal(t, 1, first.shutdownCount)
+	assert.Equal(t, 1, second.initCount)
+	assert.Equal(t, 1, second.shutdownCount)
 }
 
 func TestComponentLifecyclePreservesRegistryOrder(t *testing.T) {

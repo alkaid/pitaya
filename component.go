@@ -66,25 +66,75 @@ func (app *App) RegisterRemoteInterceptor(serviceName string, interceptor *compo
 	app.remoteService.RegisterInterceptor(serviceName, interceptor)
 }
 
-func uniqueComponents(group []regComp, seen map[component.Component]struct{}) []component.Component {
+// Value components can be non-comparable; compare their reference-bearing fields by identity.
+func sameComponentValue(a, b reflect.Value) bool {
+	if a.Type() != b.Type() {
+		return false
+	}
+	if a.Comparable() {
+		return a.Equal(b)
+	}
+
+	switch a.Kind() {
+	case reflect.Array:
+		for i := 0; i < a.Len(); i++ {
+			if !sameComponentValue(a.Index(i), b.Index(i)) {
+				return false
+			}
+		}
+		return true
+	case reflect.Interface:
+		if a.IsNil() || b.IsNil() {
+			return a.IsNil() && b.IsNil()
+		}
+		return sameComponentValue(a.Elem(), b.Elem())
+	case reflect.Map:
+		return a.Pointer() == b.Pointer()
+	case reflect.Slice:
+		return a.Pointer() == b.Pointer() && a.Len() == b.Len() && a.Cap() == b.Cap()
+	case reflect.Struct:
+		for i := 0; i < a.NumField(); i++ {
+			if !sameComponentValue(a.Field(i), b.Field(i)) {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func sameComponent(a, b component.Component) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return sameComponentValue(reflect.ValueOf(a), reflect.ValueOf(b))
+}
+
+func uniqueComponents(group []regComp, seen *[]component.Component) []component.Component {
 	components := make([]component.Component, 0)
 	for _, registered := range group {
 		comp := registered.comp
-		if reflect.TypeOf(comp).Comparable() {
-			if _, ok := seen[comp]; ok {
-				continue
+		duplicate := false
+		for _, existing := range *seen {
+			if sameComponent(existing, comp) {
+				duplicate = true
+				break
 			}
-			seen[comp] = struct{}{}
 		}
+		if duplicate {
+			continue
+		}
+		*seen = append(*seen, comp)
 		components = append(components, comp)
 	}
 	return components
 }
 
 func (app *App) startupComponents() {
-	seen := make(map[component.Component]struct{})
+	seen := make([]component.Component, 0, len(app.handlerComp)+len(app.remoteComp))
 	for _, group := range [][]regComp{app.handlerComp, app.remoteComp} {
-		components := uniqueComponents(group, seen)
+		components := uniqueComponents(group, &seen)
 		for _, comp := range components {
 			comp.Init()
 		}
@@ -118,9 +168,9 @@ func (app *App) startupComponents() {
 }
 
 func (app *App) shutdownComponents() {
-	seen := make(map[component.Component]struct{})
+	seen := make([]component.Component, 0, len(app.handlerComp)+len(app.remoteComp))
 	for _, group := range [][]regComp{app.handlerComp, app.remoteComp} {
-		components := uniqueComponents(group, seen)
+		components := uniqueComponents(group, &seen)
 		for i := len(components) - 1; i >= 0; i-- {
 			components[i].BeforeShutdown()
 		}
