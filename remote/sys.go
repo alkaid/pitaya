@@ -22,6 +22,7 @@ package remote
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"strconv"
 
@@ -169,156 +170,170 @@ func (sys *Sys) Init() {
 		}
 		// 这里只可能是frontend 不再考虑stateful backend的处理
 	})
-	sys.sessionPool.OnBindBackend(func(ctx context.Context, s session.Session, serverType, serverId string, callback map[string]string) error {
-		msg := &protos.BindBackendMsg{
-			Uid:      s.UID(),
-			Btype:    serverType,
-			Bid:      serverId,
-			Metadata: callback,
-		}
-		var err error
-		var r *route.Route
-		// 严禁网关调用
-		if sys.server.Frontend {
-			return errors.WithStack(constants.ErrDeveloperLogicFatal)
-		}
-		// 目标服不是本服 转发给目标服
-		if sys.server.ID != serverId {
-			r, err = route.Decode(serverType + "." + constants.SessionBindBackendRoute)
-			if err != nil {
-				return err
+	if err := session.InstallBackendCoordinator(sys.sessionPool, session.BackendCoordinator{
+		Bind: func(ctx context.Context, s session.Session, serverType, serverId string, callback map[string]string, rollback session.BackendRollback) error {
+			msg := &protos.BindBackendMsg{
+				Uid:      s.UID(),
+				Btype:    serverType,
+				Bid:      serverId,
+				Metadata: callback,
 			}
-			err = sys.remote.RPC(ctx, serverId, r, &protos.Response{}, msg, s)
-			if err != nil {
-				return err
+			var err error
+			var r *route.Route
+			// 严禁网关调用
+			if sys.server.Frontend {
+				return errors.WithStack(constants.ErrDeveloperLogicFatal)
 			}
-		}
-		// session要绑定的就是本服,开始处理
-		logErr := func(err error) {
-			logger.Zap.Error("session binding backend error", zap.Error(err), zap.Int64("sid", s.ID()), zap.String("uid", s.UID()), zap.String("svType", serverType), zap.String("svID", serverId))
-		}
-		rollback := func(err error) {
-			// 回滚 清理本地缓存 清理redis
-			s.RemoveBackendID(serverType)
-			sys.sessionPool.RemoveSessionLocal(s)
-			err2 := s.FlushBackendData()
-			if err2 != nil {
-				logErr(err2)
-			}
-			logErr(err)
-		}
-		// 已经绑定过 警告 或略错误
-		existsSession := sys.sessionPool.GetSessionByUID(s.UID())
-		if existsSession != nil {
-			err = errors.WithStack(fmt.Errorf("%w:found in pool,uid=%s,bound=%s,target=%s", constants.ErrSessionAlreadyBound, s.UID(), existsSession.GetBackendID(serverType), serverId))
-			logger.Zap.Error("", zap.Error(err))
-			return nil
-		}
-		// 本地存储
-		err = sys.sessionPool.StoreSessionLocal(s)
-		if err != nil {
-			rollback(err)
-			return err
-		}
-		// 通知网关同步数据
-		_, err = s.SendRequestToFrontend(ctx, constants.SessionBindBackendRoute, msg)
-		if err != nil {
-			// 同步失败(网关狗带或session已经下线) 回滚
-			rollback(err)
-			return err
-		}
-		// 后续流程都可忽略错误
-		// 通知所有服务器
-		// fork本类型服所有实例 然后通知所有其他类型服
-		r, err = route.Decode(serverType + "." + constants.SessionBoundBackendForkRoute)
-		if err != nil {
-			logErr(err)
-			return nil
-		}
-		_, err = sys.remote.Fork(ctx, true, r, msg, s)
-		if err != nil {
-			logErr(err)
-			return nil
-		}
-		r, err = route.Decode(constants.SessionBoundBackendRoute)
-		if err != nil {
-			logErr(err)
-			return nil
-		}
-		err = sys.remote.NotifyAll(ctx, r, msg, s)
-		if err != nil {
-			logErr(err)
-			return nil
-		}
-		return nil
-	})
-	sys.sessionPool.OnKickBackend(func(ctx context.Context, s session.Session, serverType, serverId string, callback map[string]string, reason session.CloseReason) error {
-		msg := &protos.BindBackendMsg{
-			Uid:      s.UID(),
-			Btype:    serverType,
-			Bid:      serverId,
-			Metadata: callback,
-		}
-		var err error
-		var r *route.Route
-		// 严禁网关调用
-		if sys.server.Frontend {
-			return constants.ErrDeveloperLogicFatal
-		}
-		logW := logger.Zap.With(zap.Int64("sid", s.ID()), zap.String("uid", s.UID()), zap.Int("reason", reason), zap.String("sv", serverType), zap.String("svID", serverId))
-		// 目标服不是本服 转发给目标服成功后再转发网关
-		if sys.server.ID != serverId {
-			// 转发目标服
-			r, err = route.Decode(serverType + "." + constants.KickBackendRoute)
-			if err != nil {
-				return err
-			}
-			err = sys.remote.RPC(ctx, serverId, r, &protos.Response{}, msg, s)
-			if err == nil {
+			// 目标服不是本服 转发给目标服
+			if sys.server.ID != serverId {
+				r, err = route.Decode(serverType + "." + constants.SessionBindBackendRoute)
+				if err != nil {
+					return err
+				}
+				err = sys.remote.RPC(ctx, serverId, r, &protos.Response{}, msg, s)
+				if err != nil {
+					return err
+				}
+				// The target coordinator owns the remaining commit side effects.
 				return nil
 			}
-			// 若目标服已经挂掉,不报错,代替目标服继续后续的数据清理以及通知网关
-			if errors.Is(err, constants.ErrServerNotFound) {
-				logW.Info("backend target down,ignore error", zap.Error(err))
-			} else {
+			// session要绑定的就是本服,开始处理
+			logErr := func(err error) {
+				logger.Zap.Error("session binding backend error", zap.Error(err), zap.Int64("sid", s.ID()), zap.String("uid", s.UID()), zap.String("svType", serverType), zap.String("svID", serverId))
+			}
+			rollbackLocal := func(cause error) error {
+				// Restore the transaction-owned binding before persisting the current map.
+				rolledBack := rollback()
+				if flushErr := s.FlushBackendData(); flushErr != nil {
+					logErr(cause)
+					logErr(flushErr)
+					return stderrors.Join(cause, flushErr)
+				}
+				// A newer backend mutation owns this session when rollback loses its token.
+				if rolledBack {
+					sys.sessionPool.RemoveSessionLocal(s)
+				}
+				logErr(cause)
+				return cause
+			}
+			// A retained copy from an earlier failed cleanup may retry without storing
+			// itself again. A different session still owns the UID and must abort.
+			existsSession := sys.sessionPool.GetSessionByUID(s.UID())
+			if existsSession != nil && existsSession != s {
+				err = errors.WithStack(fmt.Errorf("%w:found in pool,uid=%s,bound=%s,target=%s", constants.ErrSessionAlreadyBound, s.UID(), existsSession.GetBackendID(serverType), serverId))
+				logger.Zap.Error("", zap.Error(err))
 				return err
 			}
-		}
-		// 本服就是目标服或者目标服已经狗带(代替目标服)，处理绑定状态并通知网关
-		// session要绑定的就是本服,开始处理
-		// 本地存储
-		if sys.server.ID == serverId {
-			sys.sessionPool.RemoveSessionLocal(s)
-		}
-		// 重绑定发起的kick不继续处理
-		if reason == session.CloseReasonKickRebind {
-			return nil
-		}
-		// 通知网关同步数据
-		_, err = s.SendRequestToFrontend(ctx, constants.KickBackendRoute, msg)
-		if err != nil {
-			// 报错session找不到,说明网关的session已经下线,不管是session找不到还是网关狗带等其他错误都应该忽略该错误并代替网关执行redis清除步骤
-			// if  errors.Is(err, protos.ErrSessionNotFound()) {
-			logW.Warn("the session may be closed or frontend is down. ignore the error then clean cluster's cache", zap.Error(err))
-			err = s.FlushBackendData()
+			if existsSession == nil {
+				// 本地存储
+				err = sys.sessionPool.StoreSessionLocal(s)
+				if err != nil {
+					return rollbackLocal(err)
+				}
+			}
+			// 通知网关同步数据
+			_, err = s.SendRequestToFrontend(ctx, constants.SessionBindBackendRoute, msg)
 			if err != nil {
-				return err
+				// 同步失败(网关狗带或session已经下线) 回滚
+				return rollbackLocal(err)
 			}
-			// }
-		}
-		// 后续流程都可以忽略错误
-		// 通知所有服务器
-		r, err = route.Decode(constants.SessionKickedBackendRoute)
-		if err != nil {
-			logW.Error("session kick backend error,ignore", zap.Error(err))
+			// 后续流程都可忽略错误
+			// 通知所有服务器
+			// fork本类型服所有实例 然后通知所有其他类型服
+			r, err = route.Decode(serverType + "." + constants.SessionBoundBackendForkRoute)
+			if err != nil {
+				logErr(err)
+				return nil
+			}
+			_, err = sys.remote.Fork(ctx, true, r, msg, s)
+			if err != nil {
+				logErr(err)
+				return nil
+			}
+			r, err = route.Decode(constants.SessionBoundBackendRoute)
+			if err != nil {
+				logErr(err)
+				return nil
+			}
+			err = sys.remote.NotifyAll(ctx, r, msg, s)
+			if err != nil {
+				logErr(err)
+				return nil
+			}
 			return nil
-		}
-		err = sys.remote.NotifyAll(ctx, r, msg, s)
-		if err != nil {
-			logW.Error("session kick backend error,ignore", zap.Error(err))
-		}
-		return nil
-	})
+		},
+		Kick: func(ctx context.Context, s session.Session, serverType, serverId string, callback map[string]string, reason session.CloseReason, _ session.BackendRollback) error {
+			msg := &protos.BindBackendMsg{
+				Uid:      s.UID(),
+				Btype:    serverType,
+				Bid:      serverId,
+				Metadata: callback,
+			}
+			var err error
+			var r *route.Route
+			// 严禁网关调用
+			if sys.server.Frontend {
+				return constants.ErrDeveloperLogicFatal
+			}
+			logW := logger.Zap.With(zap.Int64("sid", s.ID()), zap.String("uid", s.UID()), zap.Int("reason", reason), zap.String("sv", serverType), zap.String("svID", serverId))
+			// 目标服不是本服 转发给目标服成功后再转发网关
+			if sys.server.ID != serverId {
+				// 转发目标服
+				r, err = route.Decode(serverType + "." + constants.KickBackendRoute)
+				if err != nil {
+					return err
+				}
+				err = sys.remote.RPC(ctx, serverId, r, &protos.Response{}, msg, s)
+				if err == nil {
+					return nil
+				}
+				// 若目标服已经挂掉,不报错,代替目标服继续后续的数据清理以及通知网关
+				if errors.Is(err, constants.ErrServerNotFound) {
+					logW.Info("backend target down,ignore error", zap.Error(err))
+				} else {
+					return err
+				}
+			}
+			// 本服就是目标服或者目标服已经狗带(代替目标服)，处理绑定状态并通知网关
+			// 重绑定发起的kick不继续处理
+			if reason == session.CloseReasonKickRebind {
+				if sys.server.ID == serverId {
+					sys.sessionPool.RemoveSessionLocal(s)
+				}
+				return nil
+			}
+			// 通知网关同步数据
+			_, err = s.SendRequestToFrontend(ctx, constants.KickBackendRoute, msg)
+			if err != nil {
+				// 报错session找不到,说明网关的session已经下线,不管是session找不到还是网关狗带等其他错误都应该忽略该错误并代替网关执行redis清除步骤
+				// if  errors.Is(err, protos.ErrSessionNotFound()) {
+				logW.Warn("the session may be closed or frontend is down. ignore the error then clean cluster's cache", zap.Error(err))
+				err = s.FlushBackendData()
+				if err != nil {
+					return err
+				}
+				// }
+			}
+			// 后续通知错误不改变已经提交的 backend mutation。
+			// 通知所有服务器
+			r, err = route.Decode(constants.SessionKickedBackendRoute)
+			if err != nil {
+				logW.Error("session kick backend error,ignore", zap.Error(err))
+			} else {
+				err = sys.remote.NotifyAll(ctx, r, msg, s)
+				if err != nil {
+					logW.Error("session kick backend error,ignore", zap.Error(err))
+				}
+			}
+			// Local ownership is released only after every fallible RPC/flush step.
+			if sys.server.ID == serverId {
+				sys.sessionPool.RemoveSessionLocal(s)
+			}
+			return nil
+		},
+	}); err != nil {
+		panic(err)
+	}
 }
 
 // BindSession binds the local session
@@ -454,7 +469,9 @@ func (s *Sys) KickBackend(ctx context.Context, msg *protos.BindBackendMsg) (*pro
 		if sess == nil {
 			return nil, protos.ErrSessionNotFound().WithMessage("session is nil on bind backend push to frontend").WithMetadata(map[string]string{"uid": msg.Uid, "bid": msg.Bid, "btype": msg.Btype}).WithStack()
 		}
-		sess.RemoveBackendID(msg.Btype)
+		if _, err := session.CompareAndRemoveBackendID(sess, msg.Btype, msg.Bid); err != nil {
+			return nil, err
+		}
 		err := sess.FlushBackendData()
 		if err != nil {
 			return nil, err
@@ -583,7 +600,9 @@ func (s *Sys) SessionKickedBackend(ctx context.Context, msg *protos.BindBackendM
 	if !s.server.Frontend {
 		sess := s.sessionPool.GetSessionByUID(msg.Uid)
 		if sess != nil {
-			sess.RemoveBackendID(msg.Btype)
+			if _, err := session.CompareAndRemoveBackendID(sess, msg.Btype, msg.Bid); err != nil {
+				return nil, err
+			}
 		}
 	}
 	co.GoWithUser(ctx, util.ForceIdStrToInt(msg.Uid), func(ctx context.Context) {

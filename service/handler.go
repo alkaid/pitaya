@@ -226,7 +226,7 @@ func (h *HandlerService) processPacket(a agent.Agent, p *packet.Packet) error {
 		// Parse the json sent with the handshake by the client
 		handshakeData := &session.HandshakeData{}
 		if err := json.Unmarshal(p.Data, handshakeData); err != nil {
-			defer a.Close(nil)
+			defer a.GetSession().Close(nil)
 			logger.Zap.Error("Failed to unmarshal handshake data", zap.Error(err))
 			if serr := a.SendHandshakeErrorResponse(); serr != nil {
 				logger.Zap.Error("Error sending handshake error response", zap.Error(err))
@@ -237,7 +237,7 @@ func (h *HandlerService) processPacket(a agent.Agent, p *packet.Packet) error {
 		}
 
 		if err := a.GetSession().ValidateHandshake(handshakeData); err != nil {
-			defer a.Close(nil)
+			defer a.GetSession().Close(nil)
 			logger.Log.Errorf("Handshake validation failed: %s", err.Error())
 			if serr := a.SendHandshakeErrorResponse(); serr != nil {
 				logger.Zap.Error("Error sending handshake error response", zap.Error(err))

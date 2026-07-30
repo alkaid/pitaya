@@ -76,6 +76,20 @@ type OnSessionCloseFunc func(s Session, callback map[string]string, reason Close
 type OnSessionBindBackendFunc func(ctx context.Context, s Session, serverType, serverId string, callback map[string]string) error
 type OnSessionKickBackendFunc func(ctx context.Context, s Session, serverType, serverId string, callback map[string]string, reason CloseReason) error
 
+// BackendRollback rolls back the tentative local backend mutation when it is
+// still owned by the current transaction.
+type BackendRollback func() bool
+
+type BackendBindCoordinatorFunc func(ctx context.Context, s Session, serverType, serverId string, callback map[string]string, rollback BackendRollback) error
+type BackendKickCoordinatorFunc func(ctx context.Context, s Session, serverType, serverId string, callback map[string]string, reason CloseReason, rollback BackendRollback) error
+
+// BackendCoordinator owns the fallible framework side effects for backend
+// binding mutations. Application extensions belong in the after callbacks.
+type BackendCoordinator struct {
+	Bind BackendBindCoordinatorFunc
+	Kick BackendKickCoordinatorFunc
+}
+
 type BoundData struct {
 	FrontendID string            `json:"_fid"` // 绑定的网关ID
 	UID        string            `json:"_uid"`
@@ -86,7 +100,7 @@ type sessionPoolImpl struct {
 	sessionBindCallbacks []OnSessionBindFunc
 	afterBindCallbacks   []OnSessionBindFunc
 	handshakeValidators  map[string]func(data *HandshakeData) error
-	sessionsMutex        sync.RWMutex
+	sessionsMutex        sync.Mutex
 	// SessionCloseCallbacks contains global session close callbacks
 	SessionCloseCallbacks []OnSessionCloseFunc
 	sessionsByUID         sync.Map
@@ -96,8 +110,7 @@ type sessionPoolImpl struct {
 	SessionCount              int64
 	UserCount                 int64
 	storage                   CacheInterface
-	bindBackendCallbacks      []OnSessionBindBackendFunc
-	kickBackendCallbacks      []OnSessionKickBackendFunc
+	backendCoordinator        atomic.Pointer[BackendCoordinator]
 	afterBindBackendCallbacks []OnSessionBindBackendFunc
 	afterKickBackendCallbacks []OnSessionKickBackendFunc
 }
@@ -115,8 +128,6 @@ type SessionPool interface {
 	OnSessionBind(f OnSessionBindFunc)
 	OnAfterSessionBind(f OnSessionBindFunc)
 	OnSessionClose(f OnSessionCloseFunc)
-	OnBindBackend(f OnSessionBindBackendFunc)
-	OnKickBackend(f OnSessionKickBackendFunc)
 	OnAfterBindBackend(f OnSessionBindBackendFunc)
 	OnAfterKickBackend(f OnSessionKickBackendFunc)
 	CloseAll()
@@ -137,6 +148,23 @@ type SessionPool interface {
 	RangeSessions(f func(sid int64, sess SessPublic) bool)
 }
 
+// BackendCoordinatorInstaller is the narrow framework capability used to
+// install backend transaction coordination without expanding SessionPool.
+type BackendCoordinatorInstaller interface {
+	SetBackendCoordinator(coordinator BackendCoordinator)
+}
+
+// InstallBackendCoordinator installs the framework-owned coordinator when the
+// configured SessionPool supports transactional backend mutations.
+func InstallBackendCoordinator(pool SessionPool, coordinator BackendCoordinator) error {
+	installer, ok := pool.(BackendCoordinatorInstaller)
+	if !ok {
+		return errors.Errorf("session pool %T does not support backend coordination", pool)
+	}
+	installer.SetBackendCoordinator(coordinator)
+	return nil
+}
+
 // HandshakeClientData represents information about the client sent on the handshake.
 type HandshakeClientData struct {
 	Platform    string `json:"platform"`
@@ -153,14 +181,25 @@ type HandshakeData struct {
 	User map[string]interface{} `json:"user,omitempty"`
 }
 
+type sessionIdentity struct {
+	uid    string
+	uidInt int64
+	online bool
+}
+
+type backendMutationToken struct {
+	serverType string
+	id         string
+	generation uint64
+}
+
 type sessionImpl struct {
 	sync.RWMutex                                              // protect data
 	lifecycleMutex      sync.RWMutex                          // protect identity and close state
 	binding             bool                                  // a bind attempt is running callbacks
 	closed              bool                                  // close side effects have started
 	id                  int64                                 // session global unique id
-	uid                 string                                // binding user id
-	uidInt              int64                                 // uid as number
+	identity            atomic.Pointer[sessionIdentity]       // immutable identity snapshot for lock-free reads
 	registeredUID       string                                // UID key currently registered in the local pool
 	lastTime            int64                                 // last heartbeat time
 	entity              networkentity.NetworkEntity           // low-level network entity
@@ -172,8 +211,8 @@ type sessionImpl struct {
 	IsFrontend          bool                                  // if session is a frontend session
 	frontendID          string                                // the id of the frontend that owns the session
 	frontendSessionID   int64                                 // the id of the session on the frontend server
-	online              bool                                  // 是否在线,仅cluster session有效
 	backends            map[string]string                     // 绑定的backends
+	backendGenerations  map[string]uint64                     // mutation generation by backend type
 	bsMutex             sync.RWMutex                          // backends 的mutex
 	ip                  string                                // 远程客户端ip地址
 	Subscriptions       []*nats.Subscription                  // subscription created on bind when using nats rpc server  // subscription created on bind when using nats rpc server
@@ -400,8 +439,6 @@ func (pool *sessionPoolImpl) NewSession(entity networkentity.NetworkEntity, fron
 	}
 	s := &sessionImpl{
 		id:                  pool.sessionIDSvc.sessionID(),
-		uid:                 uid,
-		uidInt:              uidInt,
 		entity:              entity,
 		data:                make(map[string]any),
 		handshakeData:       nil,
@@ -412,8 +449,9 @@ func (pool *sessionPoolImpl) NewSession(entity networkentity.NetworkEntity, fron
 		pool:                pool,
 		requestsInFlight:    ReqInFlight{m: make(map[string]string), mu: new(sync.RWMutex)},
 		backends:            map[string]string{},
-		online:              true,
+		backendGenerations:  map[string]uint64{},
 	}
+	s.identity.Store(&sessionIdentity{uid: uid, uidInt: uidInt, online: true})
 	// sessionstick 的 backend，在 BindBackend()时保存,这里只处理 frontend
 	if frontend {
 		pool.storeSessionByID(s)
@@ -429,21 +467,15 @@ func NewSessionPool() SessionPool {
 		handshakeValidators:       make(map[string]func(data *HandshakeData) error, 0),
 		SessionCloseCallbacks:     make([]OnSessionCloseFunc, 0),
 		sessionIDSvc:              newSessionIDService(),
-		bindBackendCallbacks:      make([]OnSessionBindBackendFunc, 0),
-		kickBackendCallbacks:      make([]OnSessionKickBackendFunc, 0),
 		afterBindBackendCallbacks: make([]OnSessionBindBackendFunc, 0),
 		afterKickBackendCallbacks: make([]OnSessionKickBackendFunc, 0),
 	}
 }
 
 func (pool *sessionPoolImpl) GetSessionCount() int64 {
-	pool.sessionsMutex.RLock()
-	defer pool.sessionsMutex.RUnlock()
 	return atomic.LoadInt64(&pool.SessionCount)
 }
 func (pool *sessionPoolImpl) GetUserCount() int64 {
-	pool.sessionsMutex.RLock()
-	defer pool.sessionsMutex.RUnlock()
 	return atomic.LoadInt64(&pool.UserCount)
 }
 
@@ -454,8 +486,6 @@ func (pool *sessionPoolImpl) GetSessionCloseCallbacks() []OnSessionCloseFunc {
 // GetSessionByUID return a session bound to an user id
 func (pool *sessionPoolImpl) GetSessionByUID(uid string) Session {
 	// TODO: Block this operation in backend servers
-	pool.sessionsMutex.RLock()
-	defer pool.sessionsMutex.RUnlock()
 	if val, ok := pool.sessionsByUID.Load(uid); ok {
 		return val.(Session)
 	}
@@ -465,8 +495,6 @@ func (pool *sessionPoolImpl) GetSessionByUID(uid string) Session {
 // GetSessionByID return a session bound to a frontend server id
 func (pool *sessionPoolImpl) GetSessionByID(id int64) Session {
 	// TODO: Block this operation in backend servers
-	pool.sessionsMutex.RLock()
-	defer pool.sessionsMutex.RUnlock()
 	if val, ok := pool.sessionsByID.Load(id); ok {
 		return val.(Session)
 	}
@@ -486,16 +514,13 @@ func (pool *sessionPoolImpl) OnSessionBind(f OnSessionBindFunc) {
 	}
 	pool.sessionBindCallbacks = append(pool.sessionBindCallbacks, f)
 }
-func (pool *sessionPoolImpl) OnBindBackend(f OnSessionBindBackendFunc) {
-	// Prevents the same function to be added twice in onSessionBind
-	sf1 := reflect.ValueOf(f)
-	for _, fun := range pool.bindBackendCallbacks {
-		sf2 := reflect.ValueOf(fun)
-		if sf1.Pointer() == sf2.Pointer() {
-			return
-		}
+func (pool *sessionPoolImpl) SetBackendCoordinator(coordinator BackendCoordinator) {
+	if coordinator.Bind == nil || coordinator.Kick == nil {
+		panic("session: backend coordinator requires bind and kick handlers")
 	}
-	pool.bindBackendCallbacks = append(pool.bindBackendCallbacks, f)
+	if !pool.backendCoordinator.CompareAndSwap(nil, &coordinator) {
+		panic("session: backend coordinator already registered")
+	}
 }
 func (pool *sessionPoolImpl) OnAfterBindBackend(f OnSessionBindBackendFunc) {
 	// Prevents the same function to be added twice in onSessionBind
@@ -507,17 +532,6 @@ func (pool *sessionPoolImpl) OnAfterBindBackend(f OnSessionBindBackendFunc) {
 		}
 	}
 	pool.afterBindBackendCallbacks = append(pool.afterBindBackendCallbacks, f)
-}
-func (pool *sessionPoolImpl) OnKickBackend(f OnSessionKickBackendFunc) {
-	// Prevents the same function to be added twice in onSessionBind
-	sf1 := reflect.ValueOf(f)
-	for _, fun := range pool.kickBackendCallbacks {
-		sf2 := reflect.ValueOf(fun)
-		if sf1.Pointer() == sf2.Pointer() {
-			return
-		}
-	}
-	pool.kickBackendCallbacks = append(pool.kickBackendCallbacks, f)
 }
 func (pool *sessionPoolImpl) OnAfterKickBackend(f OnSessionKickBackendFunc) {
 	// Prevents the same function to be added twice in onSessionBind
@@ -622,30 +636,35 @@ func (pool *sessionPoolImpl) StoreSessionLocal(session Session) error {
 		if local.binding {
 			return errors.WithStack(constants.ErrSessionAlreadyBound)
 		}
-		if local.uid == "" {
+		identity := local.identitySnapshot()
+		if identity.uid == "" {
 			return errors.WithStack(constants.ErrEmptyUID)
 		}
 		pool.sessionsMutex.Lock()
 		defer pool.sessionsMutex.Unlock()
-		if local.registeredUID != "" && local.registeredUID != local.uid {
+		if local.registeredUID != "" && local.registeredUID != identity.uid {
 			pool.removeSessionByUIDLocked(local.registeredUID, session)
 		}
-		pool.storeSessionByUIDLocked(local.uid, session)
-		pool.storeSessionByIDLocked(session)
-		local.registeredUID = local.uid
+		pool.storeSessionByIDLocked(local.id, session)
+		pool.storeSessionByUIDLocked(identity.uid, session)
+		local.registeredUID = identity.uid
 		return nil
 	}
-	return pool.storeSessionLocal(session.UID(), session)
+	uid := session.UID()
+	if uid == "" {
+		return errors.WithStack(constants.ErrEmptyUID)
+	}
+	return pool.storeSessionLocal(uid, session.ID(), session)
 }
 
-func (pool *sessionPoolImpl) storeSessionLocal(uid string, session Session) error {
+func (pool *sessionPoolImpl) storeSessionLocal(uid string, id int64, session Session) error {
 	if uid == "" {
 		return errors.WithStack(constants.ErrEmptyUID)
 	}
 	pool.sessionsMutex.Lock()
 	defer pool.sessionsMutex.Unlock()
+	pool.storeSessionByIDLocked(id, session)
 	pool.storeSessionByUIDLocked(uid, session)
-	pool.storeSessionByIDLocked(session)
 	return nil
 }
 
@@ -661,20 +680,22 @@ func (pool *sessionPoolImpl) RemoveSessionLocal(session Session) {
 		if local.binding {
 			return
 		}
-		pool.removeSessionLocal(local.registeredUID, session)
+		pool.removeSessionLocal(local.registeredUID, local.id, session)
 		local.registeredUID = ""
 		return
 	}
-	pool.removeSessionLocal(session.UID(), session)
+	uid := session.UID()
+	id := session.ID()
+	pool.removeSessionLocal(uid, id, session)
 }
 
-func (pool *sessionPoolImpl) removeSessionLocal(uid string, session Session) {
+func (pool *sessionPoolImpl) removeSessionLocal(uid string, id int64, session Session) {
 	pool.sessionsMutex.Lock()
 	defer pool.sessionsMutex.Unlock()
 	if uid != "" {
 		pool.removeSessionByUIDLocked(uid, session)
 	}
-	pool.removeSessionByIDLocked(session)
+	pool.removeSessionByIDLocked(id, session)
 }
 
 func (pool *sessionPoolImpl) storeSessionByUIDLocked(uid string, session Session) (Session, bool) {
@@ -701,26 +722,28 @@ func (pool *sessionPoolImpl) removeSessionByUIDLocked(uid string, session Sessio
 }
 
 func (pool *sessionPoolImpl) storeSessionByID(session Session) {
+	id := session.ID()
 	pool.sessionsMutex.Lock()
 	defer pool.sessionsMutex.Unlock()
-	pool.storeSessionByIDLocked(session)
+	pool.storeSessionByIDLocked(id, session)
 }
 
-func (pool *sessionPoolImpl) storeSessionByIDLocked(session Session) {
-	_, loaded := pool.sessionsByID.Swap(session.ID(), session)
+func (pool *sessionPoolImpl) storeSessionByIDLocked(id int64, session Session) {
+	_, loaded := pool.sessionsByID.Swap(id, session)
 	if !loaded {
 		atomic.AddInt64(&pool.SessionCount, 1)
 	}
 }
 
 func (pool *sessionPoolImpl) removeSessionByID(session Session) bool {
+	id := session.ID()
 	pool.sessionsMutex.Lock()
 	defer pool.sessionsMutex.Unlock()
-	return pool.removeSessionByIDLocked(session)
+	return pool.removeSessionByIDLocked(id, session)
 }
 
-func (pool *sessionPoolImpl) removeSessionByIDLocked(session Session) bool {
-	if !pool.sessionsByID.CompareAndDelete(session.ID(), session) {
+func (pool *sessionPoolImpl) removeSessionByIDLocked(id int64, session Session) bool {
+	if !pool.sessionsByID.CompareAndDelete(id, session) {
 		return false
 	}
 	atomic.AddInt64(&pool.SessionCount, -1)
@@ -801,7 +824,7 @@ func (s *sessionImpl) SetSubscriptions(subscriptions []*nats.Subscription) {
 		s.lifecycleMutex.Unlock()
 		return
 	}
-	uid := s.uid
+	uid := s.identitySnapshot().uid
 	s.lifecycleMutex.Unlock()
 	s.drainSubscriptions(uid, subscriptions)
 }
@@ -824,14 +847,10 @@ func (s *sessionImpl) ID() int64 {
 
 // UID returns uid that bind to current session
 func (s *sessionImpl) UID() string {
-	s.lifecycleMutex.RLock()
-	defer s.lifecycleMutex.RUnlock()
-	return s.uid
+	return s.identitySnapshot().uid
 }
 func (s *sessionImpl) UIDInt() int64 {
-	s.lifecycleMutex.RLock()
-	defer s.lifecycleMutex.RUnlock()
-	return s.uidInt
+	return s.identitySnapshot().uidInt
 }
 
 // GetData gets the data
@@ -954,12 +973,6 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, custSessData map[str
 	// invoke after callbacks on session bound
 	for _, cb := range s.pool.afterBindCallbacks {
 		_ = cb(ctx, s, callback)
-		// 要处理error就应该解绑，不应该这么草率
-		//if err != nil {
-		//	s.uid = ""
-		//	s.uidInt = 0
-		//	return err
-		//}
 	}
 
 	if s.isClosed() {
@@ -980,24 +993,21 @@ func (s *sessionImpl) BindBackend(ctx context.Context, targetServerType string, 
 	if s.UID() == "" {
 		return errors.WithStack(constants.ErrIllegalUID)
 	}
-	backendID := s.GetBackendID(targetServerType)
-	if backendID != "" {
+	backendID, token, bound := s.setBackendIDIfAbsent(targetServerType, targetServerID)
+	if !bound {
 		return errors.WithStack(fmt.Errorf("%w,uid=%s,bound=%s,target=%s", constants.ErrSessionAlreadyBound, s.UID(), backendID, targetServerID))
 	}
-	s.SetBackendID(targetServerType, targetServerID)
-	var err error
-	for _, cb := range s.pool.bindBackendCallbacks {
-		err = cb(ctx, s, targetServerType, targetServerID, callback)
-		if err != nil {
-			break
+	rollback := BackendRollback(func() bool {
+		return s.removeBackendIDIfToken(token)
+	})
+	if coordinator := s.pool.backendCoordinator.Load(); coordinator != nil {
+		if err := coordinator.Bind(ctx, s, targetServerType, targetServerID, callback, rollback); err != nil {
+			logger.Zap.Error("error while trying to bind backend", zap.Error(err))
+			rollback()
+			return err
 		}
 	}
-	// 回滚
-	if err != nil {
-		logger.Zap.Error("error while trying to bind backend", zap.Error(err))
-		s.RemoveBackendID(targetServerType)
-		return err
-	}
+	var err error
 	for _, cb := range s.pool.afterBindBackendCallbacks {
 		err = cb(ctx, s, targetServerType, targetServerID, callback)
 		if err != nil {
@@ -1025,34 +1035,29 @@ func (s *sessionImpl) Kick(ctx context.Context, callback map[string]string, reas
 //	@param reason
 //	@return error
 func (s *sessionImpl) KickBackend(ctx context.Context, targetServerType string, callback map[string]string, reason ...CloseReason) error {
-	var err error = nil
 	if s.UID() == "" {
 		return errors.WithStack(constants.ErrIllegalUID)
 	}
-	backendID := s.GetBackendID(targetServerType)
-	if backendID == "" {
+	token, bound := s.takeBackendID(targetServerType)
+	if !bound {
 		return errors.WithStack(constants.ErrSessionNotBoundBackend)
 	}
 	rea := CloseReasonNormal
 	if len(reason) > 0 {
 		rea = reason[0]
 	}
-	s.RemoveBackendID(targetServerType)
-	for _, cb := range s.pool.kickBackendCallbacks {
-		err := cb(ctx, s, targetServerType, backendID, callback, rea)
-		if err != nil {
+	rollback := BackendRollback(func() bool {
+		return s.restoreBackendIDIfToken(token)
+	})
+	if coordinator := s.pool.backendCoordinator.Load(); coordinator != nil {
+		if err := coordinator.Kick(ctx, s, targetServerType, token.id, callback, rea, rollback); err != nil {
+			logger.Zap.Error("error while trying to kick backend", zap.Error(err))
+			rollback()
 			return err
 		}
 	}
-	if err != nil {
-		logger.Zap.Error("error while trying to bind backend", zap.Error(err))
-		// 回滚
-		s.SetBackendID(targetServerType, backendID)
-		return err
-	}
 	for _, cb := range s.pool.afterKickBackendCallbacks {
-		err := cb(ctx, s, targetServerType, backendID, callback, rea)
-		if err != nil {
+		if err := cb(ctx, s, targetServerType, token.id, callback, rea); err != nil {
 			return err
 		}
 	}
@@ -1081,7 +1086,7 @@ func (s *sessionImpl) closeOnce(callback map[string]string, reason ...CloseReaso
 		return nil
 	}
 	logger.Zap.Debug("session close", zap.Int64("id", s.ID()), zap.String("uid", uid))
-	s.pool.removeSessionLocal(uid, s)
+	s.pool.removeSessionLocal(uid, s.id, s)
 	s.drainSubscriptions(uid, subscriptions)
 	return s.entity.Close(callback, reason...)
 }
@@ -1095,15 +1100,17 @@ func (s *sessionImpl) prepareBind(uid string) (bool, error) {
 	if s.binding {
 		return false, fmt.Errorf("%w,uid=%s", constants.ErrSessionAlreadyBound, uid)
 	}
-	if s.uid != "" {
-		if s.uid != uid {
+	identity := s.identitySnapshot()
+	if identity.uid != "" {
+		if identity.uid != uid {
 			return false, fmt.Errorf("%w,uid=%s", constants.ErrSessionAlreadyBound, uid)
 		}
 		s.binding = true
 		return false, nil
 	}
-	s.uid = uid
-	s.uidInt = util.ForceIdStrToInt(uid)
+	identity.uid = uid
+	identity.uidInt = util.ForceIdStrToInt(uid)
+	s.publishIdentityLocked(identity)
 	s.binding = true
 	return true, nil
 }
@@ -1112,9 +1119,11 @@ func (s *sessionImpl) finishBind(uid string, newBinding bool, succeeded bool) {
 	s.lifecycleMutex.Lock()
 	defer s.lifecycleMutex.Unlock()
 	s.binding = false
-	if !succeeded && newBinding && !s.closed && s.uid == uid {
-		s.uid = ""
-		s.uidInt = 0
+	identity := s.identitySnapshot()
+	if !succeeded && newBinding && !s.closed && identity.uid == uid {
+		identity.uid = ""
+		identity.uidInt = 0
+		s.publishIdentityLocked(identity)
 	}
 }
 
@@ -1124,10 +1133,11 @@ func (s *sessionImpl) registerSessionByUID(uid string) (Session, bool, error) {
 	if s.closed {
 		return nil, false, constants.ErrCloseClosedSession
 	}
-	if s.uid == "" {
+	identity := s.identitySnapshot()
+	if identity.uid == "" {
 		return nil, false, constants.ErrEmptyUID
 	}
-	if s.uid != uid {
+	if identity.uid != uid {
 		return nil, false, fmt.Errorf("%w,uid=%s", constants.ErrSessionAlreadyBound, uid)
 	}
 
@@ -1154,7 +1164,9 @@ func (s *sessionImpl) beginClose() (string, []*nats.Subscription, bool) {
 		return "", nil, false
 	}
 	s.closed = true
-	s.online = false
+	identity := s.identitySnapshot()
+	identity.online = false
+	s.publishIdentityLocked(identity)
 	subscriptions := append([]*nats.Subscription(nil), s.Subscriptions...)
 	s.Subscriptions = nil
 	registeredUID := s.registeredUID
@@ -1179,15 +1191,31 @@ func (s *sessionImpl) drainSubscriptions(uid string, subscriptions []*nats.Subsc
 func (s *sessionImpl) setOnline(online bool) {
 	s.lifecycleMutex.Lock()
 	if !s.closed || !online {
-		s.online = online
+		identity := s.identitySnapshot()
+		if identity.online != online {
+			identity.online = online
+			s.publishIdentityLocked(identity)
+		}
 	}
 	s.lifecycleMutex.Unlock()
 }
 
+func (s *sessionImpl) identitySnapshot() sessionIdentity {
+	if identity := s.identity.Load(); identity != nil {
+		return *identity
+	}
+	return sessionIdentity{}
+}
+
+// publishIdentityLocked publishes all hot-read identity fields as one version.
+// The caller must hold lifecycleMutex for writes after construction.
+func (s *sessionImpl) publishIdentityLocked(identity sessionIdentity) {
+	s.identity.Store(&identity)
+}
+
 func (s *sessionImpl) lifecycleState() (string, int64, bool) {
-	s.lifecycleMutex.RLock()
-	defer s.lifecycleMutex.RUnlock()
-	return s.uid, s.uidInt, s.online
+	identity := s.identitySnapshot()
+	return identity.uid, identity.uidInt, identity.online
 }
 
 // RemoteAddr returns the remote network address.
@@ -1532,8 +1560,10 @@ func (s *sessionImpl) PushToFront(ctx context.Context) error {
 // Clear releases all data related to current session
 func (s *sessionImpl) Clear() {
 	s.lifecycleMutex.Lock()
-	s.uid = ""
-	s.uidInt = 0
+	identity := s.identitySnapshot()
+	identity.uid = ""
+	identity.uidInt = 0
+	s.publishIdentityLocked(identity)
 	s.lifecycleMutex.Unlock()
 
 	s.Lock()
@@ -1608,24 +1638,135 @@ func (s *sessionImpl) GetBackendID(svrType string) string {
 	defer s.bsMutex.RUnlock()
 	return s.backends[svrType]
 }
+
+func (s *sessionImpl) ensureBackendStateLocked() {
+	if s.backends == nil {
+		s.backends = make(map[string]string)
+	}
+	if s.backendGenerations == nil {
+		s.backendGenerations = make(map[string]uint64)
+	}
+}
+
+func (s *sessionImpl) advanceBackendGenerationLocked(svrType string) uint64 {
+	s.ensureBackendStateLocked()
+	s.backendGenerations[svrType]++
+	return s.backendGenerations[svrType]
+}
+
+func (s *sessionImpl) setBackendIDIfAbsent(svrType string, id string) (string, backendMutationToken, bool) {
+	s.bsMutex.Lock()
+	defer s.bsMutex.Unlock()
+	s.ensureBackendStateLocked()
+	if backendID := s.backends[svrType]; backendID != "" {
+		return backendID, backendMutationToken{}, false
+	}
+	generation := s.advanceBackendGenerationLocked(svrType)
+	s.backends[svrType] = id
+	return "", backendMutationToken{serverType: svrType, id: id, generation: generation}, true
+}
+
+func (s *sessionImpl) takeBackendID(svrType string) (backendMutationToken, bool) {
+	s.bsMutex.Lock()
+	defer s.bsMutex.Unlock()
+	s.ensureBackendStateLocked()
+	backendID := s.backends[svrType]
+	if backendID == "" {
+		return backendMutationToken{}, false
+	}
+	generation := s.advanceBackendGenerationLocked(svrType)
+	delete(s.backends, svrType)
+	return backendMutationToken{serverType: svrType, id: backendID, generation: generation}, true
+}
+
+func (s *sessionImpl) removeBackendIDIfToken(token backendMutationToken) bool {
+	s.bsMutex.Lock()
+	defer s.bsMutex.Unlock()
+	s.ensureBackendStateLocked()
+	if s.backendGenerations[token.serverType] != token.generation || s.backends[token.serverType] != token.id {
+		return false
+	}
+	s.advanceBackendGenerationLocked(token.serverType)
+	delete(s.backends, token.serverType)
+	return true
+}
+
+func (s *sessionImpl) restoreBackendIDIfToken(token backendMutationToken) bool {
+	s.bsMutex.Lock()
+	defer s.bsMutex.Unlock()
+	s.ensureBackendStateLocked()
+	if s.backendGenerations[token.serverType] != token.generation || s.backends[token.serverType] != "" {
+		return false
+	}
+	s.advanceBackendGenerationLocked(token.serverType)
+	s.backends[token.serverType] = token.id
+	return true
+}
+
+func (s *sessionImpl) RemoveBackendIDIfEqual(svrType string, id string) bool {
+	s.bsMutex.Lock()
+	defer s.bsMutex.Unlock()
+	s.ensureBackendStateLocked()
+	if backendID, ok := s.backends[svrType]; !ok || backendID != id {
+		return false
+	}
+	s.advanceBackendGenerationLocked(svrType)
+	delete(s.backends, svrType)
+	return true
+}
+
+// CompareAndRemoveBackendID performs an atomic identity-aware backend removal.
+// Sessions without the narrow capability return an error; there is no racy
+// GetBackendID/RemoveBackendID fallback.
+func CompareAndRemoveBackendID(s Session, svrType string, id string) (bool, error) {
+	remover, ok := s.(interface {
+		RemoveBackendIDIfEqual(svrType string, id string) bool
+	})
+	if !ok {
+		return false, errors.Errorf("session %T does not support atomic backend removal", s)
+	}
+	return remover.RemoveBackendIDIfEqual(svrType, id), nil
+}
+
 func (s *sessionImpl) SetBackends(bs map[string]string) {
 	s.bsMutex.Lock()
 	defer s.bsMutex.Unlock()
-	s.backends = bs
+	s.ensureBackendStateLocked()
+	next := make(map[string]string, len(bs))
+	affected := make(map[string]struct{}, len(s.backendGenerations)+len(bs))
+	// Replacing the whole map invalidates in-flight mutations for types whose
+	// slots are currently empty as well.
+	for svrType := range s.backendGenerations {
+		affected[svrType] = struct{}{}
+	}
+	for svrType := range s.backends {
+		affected[svrType] = struct{}{}
+	}
+	for svrType, id := range bs {
+		next[svrType] = id
+		affected[svrType] = struct{}{}
+	}
+	for svrType := range affected {
+		s.advanceBackendGenerationLocked(svrType)
+	}
+	s.backends = next
 }
 func (s *sessionImpl) SetBackendID(svrType string, id string) {
 	s.bsMutex.Lock()
 	defer s.bsMutex.Unlock()
+	s.ensureBackendStateLocked()
+	s.advanceBackendGenerationLocked(svrType)
 	s.backends[svrType] = id
 }
 func (s *sessionImpl) RemoveBackendID(svrType string) {
 	s.bsMutex.Lock()
 	defer s.bsMutex.Unlock()
+	s.ensureBackendStateLocked()
+	s.advanceBackendGenerationLocked(svrType)
 	delete(s.backends, svrType)
 }
 func (s *sessionImpl) Online() bool {
-	_, _, online := s.lifecycleState()
-	return online
+	return s.identitySnapshot().online
 }
 func (s *sessionImpl) ClusterStorageKey() string {
 	uid := s.UID()

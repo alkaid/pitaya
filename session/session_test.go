@@ -38,6 +38,7 @@ import (
 	"github.com/alkaid/pitaya/v2/networkentity"
 	"github.com/alkaid/pitaya/v2/networkentity/mocks"
 	"github.com/alkaid/pitaya/v2/protos"
+	"github.com/alkaid/pitaya/v2/util"
 	"github.com/google/uuid"
 	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
@@ -59,9 +60,52 @@ type mockAddr struct{}
 func (ma *mockAddr) Network() string { return "tcp" }
 func (ma *mockAddr) String() string  { return "192.0.2.1:25" }
 
+type blockingIDSession struct {
+	Session
+	id          int64
+	uid         string
+	blockID     bool
+	idEntered   chan struct{}
+	releaseID   chan struct{}
+	enteredOnce sync.Once
+}
+
+func (s *blockingIDSession) ID() int64 {
+	if s.blockID {
+		s.enteredOnce.Do(func() { close(s.idEntered) })
+		<-s.releaseID
+	}
+	return s.id
+}
+
+func (s *blockingIDSession) UID() string { return s.uid }
+
 func newTestSession(pool SessionPool, entity networkentity.NetworkEntity, frontend bool, uid ...string) Session {
 	session, _ := pool.NewSession(entity, frontend, uid...)
 	return session
+}
+
+func setTestSessionUID(session *sessionImpl, uid string) {
+	session.lifecycleMutex.Lock()
+	identity := session.identitySnapshot()
+	identity.uid = uid
+	identity.uidInt = util.ForceIdStrToInt(uid)
+	session.publishIdentityLocked(identity)
+	session.lifecycleMutex.Unlock()
+}
+
+func setTestBackendCoordinator(pool *sessionPoolImpl, bind BackendBindCoordinatorFunc, kick BackendKickCoordinatorFunc) {
+	if bind == nil {
+		bind = func(context.Context, Session, string, string, map[string]string, BackendRollback) error {
+			return nil
+		}
+	}
+	if kick == nil {
+		kick = func(context.Context, Session, string, string, map[string]string, CloseReason, BackendRollback) error {
+			return nil
+		}
+	}
+	pool.SetBackendCoordinator(BackendCoordinator{Bind: bind, Kick: kick})
 }
 
 func expectEntityCloseCounter(entity *mocks.MockNetworkEntity, count *atomic.Int64) {
@@ -184,7 +228,7 @@ func TestNew(t *testing.T) {
 			assert.Equal(t, table.frontend, ss.IsFrontend)
 
 			if len(table.uid) > 0 {
-				assert.Equal(t, table.uid[0], ss.uid[0])
+				assert.Equal(t, table.uid[0], ss.UID()[0])
 			}
 
 			if table.frontend {
@@ -229,6 +273,96 @@ func TestGetSessionByUIDDoenstExist(t *testing.T) {
 	sessionPool := NewSessionPool()
 	ss := sessionPool.GetSessionByUID(uuid.New().String())
 	assert.Nil(t, ss)
+}
+
+func TestSessionPoolReadPathsDoNotWaitForWriter(t *testing.T) {
+	pool := NewSessionPool().(*sessionPoolImpl)
+	uid := uuid.New().String()
+	ss := newTestSession(pool, nil, true, uid)
+	assert.NoError(t, pool.StoreSessionLocal(ss))
+
+	type result struct {
+		byUID        Session
+		byID         Session
+		sessionCount int64
+		userCount    int64
+	}
+	resultCh := make(chan result, 1)
+	pool.sessionsMutex.Lock()
+	go func() {
+		resultCh <- result{
+			byUID:        pool.GetSessionByUID(uid),
+			byID:         pool.GetSessionByID(ss.ID()),
+			sessionCount: pool.GetSessionCount(),
+			userCount:    pool.GetUserCount(),
+		}
+	}()
+
+	var got result
+	readBlocked := false
+	select {
+	case got = <-resultCh:
+	case <-time.After(time.Second):
+		readBlocked = true
+	}
+	pool.sessionsMutex.Unlock()
+	if readBlocked {
+		got = <-resultCh
+		assert.Fail(t, "pool read path waited for sessions writer lock")
+	}
+
+	assert.Equal(t, ss, got.byUID)
+	assert.Equal(t, ss, got.byID)
+	assert.EqualValues(t, 1, got.sessionCount)
+	assert.EqualValues(t, 1, got.userCount)
+}
+
+func TestSessionPoolResolvesCustomIDBeforeWriterLock(t *testing.T) {
+	for _, operation := range []string{"store", "remove"} {
+		t.Run(operation, func(t *testing.T) {
+			pool := NewSessionPool().(*sessionPoolImpl)
+			blocked := &blockingIDSession{
+				id:        100,
+				uid:       "blocked-user",
+				idEntered: make(chan struct{}),
+				releaseID: make(chan struct{}),
+			}
+			if operation == "remove" {
+				assert.NoError(t, pool.StoreSessionLocal(blocked))
+			}
+			blocked.blockID = true
+
+			blockedDone := make(chan error, 1)
+			go func() {
+				if operation == "store" {
+					blockedDone <- pool.StoreSessionLocal(blocked)
+					return
+				}
+				pool.RemoveSessionLocal(blocked)
+				blockedDone <- nil
+			}()
+			<-blocked.idEntered
+
+			fast := newTestSession(pool, nil, false, "fast-user")
+			fastDone := make(chan error, 1)
+			go func() { fastDone <- pool.StoreSessionLocal(fast) }()
+
+			var fastErr error
+			writerBlocked := false
+			select {
+			case fastErr = <-fastDone:
+			case <-time.After(time.Second):
+				writerBlocked = true
+			}
+			close(blocked.releaseID)
+			assert.NoError(t, <-blockedDone)
+			if writerBlocked {
+				fastErr = <-fastDone
+				assert.Fail(t, "custom Session.ID was called while holding sessions writer lock")
+			}
+			assert.NoError(t, fastErr)
+		})
+	}
 }
 
 func TestKick(t *testing.T) {
@@ -354,10 +488,113 @@ func TestSessionUID(t *testing.T) {
 
 	sessionPool := NewSessionPool().(*sessionPoolImpl)
 	ss := newTestSession(sessionPool, nil, false).(*sessionImpl)
-	ss.uid = uuid.New().String()
+	setTestSessionUID(ss, uuid.New().String())
 
 	uid := ss.UID()
-	assert.Equal(t, ss.uid, uid)
+	assert.Equal(t, ss.identitySnapshot().uid, uid)
+}
+
+func TestSessionIdentityReadsDoNotWaitForLifecycleWriter(t *testing.T) {
+	pool := NewSessionPool().(*sessionPoolImpl)
+	uid := uuid.New().String()
+	ss := newTestSession(pool, nil, false, uid).(*sessionImpl)
+	wantUIDInt := util.ForceIdStrToInt(uid)
+
+	type result struct {
+		uid       string
+		uidInt    int64
+		online    bool
+		getterUID string
+		getterInt int64
+		getterOn  bool
+	}
+	resultCh := make(chan result, 1)
+	ss.lifecycleMutex.Lock()
+	go func() {
+		gotUID, gotUIDInt, gotOnline := ss.lifecycleState()
+		resultCh <- result{
+			uid:       gotUID,
+			uidInt:    gotUIDInt,
+			online:    gotOnline,
+			getterUID: ss.UID(),
+			getterInt: ss.UIDInt(),
+			getterOn:  ss.Online(),
+		}
+	}()
+
+	var got result
+	readBlocked := false
+	select {
+	case got = <-resultCh:
+	case <-time.After(time.Second):
+		readBlocked = true
+	}
+	ss.lifecycleMutex.Unlock()
+	if readBlocked {
+		got = <-resultCh
+		assert.Fail(t, "identity read waited for lifecycle writer lock")
+	}
+
+	assert.Equal(t, uid, got.uid)
+	assert.Equal(t, wantUIDInt, got.uidInt)
+	assert.True(t, got.online)
+	assert.Equal(t, uid, got.getterUID)
+	assert.Equal(t, wantUIDInt, got.getterInt)
+	assert.True(t, got.getterOn)
+}
+
+func TestSessionIdentitySnapshotStaysConsistentDuringUpdates(t *testing.T) {
+	pool := NewSessionPool().(*sessionPoolImpl)
+	ss := newTestSession(pool, nil, false).(*sessionImpl)
+	states := [...]sessionIdentity{
+		{uid: "101", uidInt: 101, online: true},
+		{uid: "202", uidInt: 202, online: false},
+	}
+	ss.lifecycleMutex.Lock()
+	ss.publishIdentityLocked(states[0])
+	ss.lifecycleMutex.Unlock()
+
+	const iterations = 10_000
+	const readers = 8
+	start := make(chan struct{})
+	invalid := make(chan string, 1)
+	var wg sync.WaitGroup
+	wg.Add(readers + 1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := range iterations {
+			ss.lifecycleMutex.Lock()
+			ss.publishIdentityLocked(states[i%len(states)])
+			ss.lifecycleMutex.Unlock()
+		}
+	}()
+	for range readers {
+		go func() {
+			defer wg.Done()
+			<-start
+			for range iterations {
+				uid, uidInt, online := ss.lifecycleState()
+				if (uid == states[0].uid && uidInt == states[0].uidInt && online == states[0].online) ||
+					(uid == states[1].uid && uidInt == states[1].uidInt && online == states[1].online) {
+					continue
+				}
+				select {
+				case invalid <- fmt.Sprintf("uid=%q uidInt=%d online=%t", uid, uidInt, online):
+				default:
+				}
+				return
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	select {
+	case got := <-invalid:
+		assert.Fail(t, "observed torn identity snapshot", got)
+	default:
+	}
 }
 
 func TestSessionGetData(t *testing.T) {
@@ -507,7 +744,7 @@ func TestSessionBindFailsIfAlreadyBound(t *testing.T) {
 
 	sessionPool := NewSessionPool().(*sessionPoolImpl)
 	ss := newTestSession(sessionPool, nil, false).(*sessionImpl)
-	ss.uid = uuid.New().String()
+	setTestSessionUID(ss, uuid.New().String())
 	assert.NotNil(t, ss)
 
 	err := ss.Bind(nil, uuid.New().String(), nil, nil)
@@ -702,15 +939,305 @@ func TestSessionBindBackend(t *testing.T) {
 			}
 
 			if table.wantUID {
-				assert.Equal(t, uid, ss.uid)
+				assert.Equal(t, uid, ss.UID())
 			} else {
-				assert.Empty(t, ss.uid)
+				assert.Empty(t, ss.UID())
 			}
 
 			_, ok := sessionPool.sessionsByUID.Load(uid)
 			assert.False(t, ok)
 		})
 	}
+}
+
+func TestSessionKickBackendRestoresBindingOnFirstCallbackFailure(t *testing.T) {
+	pool := NewSessionPool().(*sessionPoolImpl)
+	ss := newTestSession(pool, nil, false, uuid.New().String())
+	serverType := "game"
+	backendID := "game-1"
+	callbackErr := errors.New("kick callback failed")
+	ss.SetBackendID(serverType, backendID)
+
+	var afterCalls int
+	setTestBackendCoordinator(pool, nil, func(_ context.Context, gotSession Session, gotServerType, gotServerID string, _ map[string]string, gotReason CloseReason, _ BackendRollback) error {
+		assert.Equal(t, ss, gotSession)
+		assert.Equal(t, serverType, gotServerType)
+		assert.Equal(t, backendID, gotServerID)
+		assert.Equal(t, CloseReasonNormal, gotReason)
+		assert.Empty(t, ss.GetBackendID(serverType))
+		return callbackErr
+	})
+	pool.OnAfterKickBackend(func(context.Context, Session, string, string, map[string]string, CloseReason) error {
+		afterCalls++
+		return nil
+	})
+
+	err := ss.KickBackend(context.Background(), serverType, nil)
+
+	assert.ErrorIs(t, err, callbackErr)
+	assert.Equal(t, backendID, ss.GetBackendID(serverType))
+	assert.Zero(t, afterCalls)
+}
+
+func TestSessionBackendCoordinatorRejectsSecondRegistration(t *testing.T) {
+	pool := NewSessionPool().(*sessionPoolImpl)
+	setTestBackendCoordinator(pool, nil, nil)
+
+	assert.PanicsWithValue(t, "session: backend coordinator already registered", func() {
+		setTestBackendCoordinator(pool, nil, nil)
+	})
+}
+
+func TestInstallBackendCoordinatorRejectsUnsupportedPool(t *testing.T) {
+	pool := struct{ SessionPool }{SessionPool: NewSessionPool()}
+
+	err := InstallBackendCoordinator(pool, BackendCoordinator{})
+
+	assert.ErrorContains(t, err, "does not support backend coordination")
+}
+
+func TestCompareAndRemoveBackendIDRejectsSessionWithoutAtomicCapability(t *testing.T) {
+	pool := NewSessionPool().(*sessionPoolImpl)
+	ss := newTestSession(pool, nil, false, uuid.New().String())
+	ss.SetBackendID("game", "game-1")
+	wrapped := &blockingIDSession{Session: ss}
+
+	removed, err := CompareAndRemoveBackendID(wrapped, "game", "game-1")
+
+	assert.Error(t, err)
+	assert.False(t, removed)
+	assert.Equal(t, "game-1", ss.GetBackendID("game"))
+}
+
+func TestSessionKickBackendConcurrentRebindSurvivesRollback(t *testing.T) {
+	pool := NewSessionPool().(*sessionPoolImpl)
+	ss := newTestSession(pool, nil, false, uuid.New().String())
+	serverType := "game"
+	oldBackendID := "game-1"
+	newBackendID := "game-2"
+	callbackErr := errors.New("kick callback failed")
+	ss.SetBackendID(serverType, oldBackendID)
+
+	entered := make(chan struct{})
+	resume := make(chan struct{})
+	setTestBackendCoordinator(pool, nil, func(context.Context, Session, string, string, map[string]string, CloseReason, BackendRollback) error {
+		close(entered)
+		<-resume
+		return callbackErr
+	})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- ss.KickBackend(context.Background(), serverType, nil)
+	}()
+
+	<-entered
+	ss.SetBackendID(serverType, newBackendID)
+	close(resume)
+	err := <-errCh
+
+	assert.ErrorIs(t, err, callbackErr)
+	assert.Equal(t, newBackendID, ss.GetBackendID(serverType))
+}
+
+func TestSessionKickBackendFailureDoesNotRestoreAfterSameIDABA(t *testing.T) {
+	pool := NewSessionPool().(*sessionPoolImpl)
+	ss := newTestSession(pool, nil, false, uuid.New().String())
+	serverType := "game"
+	backendID := "game-1"
+	callbackErr := errors.New("kick callback failed")
+	ss.SetBackendID(serverType, backendID)
+
+	entered := make(chan struct{})
+	resume := make(chan struct{})
+	setTestBackendCoordinator(pool, nil, func(context.Context, Session, string, string, map[string]string, CloseReason, BackendRollback) error {
+		close(entered)
+		<-resume
+		return callbackErr
+	})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- ss.KickBackend(context.Background(), serverType, nil)
+	}()
+
+	<-entered
+	ss.SetBackendID(serverType, backendID)
+	ss.RemoveBackendID(serverType)
+	close(resume)
+	err := <-errCh
+
+	assert.ErrorIs(t, err, callbackErr)
+	assert.Empty(t, ss.GetBackendID(serverType))
+}
+
+func TestSessionKickBackendFailureDoesNotRestoreAfterSetBackends(t *testing.T) {
+	pool := NewSessionPool().(*sessionPoolImpl)
+	ss := newTestSession(pool, nil, false, uuid.New().String())
+	serverType := "game"
+	backendID := "game-1"
+	callbackErr := errors.New("kick callback failed")
+	ss.SetBackendID(serverType, backendID)
+
+	entered := make(chan struct{})
+	resume := make(chan struct{})
+	setTestBackendCoordinator(pool, nil, func(context.Context, Session, string, string, map[string]string, CloseReason, BackendRollback) error {
+		close(entered)
+		<-resume
+		return callbackErr
+	})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- ss.KickBackend(context.Background(), serverType, nil)
+	}()
+
+	<-entered
+	ss.SetBackends(map[string]string{})
+	close(resume)
+	err := <-errCh
+
+	assert.ErrorIs(t, err, callbackErr)
+	assert.Empty(t, ss.GetBackendID(serverType))
+}
+
+func TestSessionKickBackendAfterCallbackFailureKeepsRemoval(t *testing.T) {
+	pool := NewSessionPool().(*sessionPoolImpl)
+	ss := newTestSession(pool, nil, false, uuid.New().String())
+	serverType := "game"
+	backendID := "game-1"
+	afterErr := errors.New("after kick callback failed")
+	ss.SetBackendID(serverType, backendID)
+
+	var calls []string
+	setTestBackendCoordinator(pool, nil, func(context.Context, Session, string, string, map[string]string, CloseReason, BackendRollback) error {
+		calls = append(calls, "primary")
+		return nil
+	})
+	pool.OnAfterKickBackend(func(context.Context, Session, string, string, map[string]string, CloseReason) error {
+		calls = append(calls, "after-1")
+		return nil
+	})
+	pool.OnAfterKickBackend(func(context.Context, Session, string, string, map[string]string, CloseReason) error {
+		calls = append(calls, "after-2")
+		return afterErr
+	})
+	pool.OnAfterKickBackend(func(context.Context, Session, string, string, map[string]string, CloseReason) error {
+		calls = append(calls, "after-3")
+		return nil
+	})
+
+	err := ss.KickBackend(context.Background(), serverType, nil)
+
+	assert.ErrorIs(t, err, afterErr)
+	assert.Equal(t, []string{"primary", "after-1", "after-2"}, calls)
+	assert.Empty(t, ss.GetBackendID(serverType))
+}
+
+func TestSessionKickBackendCallbacksRunInCommitOrder(t *testing.T) {
+	pool := NewSessionPool().(*sessionPoolImpl)
+	ss := newTestSession(pool, nil, false, uuid.New().String())
+	serverType := "game"
+	backendID := "game-1"
+	callback := map[string]string{"source": "test"}
+	ss.SetBackendID(serverType, backendID)
+
+	var calls []string
+	assertCallback := func(gotSession Session, gotServerType, gotServerID string, gotCallback map[string]string, gotReason CloseReason) {
+		assert.Equal(t, ss, gotSession)
+		assert.Equal(t, serverType, gotServerType)
+		assert.Equal(t, backendID, gotServerID)
+		assert.Equal(t, callback, gotCallback)
+		assert.Equal(t, CloseReasonKickRebind, gotReason)
+		assert.Empty(t, ss.GetBackendID(serverType))
+	}
+	setTestBackendCoordinator(pool, nil, func(_ context.Context, gotSession Session, gotServerType, gotServerID string, gotCallback map[string]string, gotReason CloseReason, _ BackendRollback) error {
+		assertCallback(gotSession, gotServerType, gotServerID, gotCallback, gotReason)
+		calls = append(calls, "coordinator")
+		return nil
+	})
+	pool.OnAfterKickBackend(func(_ context.Context, gotSession Session, gotServerType, gotServerID string, gotCallback map[string]string, gotReason CloseReason) error {
+		assertCallback(gotSession, gotServerType, gotServerID, gotCallback, gotReason)
+		calls = append(calls, "after-1")
+		return nil
+	})
+	pool.OnAfterKickBackend(func(_ context.Context, gotSession Session, gotServerType, gotServerID string, gotCallback map[string]string, gotReason CloseReason) error {
+		assertCallback(gotSession, gotServerType, gotServerID, gotCallback, gotReason)
+		calls = append(calls, "after-2")
+		return nil
+	})
+
+	err := ss.KickBackend(context.Background(), serverType, callback, CloseReasonKickRebind)
+
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"coordinator", "after-1", "after-2"}, calls)
+	assert.Empty(t, ss.GetBackendID(serverType))
+}
+
+func TestSessionBindBackendFailurePreservesConcurrentReplacement(t *testing.T) {
+	pool := NewSessionPool().(*sessionPoolImpl)
+	ss := newTestSession(pool, nil, false, uuid.New().String())
+	serverType := "game"
+	failedBackendID := "game-1"
+	replacementBackendID := "game-2"
+	callbackErr := errors.New("bind callback failed")
+
+	entered := make(chan struct{})
+	resume := make(chan struct{})
+	setTestBackendCoordinator(pool, func(context.Context, Session, string, string, map[string]string, BackendRollback) error {
+		close(entered)
+		<-resume
+		return callbackErr
+	}, nil)
+	var afterCalls atomic.Int64
+	pool.OnAfterBindBackend(func(context.Context, Session, string, string, map[string]string) error {
+		afterCalls.Add(1)
+		return nil
+	})
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- ss.BindBackend(context.Background(), serverType, failedBackendID, nil)
+	}()
+
+	<-entered
+	ss.SetBackendID(serverType, replacementBackendID)
+	close(resume)
+	err := <-errCh
+
+	assert.ErrorIs(t, err, callbackErr)
+	assert.Equal(t, replacementBackendID, ss.GetBackendID(serverType))
+	assert.Zero(t, afterCalls.Load())
+}
+
+func TestSessionBindBackendFailurePreservesSameIDReplacement(t *testing.T) {
+	pool := NewSessionPool().(*sessionPoolImpl)
+	ss := newTestSession(pool, nil, false, uuid.New().String())
+	serverType := "game"
+	backendID := "game-1"
+	callbackErr := errors.New("bind callback failed")
+
+	entered := make(chan struct{})
+	resume := make(chan struct{})
+	setTestBackendCoordinator(pool, func(context.Context, Session, string, string, map[string]string, BackendRollback) error {
+		close(entered)
+		<-resume
+		return callbackErr
+	}, nil)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- ss.BindBackend(context.Background(), serverType, backendID, nil)
+	}()
+
+	<-entered
+	ss.RemoveBackendID(serverType)
+	ss.SetBackendID(serverType, backendID)
+	close(resume)
+	err := <-errCh
+
+	assert.ErrorIs(t, err, callbackErr)
+	assert.Equal(t, backendID, ss.GetBackendID(serverType))
 }
 
 func TestSessionOnCloseFailsIfBackend(t *testing.T) {
@@ -760,7 +1287,7 @@ func TestSessionClose(t *testing.T) {
 			assert.NotNil(t, ss)
 
 			if table.uid != "" {
-				ss.uid = table.uid
+				setTestSessionUID(ss, table.uid)
 				assert.NoError(t, sessionPool.StoreSessionLocal(ss))
 			}
 
@@ -982,9 +1509,9 @@ func TestRemoveSessionLocalPreservesReplacement(t *testing.T) {
 	pool := NewSessionPool().(*sessionPoolImpl)
 	uid := uuid.New().String()
 	oldSession := newTestSession(pool, nil, false).(*sessionImpl)
-	oldSession.uid = uid
+	setTestSessionUID(oldSession, uid)
 	replacement := newTestSession(pool, nil, false).(*sessionImpl)
-	replacement.uid = uid
+	setTestSessionUID(replacement, uid)
 
 	assert.NoError(t, pool.StoreSessionLocal(oldSession))
 	assert.NoError(t, pool.StoreSessionLocal(oldSession))
@@ -1028,7 +1555,7 @@ func TestStoreAndRemoveSessionLocalAreAtomic(t *testing.T) {
 		pool := NewSessionPool().(*sessionPoolImpl)
 		ss := newTestSession(pool, nil, false).(*sessionImpl)
 		uid := uuid.New().String()
-		ss.uid = uid
+		setTestSessionUID(ss, uid)
 
 		pool.RemoveSessionLocal(ss)
 		assert.Zero(t, pool.GetSessionCount())
@@ -1047,7 +1574,7 @@ func TestStoreAndRemoveSessionLocalAreAtomic(t *testing.T) {
 			pool := NewSessionPool().(*sessionPoolImpl)
 			ss := newTestSession(pool, nil, false).(*sessionImpl)
 			uid := uuid.New().String()
-			ss.uid = uid
+			setTestSessionUID(ss, uid)
 
 			start := make(chan struct{})
 			storeErr := make(chan error, 1)
@@ -1782,7 +2309,7 @@ func TestSessionPushToFront(t *testing.T) {
 			assert.NotNil(t, ss)
 			ss.Set("key", "val")
 			uid := uuid.New().String()
-			ss.uid = uid
+			setTestSessionUID(ss, uid)
 			frontendID := uuid.New().String()
 			ss.SetFrontendData(frontendID, 42)
 
@@ -1809,7 +2336,7 @@ func TestSessionClear(t *testing.T) {
 	ss := newTestSession(sessionPool, nil, true).(*sessionImpl)
 	assert.NotNil(t, ss)
 
-	ss.uid = uuid.New().String()
+	setTestSessionUID(ss, uuid.New().String())
 	err := ss.Set("key", "val")
 	assert.NoError(t, err)
 	assert.NotEmpty(t, ss.data)

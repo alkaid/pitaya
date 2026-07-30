@@ -100,14 +100,13 @@ func TestFlushFrontendDataWritesCompleteSessionHash(t *testing.T) {
 	pool := NewSessionPool().(*sessionPoolImpl)
 	pool.storage = recorder
 	session := &sessionImpl{
-		uid:               "user-42",
 		pool:              pool,
-		online:            true,
 		frontendID:        "frontend-1",
 		frontendSessionID: 42,
 		ip:                "192.0.2.1",
 		encodedData:       []byte(`{"coins":7}`),
 	}
+	session.identity.Store(&sessionIdentity{uid: "user-42", uidInt: 42, online: true})
 
 	err := session.FlushFrontendData()
 

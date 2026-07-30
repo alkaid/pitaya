@@ -371,8 +371,9 @@ func (a *agentImpl) ResponseMID(ctx context.Context, mid uint, v interface{}, is
 	return a.send(pendingMessage{ctx: ctx, typ: message.Response, mid: mid, payload: v, err: err})
 }
 
-// Close closes the agent, cleans inner state and closes low-level connection.
-// Any blocked Read or Write operations will be unblocked and return errors.
+// Close releases the agent after Session.Close commits the session lifecycle state.
+// Connection-initiated shutdown paths must call Session.Close instead. Any blocked
+// Read or Write operations will be unblocked and return errors.
 func (a *agentImpl) Close(callback map[string]string, reason ...session.CloseReason) error {
 	a.closeMutex.Lock()
 	defer a.closeMutex.Unlock()
@@ -398,7 +399,6 @@ func (a *agentImpl) Close(callback map[string]string, reason ...session.CloseRea
 		close(a.chDie)
 		a.onSessionClosed(a.Session, callback, reason...)
 	}
-	// 若是被kick的因为是先agent.close()再session.close(),会造成瞬时不准确,但下一次report时就能准确
 	metrics.ReportNumberOfConnectedClients(a.metricsReporters, a.sessionPool.GetSessionCount())
 	// 若是websocket 且是被踢的 返回自定义reason
 	if wsConn, ok := a.conn.(*acceptor.WSConn); ok && closeReason > session.CloseReasonKickMin {
@@ -463,7 +463,7 @@ func (a *agentImpl) SetStatus(state int32) {
 // Handle handles the messages from and to a client
 func (a *agentImpl) Handle() {
 	defer func() {
-		a.Close(nil)
+		a.Session.Close(nil)
 		logger.Zap.Debug("Session handle goroutine exit", zap.Int64("ID", a.Session.ID()), zap.String("UID", a.Session.UID()))
 	}()
 
@@ -530,7 +530,7 @@ func (a *agentImpl) heartbeat() {
 }
 
 func (a *agentImpl) heartbeatLoop(ticks <-chan time.Time) {
-	defer a.Close(nil)
+	defer a.Session.Close(nil)
 
 	for {
 		select {
@@ -629,7 +629,7 @@ func (a *agentImpl) SendHeartbeatResponse(unixMillTime int64) error {
 func (a *agentImpl) write() {
 	// clean func
 	defer func() {
-		a.Close(nil)
+		a.Session.Close(nil)
 	}()
 
 	for {

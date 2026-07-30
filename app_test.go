@@ -61,6 +61,12 @@ var (
 	}
 )
 
+type backendCoordinatorTestPool struct {
+	session.SessionPool
+}
+
+func (*backendCoordinatorTestPool) SetBackendCoordinator(session.BackendCoordinator) {}
+
 func newAppTestBuilder(
 	isFrontend bool,
 	serverType string,
@@ -170,10 +176,8 @@ func TestInitSysRemotes(t *testing.T) {
 	sessionPool := mocks.NewMockSessionPool(ctrl)
 	sessionPool.EXPECT().OnSessionBind(gomock.Any()).Times(1)
 	sessionPool.EXPECT().OnSessionClose(gomock.Any()).Times(1)
-	sessionPool.EXPECT().OnBindBackend(gomock.Any()).Times(1)
-	sessionPool.EXPECT().OnKickBackend(gomock.Any()).Times(1)
 
-	app := newTestAppForComponents(sessionPool)
+	app := newTestAppForComponents(&backendCoordinatorTestPool{SessionPool: sessionPool})
 	app.initSysRemotes()
 	assert.Empty(t, app.handlerComp)
 	assert.Len(t, app.remoteComp, 1)

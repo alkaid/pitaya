@@ -54,6 +54,11 @@ type mockAddr struct{}
 func (m *mockAddr) Network() string { return "" }
 func (m *mockAddr) String() string  { return "remote-string" }
 
+type sessionCloseObservation struct {
+	online     bool
+	registered bool
+}
+
 func heartbeatAndHandshakeMocks(mockEncoder *codecmocks.MockPacketEncoder) {
 	heartbeatAndHandshakeMocksWithResponse(mockEncoder, hbd, nil)
 }
@@ -947,6 +952,13 @@ func TestAgentHeartbeat(t *testing.T) {
 	mockMessageEncoder.EXPECT().IsCompressionEnabled().AnyTimes()
 	mockSerializer.EXPECT().GetName()
 	sessionPool := session.NewSessionPool()
+	callbackState := make(chan sessionCloseObservation, 1)
+	sessionPool.OnSessionClose(func(s session.Session, _ map[string]string, _ session.CloseReason) {
+		callbackState <- sessionCloseObservation{
+			online:     s.Online(),
+			registered: sessionPool.GetSessionByID(s.ID()) != nil,
+		}
+	})
 	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, 1*time.Second, 1, nil, mockMessageEncoder, nil, sessionPool, "").(*agentImpl)
 	assert.NotNil(t, ag)
 
@@ -971,6 +983,9 @@ func TestAgentHeartbeat(t *testing.T) {
 	ticks <- lastAt.Add(3 * time.Second)
 	waitForChannelClose(t, done, time.Second)
 	waitForChannelClose(t, ag.chDie, time.Second)
+	observed := helpers.ShouldEventuallyReceive(t, callbackState).(sessionCloseObservation)
+	assert.False(t, observed.online)
+	assert.False(t, observed.registered)
 }
 
 func TestAgentHeartbeatExitsIfConnError(t *testing.T) {
@@ -986,6 +1001,13 @@ func TestAgentHeartbeatExitsIfConnError(t *testing.T) {
 	mockMessageEncoder.EXPECT().IsCompressionEnabled().AnyTimes()
 	mockSerializer.EXPECT().GetName()
 	sessionPool := session.NewSessionPool()
+	callbackState := make(chan sessionCloseObservation, 1)
+	sessionPool.OnSessionClose(func(s session.Session, _ map[string]string, _ session.CloseReason) {
+		callbackState <- sessionCloseObservation{
+			online:     s.Online(),
+			registered: sessionPool.GetSessionByID(s.ID()) != nil,
+		}
+	})
 	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, 1*time.Second, 1, nil, mockMessageEncoder, nil, sessionPool, "").(*agentImpl)
 	assert.NotNil(t, ag)
 
@@ -1011,6 +1033,9 @@ func TestAgentHeartbeatExitsIfConnError(t *testing.T) {
 	waitForChannelClose(t, ag.chDie, time.Second)
 	waitForChannelClose(t, writeDone, time.Second)
 	waitForChannelClose(t, heartbeatDone, time.Second)
+	observed := helpers.ShouldEventuallyReceive(t, callbackState).(sessionCloseObservation)
+	assert.False(t, observed.online)
+	assert.False(t, observed.registered)
 }
 
 func TestAgentHeartbeatExitsOnStopHeartbeat(t *testing.T) {
@@ -1106,7 +1131,7 @@ func TestAgentHandle(t *testing.T) {
 		wg.Done()
 	})
 
-	// ag.Close on method exit
+	// Session.Close on method exit
 	mockConn.EXPECT().RemoteAddr().MaxTimes(1)
 	mockConn.EXPECT().Close().MaxTimes(1)
 

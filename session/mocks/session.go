@@ -1254,30 +1254,6 @@ func (mr *MockSessionPoolMockRecorder) OnAfterSessionBind(f any) *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnAfterSessionBind", reflect.TypeOf((*MockSessionPool)(nil).OnAfterSessionBind), f)
 }
 
-// OnBindBackend mocks base method.
-func (m *MockSessionPool) OnBindBackend(f session.OnSessionBindBackendFunc) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "OnBindBackend", f)
-}
-
-// OnBindBackend indicates an expected call of OnBindBackend.
-func (mr *MockSessionPoolMockRecorder) OnBindBackend(f any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnBindBackend", reflect.TypeOf((*MockSessionPool)(nil).OnBindBackend), f)
-}
-
-// OnKickBackend mocks base method.
-func (m *MockSessionPool) OnKickBackend(f session.OnSessionKickBackendFunc) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "OnKickBackend", f)
-}
-
-// OnKickBackend indicates an expected call of OnKickBackend.
-func (mr *MockSessionPoolMockRecorder) OnKickBackend(f any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "OnKickBackend", reflect.TypeOf((*MockSessionPool)(nil).OnKickBackend), f)
-}
-
 // OnSessionBind mocks base method.
 func (m *MockSessionPool) OnSessionBind(f session.OnSessionBindFunc) {
 	m.ctrl.T.Helper()

@@ -21,12 +21,17 @@
 package remote
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/alkaid/goerrors/apierrors"
+	"github.com/alkaid/pitaya/v2/cluster"
+	clustermocks "github.com/alkaid/pitaya/v2/cluster/mocks"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/protos"
+	"github.com/alkaid/pitaya/v2/service"
 	"github.com/alkaid/pitaya/v2/session"
 	"github.com/alkaid/pitaya/v2/session/mocks"
 	"github.com/google/uuid"
@@ -43,6 +48,24 @@ func assertSessionNotFound(t *testing.T, err error, metadata map[string]string) 
 	assert.Equal(t, protos.ErrSessionNotFound().GetCode(), apiErr.GetCode())
 	assert.Equal(t, protos.ErrSessionNotFound().GetReason(), apiErr.GetReason())
 	assert.Equal(t, metadata, apiErr.GetMetadata())
+}
+
+type compareRemoveSession struct {
+	session.Session
+	remove func(serverType, serverID string) bool
+}
+
+func (s *compareRemoveSession) RemoveBackendIDIfEqual(serverType, serverID string) bool {
+	return s.remove(serverType, serverID)
+}
+
+type backendCoordinatorPool struct {
+	session.SessionPool
+	coordinator *session.BackendCoordinator
+}
+
+func (p *backendCoordinatorPool) SetBackendCoordinator(coordinator session.BackendCoordinator) {
+	*p.coordinator = coordinator
 }
 
 func TestBindSession(t *testing.T) {
@@ -267,4 +290,278 @@ func TestKickSessionShouldFailIfSessionDoesntExists(t *testing.T) {
 		"uid":    uid,
 		"reason": "0",
 	})
+}
+
+func TestBindBackendRollbackUsesBindingIdentity(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	server := cluster.NewServer("game-1", "game", false)
+	rollbackErr := errors.New("store session failed")
+	uid := uuid.New().String()
+
+	var coordinator session.BackendCoordinator
+	sessionPool := mocks.NewMockSessionPool(ctrl)
+	sessionPool.EXPECT().OnSessionBind(gomock.Any())
+	sessionPool.EXPECT().OnSessionClose(gomock.Any())
+
+	sys := NewSys(&backendCoordinatorPool{SessionPool: sessionPool, coordinator: &coordinator}, server, nil, nil, nil)
+	sys.Init()
+	require.NotNil(t, coordinator.Bind)
+
+	ss := mocks.NewMockSession(ctrl)
+	ss.EXPECT().UID().Return(uid).AnyTimes()
+	ss.EXPECT().ID().Return(int64(1)).AnyTimes()
+	sessionPool.EXPECT().GetSessionByUID(uid).Return(nil)
+	sessionPool.EXPECT().StoreSessionLocal(ss).Return(rollbackErr)
+	gomock.InOrder(
+		ss.EXPECT().FlushBackendData().Return(nil),
+		sessionPool.EXPECT().RemoveSessionLocal(ss),
+	)
+	var rollbackCalls int
+	rollback := session.BackendRollback(func() bool {
+		rollbackCalls++
+		return true
+	})
+
+	err := coordinator.Bind(context.Background(), ss, server.Type, server.ID, nil, rollback)
+
+	assert.ErrorIs(t, err, rollbackErr)
+	assert.Equal(t, 1, rollbackCalls)
+}
+
+func TestBindBackendRetryContinuesForRetainedSession(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	server := cluster.NewServer("game-1", "game", false)
+	uid := uuid.New().String()
+	sendErr := errors.New("frontend unavailable")
+
+	var coordinator session.BackendCoordinator
+	sessionPool := mocks.NewMockSessionPool(ctrl)
+	sessionPool.EXPECT().OnSessionBind(gomock.Any())
+	sessionPool.EXPECT().OnSessionClose(gomock.Any())
+
+	sys := NewSys(&backendCoordinatorPool{SessionPool: sessionPool, coordinator: &coordinator}, server, nil, nil, nil)
+	sys.Init()
+	require.NotNil(t, coordinator.Bind)
+
+	ss := mocks.NewMockSession(ctrl)
+	ss.EXPECT().UID().Return(uid).AnyTimes()
+	ss.EXPECT().ID().Return(int64(1)).AnyTimes()
+	sessionPool.EXPECT().GetSessionByUID(uid).Return(ss)
+	ss.EXPECT().SendRequestToFrontend(gomock.Any(), constants.SessionBindBackendRoute, gomock.Any()).Return(nil, sendErr)
+	gomock.InOrder(
+		ss.EXPECT().FlushBackendData().Return(nil),
+		sessionPool.EXPECT().RemoveSessionLocal(ss),
+	)
+	var rollbackCalls int
+
+	err := coordinator.Bind(context.Background(), ss, server.Type, server.ID, nil, func() bool {
+		rollbackCalls++
+		return true
+	})
+
+	assert.ErrorIs(t, err, sendErr)
+	assert.Equal(t, 1, rollbackCalls)
+}
+
+func TestBindBackendRemoteRPCSuccessStopsSourceCoordinator(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	source := cluster.NewServer("chat-1", "chat", false)
+	target := cluster.NewServer("game-1", "game", false)
+	uid := uuid.New().String()
+
+	var coordinator session.BackendCoordinator
+	sessionPool := mocks.NewMockSessionPool(ctrl)
+	sessionPool.EXPECT().OnSessionBind(gomock.Any())
+	sessionPool.EXPECT().OnSessionClose(gomock.Any())
+	serviceDiscovery := clustermocks.NewMockServiceDiscovery(ctrl)
+	rpcClient := clustermocks.NewMockRPCClient(ctrl)
+	remoteService := service.NewRemoteService(rpcClient, nil, serviceDiscovery, nil, nil, nil, nil, source, sessionPool, nil, nil, nil)
+
+	sys := NewSys(&backendCoordinatorPool{SessionPool: sessionPool, coordinator: &coordinator}, source, nil, nil, remoteService)
+	sys.Init()
+	require.NotNil(t, coordinator.Bind)
+
+	ss := mocks.NewMockSession(ctrl)
+	ss.EXPECT().UID().Return(uid).AnyTimes()
+	serviceDiscovery.EXPECT().GetServer(target.ID).Return(target, nil)
+	rpcClient.EXPECT().Call(gomock.Any(), protos.RPCType_User, gomock.Any(), ss, gomock.Any(), target).Return(&protos.Response{}, nil)
+	var rollbackCalls int
+
+	err := coordinator.Bind(context.Background(), ss, target.Type, target.ID, nil, func() bool {
+		rollbackCalls++
+		return true
+	})
+
+	require.NoError(t, err)
+	assert.Zero(t, rollbackCalls)
+}
+
+func TestBindBackendRollbackFlushFailurePreservesLocalSession(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	server := cluster.NewServer("game-1", "game", false)
+	uid := uuid.New().String()
+	sendErr := errors.New("frontend unavailable")
+	flushErr := errors.New("flush backend data failed")
+
+	var coordinator session.BackendCoordinator
+	sessionPool := mocks.NewMockSessionPool(ctrl)
+	sessionPool.EXPECT().OnSessionBind(gomock.Any())
+	sessionPool.EXPECT().OnSessionClose(gomock.Any())
+
+	sys := NewSys(&backendCoordinatorPool{SessionPool: sessionPool, coordinator: &coordinator}, server, nil, nil, nil)
+	sys.Init()
+	require.NotNil(t, coordinator.Bind)
+
+	ss := mocks.NewMockSession(ctrl)
+	ss.EXPECT().UID().Return(uid).AnyTimes()
+	ss.EXPECT().ID().Return(int64(1)).AnyTimes()
+	sessionPool.EXPECT().GetSessionByUID(uid).Return(nil)
+	sessionPool.EXPECT().StoreSessionLocal(ss).Return(nil)
+	ss.EXPECT().SendRequestToFrontend(gomock.Any(), constants.SessionBindBackendRoute, gomock.Any()).Return(nil, sendErr)
+	ss.EXPECT().FlushBackendData().Return(flushErr)
+	var rollbackCalls int
+
+	err := coordinator.Bind(context.Background(), ss, server.Type, server.ID, nil, func() bool {
+		rollbackCalls++
+		return true
+	})
+
+	assert.ErrorIs(t, err, sendErr)
+	assert.ErrorIs(t, err, flushErr)
+	assert.Equal(t, 1, rollbackCalls)
+}
+
+func TestBindBackendRejectsDifferentSessionOwner(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	server := cluster.NewServer("game-1", "game", false)
+	uid := uuid.New().String()
+
+	var coordinator session.BackendCoordinator
+	sessionPool := mocks.NewMockSessionPool(ctrl)
+	sessionPool.EXPECT().OnSessionBind(gomock.Any())
+	sessionPool.EXPECT().OnSessionClose(gomock.Any())
+
+	sys := NewSys(&backendCoordinatorPool{SessionPool: sessionPool, coordinator: &coordinator}, server, nil, nil, nil)
+	sys.Init()
+	require.NotNil(t, coordinator.Bind)
+
+	ss := mocks.NewMockSession(ctrl)
+	ss.EXPECT().UID().Return(uid).AnyTimes()
+	existing := mocks.NewMockSession(ctrl)
+	existing.EXPECT().GetBackendID(server.Type).Return("game-0")
+	sessionPool.EXPECT().GetSessionByUID(uid).Return(existing)
+
+	err := coordinator.Bind(context.Background(), ss, server.Type, server.ID, nil, func() bool {
+		t.Fatal("coordinator must leave rollback to Session.BindBackend")
+		return false
+	})
+
+	assert.ErrorIs(t, err, constants.ErrSessionAlreadyBound)
+}
+
+func TestKickBackendCallbackFailureDoesNotRemoveLocalSession(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	server := cluster.NewServer("game-1", "game", false)
+	uid := uuid.New().String()
+	sendErr := errors.New("frontend unavailable")
+	flushErr := errors.New("flush backend data failed")
+
+	var coordinator session.BackendCoordinator
+	sessionPool := mocks.NewMockSessionPool(ctrl)
+	sessionPool.EXPECT().OnSessionBind(gomock.Any())
+	sessionPool.EXPECT().OnSessionClose(gomock.Any())
+
+	sys := NewSys(&backendCoordinatorPool{SessionPool: sessionPool, coordinator: &coordinator}, server, nil, nil, nil)
+	sys.Init()
+	require.NotNil(t, coordinator.Kick)
+
+	ss := mocks.NewMockSession(ctrl)
+	ss.EXPECT().UID().Return(uid).AnyTimes()
+	ss.EXPECT().ID().Return(int64(1)).AnyTimes()
+	var removeCalls int
+	sessionPool.EXPECT().RemoveSessionLocal(ss).Do(func(session.Session) {
+		removeCalls++
+	}).AnyTimes()
+	ss.EXPECT().SendRequestToFrontend(gomock.Any(), constants.KickBackendRoute, gomock.Any()).Return(nil, sendErr)
+	ss.EXPECT().FlushBackendData().Return(flushErr)
+
+	err := coordinator.Kick(context.Background(), ss, server.Type, server.ID, nil, session.CloseReasonNormal, func() bool { return true })
+
+	assert.ErrorIs(t, err, flushErr)
+	assert.Zero(t, removeCalls)
+}
+
+func TestKickBackendFrontendRemovesMatchingBinding(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	uid := uuid.New().String()
+	msg := &protos.BindBackendMsg{Uid: uid, Btype: "game", Bid: "game-1"}
+
+	ss := mocks.NewMockSession(ctrl)
+	wrapped := &compareRemoveSession{Session: ss, remove: func(serverType, serverID string) bool {
+		assert.Equal(t, msg.Btype, serverType)
+		assert.Equal(t, msg.Bid, serverID)
+		return true
+	}}
+	ss.EXPECT().FlushBackendData().Return(nil)
+	sessionPool := mocks.NewMockSessionPool(ctrl)
+	sessionPool.EXPECT().GetSessionByUID(uid).Return(wrapped)
+
+	sys := NewSys(sessionPool, cluster.NewServer("frontend-1", "frontend", true), nil, nil, nil)
+	res, err := sys.KickBackend(context.Background(), msg)
+
+	require.NoError(t, err)
+	require.NotNil(t, res)
+}
+
+func TestKickBackendFrontendPreservesMismatchedBinding(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	uid := uuid.New().String()
+	msg := &protos.BindBackendMsg{Uid: uid, Btype: "game", Bid: "game-1"}
+
+	ss := mocks.NewMockSession(ctrl)
+	wrapped := &compareRemoveSession{Session: ss, remove: func(serverType, serverID string) bool {
+		assert.Equal(t, msg.Btype, serverType)
+		assert.Equal(t, msg.Bid, serverID)
+		return false
+	}}
+	ss.EXPECT().FlushBackendData().Return(nil)
+	sessionPool := mocks.NewMockSessionPool(ctrl)
+	sessionPool.EXPECT().GetSessionByUID(uid).Return(wrapped)
+
+	sys := NewSys(sessionPool, cluster.NewServer("frontend-1", "frontend", true), nil, nil, nil)
+	res, err := sys.KickBackend(context.Background(), msg)
+
+	require.NoError(t, err)
+	require.NotNil(t, res)
+}
+
+func TestSessionKickedBackendUsesBindingIdentity(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	// Keep this unit on the synchronous binding-mutation path; listener delivery owns the co pool fixture.
+	uid := ""
+	msg := &protos.BindBackendMsg{Uid: uid, Btype: "game", Bid: "game-1"}
+
+	ss := mocks.NewMockSession(ctrl)
+	wrapped := &compareRemoveSession{Session: ss, remove: func(serverType, serverID string) bool {
+		assert.Equal(t, msg.Btype, serverType)
+		assert.Equal(t, msg.Bid, serverID)
+		return false
+	}}
+	sessionPool := mocks.NewMockSessionPool(ctrl)
+	sessionPool.EXPECT().GetSessionByUID(uid).Return(wrapped)
+
+	sys := NewSys(sessionPool, cluster.NewServer("chat-1", "chat", false), nil, nil, &service.RemoteService{})
+	res, err := sys.SessionKickedBackend(context.Background(), msg)
+
+	require.NoError(t, err)
+	require.NotNil(t, res)
 }
