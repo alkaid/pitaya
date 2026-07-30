@@ -64,8 +64,10 @@ type sessionCloseObservation struct {
 	registered bool
 }
 
-func heartbeatAndHandshakeMocks(mockEncoder *codecmocks.MockPacketEncoder) {
-	heartbeatAndHandshakeMocksWithResponse(mockEncoder, hbd, nil)
+func heartbeatAndHandshakeMocks(mockEncoder *codecmocks.MockPacketEncoder) []byte {
+	heartbeatPacket := []byte("heartbeat")
+	heartbeatAndHandshakeMocksWithResponse(mockEncoder, heartbeatPacket, nil)
+	return heartbeatPacket
 }
 
 func heartbeatAndHandshakeMocksWithResponse(mockEncoder *codecmocks.MockPacketEncoder, heartbeatResponse []byte, onHeartbeat func([]byte)) {
@@ -105,7 +107,7 @@ func TestNewAgent(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockSerializer := serializemocks.NewMockSerializer(ctrl)
-	mockSerializer.EXPECT().GetName().Times(2)
+	mockSerializer.EXPECT().GetName().Return("factory-one").Times(1)
 
 	mockMetricsReporter := metricsmocks.NewMockReporter(ctrl)
 	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
@@ -115,27 +117,27 @@ func TestNewAgent(t *testing.T) {
 
 	mockConn := mocks.NewMockPlayerConn(ctrl)
 
-	mockEncoder.EXPECT().Encode(gomock.Any(), gomock.Not(gomock.Nil())).Do(
-		func(typ packet.Type, d []byte) {
-			// cannot compare inside the expect because they are equivalent but not equal
-			assert.EqualValues(t, packet.Handshake, typ)
-		}).Times(2)
-	mockEncoder.EXPECT().Encode(gomock.Any(), gomock.Nil()).Do(
-		func(typ packet.Type, d []byte) {
-			assert.EqualValues(t, packet.Heartbeat, typ)
-		})
-	mockEncoder.EXPECT().Encode(gomock.Any(), gomock.Nil()).Do(
-		func(typ packet.Type, d []byte) {
-			assert.EqualValues(t, packet.HeartbeatAck, typ)
-		})
+	packetData := &agentPacketData{
+		heartbeat:              []byte("factory-one-heartbeat"),
+		heartbeatAck:           []byte("factory-one-heartbeat-ack"),
+		handshakeResponse:      []byte("factory-one-handshake"),
+		handshakeErrorResponse: []byte("factory-one-handshake-error"),
+	}
+	gomock.InOrder(
+		mockEncoder.EXPECT().Encode(packet.Type(packet.Handshake), gomock.Not(gomock.Nil())).Return(packetData.handshakeResponse, nil),
+		mockEncoder.EXPECT().Encode(packet.Type(packet.Heartbeat), gomock.Nil()).Return(packetData.heartbeat, nil),
+		mockEncoder.EXPECT().Encode(packet.Type(packet.HeartbeatAck), gomock.Nil()).Return(packetData.heartbeatAck, nil),
+		mockEncoder.EXPECT().Encode(packet.Type(packet.Handshake), gomock.Not(gomock.Nil())).Return(packetData.handshakeErrorResponse, nil),
+	)
 	messageEncoder := message.NewMessagesEncoder(false)
 
 	mockMetricsReporters := []metrics.Reporter{mockMetricsReporter}
 	sessionPool := session.NewSessionPool()
 	serverID := uuid.New().String()
 
-	mockMetricsReporter.EXPECT().ReportGauge(metrics.ConnectedClients, gomock.Any(), gomock.Any())
-	ag := newAgent(mockConn, mockDecoder, mockEncoder, mockSerializer, hbTime, 10, dieChan, messageEncoder, mockMetricsReporters, sessionPool, serverID).(*agentImpl)
+	mockMetricsReporter.EXPECT().ReportGauge(metrics.ConnectedClients, gomock.Any(), gomock.Any()).Times(2)
+	factory := NewAgentFactory(dieChan, mockDecoder, mockEncoder, mockSerializer, hbTime, messageEncoder, 10, sessionPool, mockMetricsReporters, serverID).(*agentFactoryImpl)
+	ag := factory.CreateAgent(mockConn).(*agentImpl)
 	assert.NotNil(t, ag)
 	assert.IsType(t, make(chan struct{}), ag.chDie)
 	assert.IsType(t, make(chan pendingWrite), ag.chSend)
@@ -150,15 +152,117 @@ func TestNewAgent(t *testing.T) {
 	assert.InDelta(t, time.Now().Unix(), ag.lastAt, 1)
 	assert.Equal(t, mockSerializer, ag.serializer)
 	assert.Equal(t, mockMetricsReporters, ag.metricsReporters)
+	assert.Equal(t, packetData, ag.packetData)
 	assert.Equal(t, constants.StatusStart, ag.state)
 	assert.NotNil(t, ag.Session)
 	assert.True(t, ag.Session.GetIsFrontend())
 	assert.Equal(t, serverID, ag.Session.GetFrontendID())
 
-	// second call should no call hdb encode
-	mockMetricsReporter.EXPECT().ReportGauge(metrics.ConnectedClients, gomock.Any(), gomock.Any())
-	ag = newAgent(nil, nil, mockEncoder, mockSerializer, hbTime, 10, dieChan, messageEncoder, mockMetricsReporters, sessionPool, serverID).(*agentImpl)
-	assert.NotNil(t, ag)
+	secondAgent := factory.CreateAgent(nil).(*agentImpl)
+	require.Same(t, ag.packetData, secondAgent.packetData)
+
+	secondSerializer := serializemocks.NewMockSerializer(ctrl)
+	secondSerializer.EXPECT().GetName().Return("factory-two").Times(1)
+	secondEncoder := codecmocks.NewMockPacketEncoder(ctrl)
+	secondPacketData := &agentPacketData{
+		heartbeat:              []byte("factory-two-heartbeat"),
+		heartbeatAck:           []byte("factory-two-heartbeat-ack"),
+		handshakeResponse:      []byte("factory-two-handshake"),
+		handshakeErrorResponse: []byte("factory-two-handshake-error"),
+	}
+	gomock.InOrder(
+		secondEncoder.EXPECT().Encode(packet.Type(packet.Handshake), gomock.Not(gomock.Nil())).Return(secondPacketData.handshakeResponse, nil),
+		secondEncoder.EXPECT().Encode(packet.Type(packet.Heartbeat), gomock.Nil()).Return(secondPacketData.heartbeat, nil),
+		secondEncoder.EXPECT().Encode(packet.Type(packet.HeartbeatAck), gomock.Nil()).Return(secondPacketData.heartbeatAck, nil),
+		secondEncoder.EXPECT().Encode(packet.Type(packet.Handshake), gomock.Not(gomock.Nil())).Return(secondPacketData.handshakeErrorResponse, nil),
+	)
+	secondFactory := NewAgentFactory(nil, nil, secondEncoder, secondSerializer, 2*hbTime, message.NewMessagesEncoder(false), 1, session.NewSessionPool(), nil, "second").(*agentFactoryImpl)
+	thirdAgent := secondFactory.CreateAgent(nil).(*agentImpl)
+	require.NotSame(t, ag.packetData, thirdAgent.packetData)
+	require.Equal(t, secondPacketData, thirdAgent.packetData)
+}
+
+func TestAgentFactoryPacketDataInitializationFailureIsSticky(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	initErr := errors.New("encode static packet")
+	mockSerializer := serializemocks.NewMockSerializer(ctrl)
+	mockSerializer.EXPECT().GetName().Return("serializer").Times(1)
+	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
+	mockEncoder.EXPECT().Encode(packet.Type(packet.Handshake), gomock.Not(gomock.Nil())).Return(nil, initErr).Times(1)
+
+	factory := NewAgentFactory(
+		nil,
+		nil,
+		mockEncoder,
+		mockSerializer,
+		time.Second,
+		message.NewMessagesEncoder(false),
+		1,
+		session.NewSessionPool(),
+		nil,
+		"",
+	)
+
+	for range 2 {
+		require.PanicsWithError(t, initErr.Error(), func() {
+			factory.CreateAgent(nil)
+		})
+	}
+}
+
+func TestAgentFactoryPacketDataConcurrentInitialization(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockSerializer := serializemocks.NewMockSerializer(ctrl)
+	mockSerializer.EXPECT().GetName().Return("serializer").Times(1)
+	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
+	packetData := &agentPacketData{
+		heartbeat:              []byte("heartbeat"),
+		heartbeatAck:           []byte("heartbeat-ack"),
+		handshakeResponse:      []byte("handshake"),
+		handshakeErrorResponse: []byte("handshake-error"),
+	}
+	gomock.InOrder(
+		mockEncoder.EXPECT().Encode(packet.Type(packet.Handshake), gomock.Not(gomock.Nil())).Return(packetData.handshakeResponse, nil),
+		mockEncoder.EXPECT().Encode(packet.Type(packet.Heartbeat), gomock.Nil()).Return(packetData.heartbeat, nil),
+		mockEncoder.EXPECT().Encode(packet.Type(packet.HeartbeatAck), gomock.Nil()).Return(packetData.heartbeatAck, nil),
+		mockEncoder.EXPECT().Encode(packet.Type(packet.Handshake), gomock.Not(gomock.Nil())).Return(packetData.handshakeErrorResponse, nil),
+	)
+
+	const agentCount = 32
+	factory := NewAgentFactory(
+		nil,
+		nil,
+		mockEncoder,
+		mockSerializer,
+		time.Second,
+		message.NewMessagesEncoder(false),
+		1,
+		session.NewSessionPool(),
+		nil,
+		"",
+	)
+	agents := make([]*agentImpl, agentCount)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(agentCount)
+	for i := range agents {
+		go func() {
+			defer wg.Done()
+			<-start
+			agents[i] = factory.CreateAgent(nil).(*agentImpl)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	for _, agent := range agents {
+		require.Same(t, agents[0].packetData, agent.packetData)
+	}
+	require.Equal(t, packetData, agents[0].packetData)
 }
 
 func TestAgentRemoteIPUsesConfiguredTrustedProxies(t *testing.T) {
@@ -530,6 +634,7 @@ func TestAgentResponseMIDFailsIfClosedAgent(t *testing.T) {
 	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
 	heartbeatAndHandshakeMocks(mockEncoder)
 	mockMessageEncoder := messagemocks.NewMockEncoder(ctrl)
+	mockMessageEncoder.EXPECT().IsCompressionEnabled().Return(false)
 	mockMetricsReporter := metricsmocks.NewMockReporter(ctrl)
 
 	mockSerializer := serializemocks.NewMockSerializer(ctrl)
@@ -706,6 +811,7 @@ func TestAgentRemoteAddr(t *testing.T) {
 	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
 	heartbeatAndHandshakeMocks(mockEncoder)
 	mockMessageEncoder := messagemocks.NewMockEncoder(ctrl)
+	mockMessageEncoder.EXPECT().IsCompressionEnabled().Return(false)
 	mockSerializer := serializemocks.NewMockSerializer(ctrl)
 	mockSerializer.EXPECT().GetName()
 
@@ -727,6 +833,7 @@ func TestAgentString(t *testing.T) {
 	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
 	heartbeatAndHandshakeMocks(mockEncoder)
 	mockMessageEncoder := messagemocks.NewMockEncoder(ctrl)
+	mockMessageEncoder.EXPECT().IsCompressionEnabled().Return(false)
 	mockSerializer := serializemocks.NewMockSerializer(ctrl)
 	mockSerializer.EXPECT().GetName()
 
@@ -758,6 +865,7 @@ func TestAgentGetStatus(t *testing.T) {
 			mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
 			heartbeatAndHandshakeMocks(mockEncoder)
 			mockMessageEncoder := messagemocks.NewMockEncoder(ctrl)
+			mockMessageEncoder.EXPECT().IsCompressionEnabled().Return(false)
 
 			mockSerializer := serializemocks.NewMockSerializer(ctrl)
 			mockSerializer.EXPECT().GetName()
@@ -781,6 +889,7 @@ func TestAgentSetLastAt(t *testing.T) {
 	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
 	heartbeatAndHandshakeMocks(mockEncoder)
 	mockMessageEncoder := messagemocks.NewMockEncoder(ctrl)
+	mockMessageEncoder.EXPECT().IsCompressionEnabled().Return(false)
 	mockSerializer := serializemocks.NewMockSerializer(ctrl)
 	mockSerializer.EXPECT().GetName()
 
@@ -810,6 +919,7 @@ func TestAgentSetStatus(t *testing.T) {
 			mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
 			heartbeatAndHandshakeMocks(mockEncoder)
 			mockMessageEncoder := messagemocks.NewMockEncoder(ctrl)
+			mockMessageEncoder.EXPECT().IsCompressionEnabled().Return(false)
 			mockSerializer := serializemocks.NewMockSerializer(ctrl)
 			mockSerializer.EXPECT().GetName()
 
@@ -829,6 +939,7 @@ func TestOnSessionClosed(t *testing.T) {
 	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
 	heartbeatAndHandshakeMocks(mockEncoder)
 	mockMessageEncoder := messagemocks.NewMockEncoder(ctrl)
+	mockMessageEncoder.EXPECT().IsCompressionEnabled().Return(false)
 	mockSerializer := serializemocks.NewMockSerializer(ctrl)
 	mockSerializer.EXPECT().GetName()
 	sessionPool := session.NewSessionPool()
@@ -851,6 +962,7 @@ func TestOnSessionClosedRecoversIfPanic(t *testing.T) {
 	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
 	heartbeatAndHandshakeMocks(mockEncoder)
 	mockMessageEncoder := messagemocks.NewMockEncoder(ctrl)
+	mockMessageEncoder.EXPECT().IsCompressionEnabled().Return(false)
 	mockSerializer := serializemocks.NewMockSerializer(ctrl)
 	mockSerializer.EXPECT().GetName()
 	sessionPool := session.NewSessionPool()
@@ -893,11 +1005,11 @@ func TestAgentSendHandshakeResponse(t *testing.T) {
 			mockSerializer.EXPECT().GetName()
 
 			sessionPool := session.NewSessionPool()
-			ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool, "")
+			ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, time.Second, 0, nil, mockMessageEncoder, nil, sessionPool, "").(*agentImpl)
 			assert.NotNil(t, ag)
 
 			mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
-			mockConn.EXPECT().Write(hrd).Return(0, table.err)
+			mockConn.EXPECT().Write(ag.packetData.handshakeResponse).Return(0, table.err)
 			err := ag.SendHandshakeResponse()
 			assert.Equal(t, table.err, err)
 		})
@@ -924,7 +1036,7 @@ func TestAgentSendHeartbeatResponse(t *testing.T) {
 	assert.NoError(t, err)
 	pWrite := helpers.ShouldEventuallyReceive(t, ag.chSend).(pendingWrite)
 	assert.NotNil(t, pWrite.ctx)
-	assert.Equal(t, hbAck, pWrite.data)
+	assert.Equal(t, ag.packetData.heartbeatAck, pWrite.data)
 
 	const timestamp = int64(123456789)
 	timestampData := make([]byte, 8)
@@ -1151,7 +1263,7 @@ func TestAgentHandle(t *testing.T) {
 
 	mockSerializer := serializemocks.NewMockSerializer(ctrl)
 	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
-	heartbeatAndHandshakeMocks(mockEncoder)
+	heartbeatPacket := heartbeatAndHandshakeMocks(mockEncoder)
 	mockConn := mocks.NewMockPlayerConn(ctrl)
 	messageEncoder := message.NewMessagesEncoder(false)
 	mockSerializer.EXPECT().GetName()
@@ -1164,7 +1276,7 @@ func TestAgentHandle(t *testing.T) {
 
 	// Sends two heartbeats and then times out
 	mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil).Times(3)
-	mockConn.EXPECT().Write(hbd).Return(0, nil).Times(2)
+	mockConn.EXPECT().Write(heartbeatPacket).Return(0, nil).Times(2)
 	var wg sync.WaitGroup
 	wg.Add(1)
 

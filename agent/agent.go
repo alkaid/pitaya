@@ -58,21 +58,16 @@ import (
 	netutil "github.com/alkaid/pitaya/v2/util/net"
 )
 
-var (
-	// hbd contains the heartbeat packet data
-	hbd []byte
-	// hbd contains the heartbeat ack packet data
-	hbAck []byte
-	// hrd contains the handshake response data
-	hrd []byte
-	// herd contains the handshake error response data
-	herd []byte
-	once sync.Once
-)
-
 const handlerType = "handler"
 
 type (
+	agentPacketData struct {
+		heartbeat              []byte
+		heartbeatAck           []byte
+		handshakeResponse      []byte
+		handshakeErrorResponse []byte
+	}
+
 	agentImpl struct {
 		Session              session.Session // session
 		sessionPool          session.SessionPool
@@ -91,6 +86,7 @@ type (
 		messageEncoder       message.Encoder
 		messagesBufferSize   int // size of the pending messages buffer
 		metricsReporters     []metrics.Reporter
+		packetData           *agentPacketData
 		serializer           serialize.Serializer // message serializer
 		state                int32                // current agent state
 		trustedProxies       netutil.TrustedProxies
@@ -146,6 +142,7 @@ type (
 		messageEncoder     message.Encoder
 		messagesBufferSize int // size of the pending messages buffer
 		metricsReporters   []metrics.Reporter
+		packetData         func() *agentPacketData
 		serializer         serialize.Serializer // message serializer
 		serverID           string
 		trustedProxies     netutil.TrustedProxies
@@ -232,15 +229,24 @@ func newAgentFactory(
 		messagesBufferSize: messagesBufferSize,
 		sessionPool:        sessionPool,
 		metricsReporters:   metricsReporters,
-		serializer:         serializer,
-		serverID:           serverID,
-		trustedProxies:     trustedProxies,
+		// Applications may install the route dictionary after Build but before Start.
+		packetData: sync.OnceValue(func() *agentPacketData {
+			return encodeAgentPacketData(
+				heartbeatTimeout,
+				encoder,
+				messageEncoder.IsCompressionEnabled(),
+				serializer.GetName(),
+			)
+		}),
+		serializer:     serializer,
+		serverID:       serverID,
+		trustedProxies: trustedProxies,
 	}
 }
 
 // CreateAgent returns a new agent
 func (f *agentFactoryImpl) CreateAgent(conn net.Conn) Agent {
-	return newAgentWithTrustedProxies(conn, f.decoder, f.encoder, f.serializer, f.heartbeatTimeout, f.messagesBufferSize, f.appDieChan, f.messageEncoder, f.metricsReporters, f.sessionPool, f.serverID, f.trustedProxies)
+	return newAgentWithTrustedProxies(conn, f.decoder, f.encoder, f.serializer, f.heartbeatTimeout, f.messagesBufferSize, f.appDieChan, f.messageEncoder, f.metricsReporters, f.sessionPool, f.serverID, f.trustedProxies, f.packetData())
 }
 
 // NewAgent create new agent instance
@@ -257,6 +263,13 @@ func newAgent(
 	sessionPool session.SessionPool,
 	serverID string,
 ) Agent {
+	packetData := encodeAgentPacketData(
+		heartbeatTime,
+		packetEncoder,
+		messageEncoder.IsCompressionEnabled(),
+		serializer.GetName(),
+	)
+
 	return newAgentWithTrustedProxies(
 		conn,
 		packetDecoder,
@@ -270,6 +283,7 @@ func newAgent(
 		sessionPool,
 		serverID,
 		netutil.TrustedProxies{},
+		packetData,
 	)
 }
 
@@ -286,15 +300,8 @@ func newAgentWithTrustedProxies(
 	sessionPool session.SessionPool,
 	serverID string,
 	trustedProxies netutil.TrustedProxies,
+	packetData *agentPacketData,
 ) Agent {
-	// initialize heartbeat and handshake data on first user connection
-	serializerName := serializer.GetName()
-
-	once.Do(func() {
-		hbdEncode(heartbeatTime, packetEncoder, messageEncoder.IsCompressionEnabled(), serializerName)
-		herdEncode(heartbeatTime, packetEncoder, messageEncoder.IsCompressionEnabled(), serializerName)
-	})
-
 	a := &agentImpl{
 		appDieChan:           dieChan,
 		chDie:                make(chan struct{}),
@@ -312,6 +319,7 @@ func newAgentWithTrustedProxies(
 		state:                constants.StatusStart,
 		messageEncoder:       messageEncoder,
 		metricsReporters:     metricsReporters,
+		packetData:           packetData,
 		sessionPool:          sessionPool,
 		trustedProxies:       trustedProxies,
 	}
@@ -683,17 +691,17 @@ func (a *agentImpl) onSessionClosed(s session.Session, callback map[string]strin
 
 // SendHandshakeResponse sends a handshake response
 func (a *agentImpl) SendHandshakeResponse() error {
-	_, err := a.connWriteWithDeadline(hrd)
+	_, err := a.connWriteWithDeadline(a.packetData.handshakeResponse)
 
 	return err
 }
 func (a *agentImpl) SendHandshakeErrorResponse() error {
-	_, err := a.connWriteWithDeadline(herd)
+	_, err := a.connWriteWithDeadline(a.packetData.handshakeErrorResponse)
 
 	return err
 }
 func (a *agentImpl) SendHeartbeatResponse(unixMillTime int64) error {
-	hbAckData := hbAck
+	hbAckData := a.packetData.heartbeatAck
 	var err error
 	if unixMillTime > 0 {
 		bs := make([]byte, 8)
@@ -701,7 +709,7 @@ func (a *agentImpl) SendHeartbeatResponse(unixMillTime int64) error {
 		hbAckData, err = a.encoder.Encode(packet.HeartbeatAck, bs)
 		if err != nil {
 			logger.Zap.Error("encode heartbeat ack error ")
-			hbAckData = hbAck
+			hbAckData = a.packetData.heartbeatAck
 		}
 	}
 
@@ -785,7 +793,7 @@ func (a *agentImpl) AnswerWithError(ctx context.Context, mid uint, err error) {
 	}
 }
 
-func hbdEncode(heartbeatTimeout time.Duration, packetEncoder codec.PacketEncoder, dataCompression bool, serializerName string) {
+func encodeAgentPacketData(heartbeatTimeout time.Duration, packetEncoder codec.PacketEncoder, dataCompression bool, serializerName string) *agentPacketData {
 	hData := map[string]interface{}{
 		"code": 200,
 		"sys": map[string]interface{}{
@@ -800,22 +808,20 @@ func hbdEncode(heartbeatTimeout time.Duration, packetEncoder codec.PacketEncoder
 		panic(err)
 	}
 
-	hrd, err = packetEncoder.Encode(packet.Handshake, data)
+	handshakeResponse, err := packetEncoder.Encode(packet.Handshake, data)
 	if err != nil {
 		panic(err)
 	}
 
-	hbd, err = packetEncoder.Encode(packet.Heartbeat, nil)
+	heartbeat, err := packetEncoder.Encode(packet.Heartbeat, nil)
 	if err != nil {
 		panic(err)
 	}
-	hbAck, err = packetEncoder.Encode(packet.HeartbeatAck, nil)
+	heartbeatAck, err := packetEncoder.Encode(packet.HeartbeatAck, nil)
 	if err != nil {
 		panic(err)
 	}
-}
 
-func herdEncode(heartbeatTimeout time.Duration, packetEncoder codec.PacketEncoder, dataCompression bool, serializerName string) {
 	hErrData := map[string]interface{}{
 		"code": 400,
 		"sys": map[string]interface{}{
@@ -830,9 +836,16 @@ func herdEncode(heartbeatTimeout time.Duration, packetEncoder codec.PacketEncode
 		panic(err)
 	}
 
-	herd, err = packetEncoder.Encode(packet.Handshake, errData)
+	handshakeErrorResponse, err := packetEncoder.Encode(packet.Handshake, errData)
 	if err != nil {
 		panic(err)
+	}
+
+	return &agentPacketData{
+		heartbeat:              heartbeat,
+		heartbeatAck:           heartbeatAck,
+		handshakeResponse:      handshakeResponse,
+		handshakeErrorResponse: handshakeErrorResponse,
 	}
 }
 
