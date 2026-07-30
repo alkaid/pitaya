@@ -596,7 +596,7 @@ type parallelGetter struct {
 	workChan    chan parallelGetterWork
 }
 
-func newParallelGetter(cli *clientv3.Client, numWorkers int) *parallelGetter {
+func newParallelGetter(cli *clientv3.Client, numWorkers int) (*parallelGetter, error) {
 	if numWorkers <= 0 {
 		numWorkers = 10
 	}
@@ -607,13 +607,15 @@ func newParallelGetter(cli *clientv3.Client, numWorkers int) *parallelGetter {
 		wg:         new(sync.WaitGroup),
 		result:     new([]*Server),
 	}
-	p.start()
-	return &p
+	if err := p.start(); err != nil {
+		return nil, errors.Wrap(err, "start parallel etcd getter")
+	}
+	return &p, nil
 }
 
-func (p *parallelGetter) start() {
+func (p *parallelGetter) start() error {
 	for i := 0; i < p.numWorkers; i++ {
-		co.Go(func() {
+		if err := co.Submit(func() {
 			for work := range p.workChan {
 				logger.Zap.Debug("loading info from missing server", zap.String("svType", work.serverType), zap.String("svID", work.serverID))
 				var sv *Server
@@ -635,8 +637,12 @@ func (p *parallelGetter) start() {
 
 				p.wg.Done()
 			}
-		})
+		}); err != nil {
+			close(p.workChan)
+			return err
+		}
 	}
+	return nil
 }
 
 func (p *parallelGetter) waitAndGetResult() []*Server {
@@ -694,7 +700,10 @@ func (sd *etcdServiceDiscovery) SyncServers(firstSync bool) error {
 	var allIds = make([]string, 0)
 
 	// Spawn worker goroutines that will work in parallel
-	parallelGetter := newParallelGetter(sd.cli, sd.syncServersParallelism)
+	parallelGetter, err := newParallelGetter(sd.cli, sd.syncServersParallelism)
+	if err != nil {
+		return err
+	}
 
 	for _, kv := range kvs.Kvs {
 		svType, svID, err := parseEtcdKey(string(kv.Key))

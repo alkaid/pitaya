@@ -488,6 +488,39 @@ func TestNatsRPCServerInitShouldFailIfConnFails(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestNatsRPCServerInitPropagatesHandlerSubmissionError(t *testing.T) {
+	if os.Getenv(statelessSubmissionErrorHelperEnv) != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestNatsRPCServerInitPropagatesHandlerSubmissionError$")
+		cmd.Env = append(os.Environ(), statelessSubmissionErrorHelperEnv+"=1")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("nats init submission helper failed: %v\n%s", err, output)
+		}
+		return
+	}
+
+	s := helpers.GetTestNatsServer(t)
+	defer s.Shutdown()
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	cfg.Connect = fmt.Sprintf("nats://%s", s.Addr())
+	ctrl := gomock.NewController(t)
+	mockSessionPool := sessionmocks.NewMockSessionPool(ctrl)
+	rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, nil, mockSessionPool)
+	require.NoError(t, err)
+
+	ants.Release()
+	err = rpcServer.Init()
+	require.ErrorIs(t, err, ants.ErrPoolClosed)
+	require.NotNil(t, rpcServer.conn)
+	assert.True(t, rpcServer.conn.IsClosed())
+}
+
+func TestNatsRPCServerShutdownIsIdempotent(t *testing.T) {
+	rpcServer := &NatsRPCServer{stopChan: make(chan bool)}
+	require.NoError(t, rpcServer.Shutdown())
+	require.NoError(t, rpcServer.Shutdown())
+}
+
 func TestNatsRPCServerInit(t *testing.T) {
 	s := helpers.GetTestNatsServer(t)
 	ctrl := gomock.NewController(t)

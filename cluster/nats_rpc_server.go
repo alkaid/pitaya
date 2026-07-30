@@ -71,6 +71,7 @@ type NatsRPCServer struct {
 	sessionPool            session.SessionPool
 	appDieChan             chan bool
 	reqTimeout             time.Duration
+	handlersStopped        bool
 }
 
 // NewNatsRPCServer ctor
@@ -375,9 +376,6 @@ func (ns *NatsRPCServer) processKick() {
 
 // Init inits nats rpc server
 func (ns *NatsRPCServer) Init() error {
-	// TODO should we have concurrency here? it feels like we should
-	co.Go(func() { ns.handleMessages() })
-
 	logger.Log.Debugf("connecting to nats (server) with timeout of %s", ns.connectionTimeout)
 	conn, err := setupNatsConn(
 		ns.connString,
@@ -389,6 +387,11 @@ func (ns *NatsRPCServer) Init() error {
 		return err
 	}
 	ns.conn = conn
+	defer func() {
+		if err != nil {
+			conn.Close()
+		}
+	}()
 	if ns.sub, err = ns.subscribe(getChannel(ns.server.Type, ns.server.ID), false); err != nil {
 		return err
 	}
@@ -430,24 +433,43 @@ func (ns *NatsRPCServer) Init() error {
 	// }
 	// ns.broadcastSubs = append(ns.broadcastSubs, bcstSub)
 
-	err = ns.subscribeToBindingsChannel()
-	if err != nil {
+	if err = ns.subscribeToBindingsChannel(); err != nil {
 		return err
 	}
-	// this handles remote messages
-	// for i := 0; i < ns.service; i++ {
-	// 	threadID := i // 避免闭包值拷贝问题
-	// 	co.Go(func() { ns.processMessages(threadID) })
-	// }
-	// 以上改为单线程 使投递过程保序 投递后再session多线程处理
-	co.Go(func() { ns.processMessages(0) })
+
+	// Keep message delivery ordered here; requests fan out through the keyed
+	// session pools after this single dispatcher accepts them.
+	handlers := []func(){
+		func() { ns.processMessages(0) },
+		ns.processSessionBindings,
+		ns.handleMessages,
+		ns.processPushes,
+		ns.processKick,
+	}
+	accepted := 0
+	for _, handler := range handlers {
+		if err = co.Submit(handler); err != nil {
+			conn.Close()
+			// Once admitted, handleMessages owns the request-channel shutdown.
+			if accepted >= 3 {
+				ns.stopHandlers()
+			} else {
+				if accepted > 0 {
+					close(ns.unhandledReqCh)
+				}
+				if accepted > 1 {
+					close(ns.bindingsChan)
+				}
+			}
+			if accepted > 3 {
+				close(ns.userPushCh)
+			}
+			return errors.Wrap(err, "start nats rpc handler")
+		}
+		accepted++
+	}
 
 	ns.sessionPool.OnSessionBind(ns.onSessionBind)
-
-	// this should be so fast that we shoudn't need concurrency
-	co.Go(func() { ns.processPushes() })
-	co.Go(func() { ns.processSessionBindings() })
-	co.Go(func() { ns.processKick() })
 
 	return nil
 }
@@ -460,8 +482,16 @@ func (ns *NatsRPCServer) BeforeShutdown() {}
 
 // Shutdown stops nats rpc server
 func (ns *NatsRPCServer) Shutdown() error {
-	close(ns.stopChan)
+	ns.stopHandlers()
 	return nil
+}
+
+func (ns *NatsRPCServer) stopHandlers() {
+	if ns.handlersStopped {
+		return
+	}
+	close(ns.stopChan)
+	ns.handlersStopped = true
 }
 
 func (ns *NatsRPCServer) subscribe(topic string, queue bool) (*nats.Subscription, error) {

@@ -9,7 +9,7 @@
 // returning errors.
 
 // 拷贝自 golang.org/x/sync@v0.7.0/errgroup/errgroup.go
-// 仅修改了一项 将原声goroutine改为了 co.Go
+// 使用 stateless pool 执行任务，并由 Wait 返回 pool submission error。
 
 package co
 
@@ -44,6 +44,33 @@ func (g *Group) done() {
 	g.wg.Done()
 }
 
+func (g *Group) setError(err error) {
+	g.errOnce.Do(func() {
+		g.err = err
+		if g.cancel != nil {
+			g.cancel(g.err)
+		}
+	})
+}
+
+func (g *Group) submit(f func() error) bool {
+	g.wg.Add(1)
+	err := Submit(func() {
+		defer g.done()
+
+		if err := f(); err != nil {
+			g.setError(err)
+		}
+	})
+	if err == nil {
+		return true
+	}
+
+	g.setError(fmt.Errorf("errgroup: submit task: %w", err))
+	g.done()
+	return false
+}
+
 // WithContext returns a new Group and an associated Context derived from ctx.
 //
 // The derived Context is canceled the first time a function passed to Go
@@ -70,30 +97,20 @@ func (g *Group) Wait() error {
 //
 // The first call to return a non-nil error cancels the group's context, if the
 // group was created by calling WithContext. The error will be returned by Wait.
+// A stateless-pool submission error is handled the same way.
 func (g *Group) Go(f func() error) {
 	if g.sem != nil {
 		g.sem <- token{}
 	}
 
-	g.wg.Add(1)
-	Go(func() {
-		defer g.done()
-
-		if err := f(); err != nil {
-			g.errOnce.Do(func() {
-				g.err = err
-				if g.cancel != nil {
-					g.cancel(g.err)
-				}
-			})
-		}
-	})
+	g.submit(f)
 }
 
 // TryGo calls the given function in a new goroutine only if the number of
 // active goroutines in the group is currently below the configured limit.
 //
 // The return value reports whether the goroutine was started.
+// A stateless-pool submission error also returns false and is returned by Wait.
 func (g *Group) TryGo(f func() error) bool {
 	if g.sem != nil {
 		select {
@@ -104,20 +121,7 @@ func (g *Group) TryGo(f func() error) bool {
 		}
 	}
 
-	g.wg.Add(1)
-	Go(func() {
-		defer g.done()
-
-		if err := f(); err != nil {
-			g.errOnce.Do(func() {
-				g.err = err
-				if g.cancel != nil {
-					g.cancel(g.err)
-				}
-			})
-		}
-	})
-	return true
+	return g.submit(f)
 }
 
 // SetLimit limits the number of active goroutines in this group to at most n.

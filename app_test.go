@@ -22,13 +22,16 @@ package pitaya
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/alkaid/ants/v2"
 	"github.com/alkaid/pitaya/v2/session"
 
 	"github.com/alkaid/pitaya/v2/acceptor"
@@ -47,6 +50,8 @@ import (
 	"go.uber.org/mock/gomock"
 	"google.golang.org/protobuf/types/descriptorpb"
 )
+
+const appSubmissionErrorHelperEnv = "PITAYA_TEST_APP_SUBMISSION_ERROR"
 
 var (
 	tables = []struct {
@@ -502,6 +507,52 @@ func TestStartWorker(t *testing.T) {
 
 	app.StartWorker()
 	assert.True(t, app.worker.Started())
+}
+
+func TestAppStatelessStartupFailsFast(t *testing.T) {
+	if os.Getenv(appSubmissionErrorHelperEnv) != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestAppStatelessStartupFailsFast$")
+		cmd.Env = append(os.Environ(), appSubmissionErrorHelperEnv+"=1")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("app submission helper failed: %v\n%s", err, output)
+		}
+		return
+	}
+
+	cfg := config.NewDefaultPitayaConfig()
+	cfg.Concurrency.Handler.Dispatch = 0
+	acc := acceptor.NewTCPAcceptor("127.0.0.1:0")
+	builder := newAppTestBuilder(true, "testtype", Standalone, map[string]string{}, *cfg)
+	builder.AddAcceptor(acc)
+	app := builder.Build().(*App)
+	comp := &MyComp{}
+	app.Register(comp)
+	recoverError := func(call func()) error {
+		var panicValue any
+		func() {
+			defer func() { panicValue = recover() }()
+			call()
+		}()
+		panicErr, ok := panicValue.(error)
+		if !ok {
+			t.Fatalf("panic = %v, want error", panicValue)
+		}
+		return panicErr
+	}
+
+	ants.Release()
+	assert.True(t, errors.Is(recoverError(app.Start), ants.ErrPoolClosed))
+	assert.False(t, app.running)
+	assert.False(t, acc.IsRunning())
+	assert.False(t, comp.running)
+	assert.Equal(t, 1, comp.initCount)
+	assert.Equal(t, 1, comp.afterInitCount)
+	assert.Equal(t, 1, comp.beforeShutdownCount)
+	assert.Equal(t, 1, comp.shutdownCount)
+
+	assert.True(t, errors.Is(recoverError(app.StartWorker), ants.ErrPoolClosed))
+	assert.False(t, app.worker.Started())
 }
 
 func TestRegisterRPCJob(t *testing.T) {

@@ -22,6 +22,7 @@ package pitaya
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"reflect"
@@ -659,7 +660,7 @@ func (app *App) OnStarted(fun func()) {
 	app.onStarted = fun
 }
 
-// Start starts the app
+// Start starts the app. It panics if a required runtime task cannot be admitted.
 func (app *App) Start() {
 	if !app.server.Frontend && len(app.acceptors) > 0 {
 		logger.Log.Fatal("acceptors are not allowed on backend servers")
@@ -688,9 +689,12 @@ func (app *App) Start() {
 		}
 	}
 
+	if err := app.listen(); err != nil {
+		timer.GlobalTicker.Stop()
+		app.shutdownComponents()
+		panic(fmt.Errorf("start app: %w", err))
+	}
 	app.periodicMetrics()
-
-	app.listen()
 
 	defer func() {
 		timer.GlobalTicker.Stop()
@@ -759,41 +763,15 @@ func (app *App) Start() {
 	app.shutdownComponents()
 }
 
-func (app *App) listen() {
+func (app *App) listen() error {
 	app.startupComponents()
 	// create global ticker instance, timer precision could be customized
 	// by SetTimerPrecision
 	timer.GlobalTicker = time.NewTicker(timer.Precision)
 
 	logger.Sugar.Infof("starting server %s:%s", app.server.Type, app.server.ID)
-	for i := 0; i < app.config.Concurrency.Handler.Dispatch; i++ {
-		threadID := i // 避免闭包值拷贝问题
-		co.Go(func() { app.handlerService.Dispatch(threadID) })
-	}
-	for _, acc := range app.acceptors {
-		a := acc
-		// TODO 池化效果待验证
-		co.Go(func() {
-			for conn := range a.GetConnChan() {
-				conn2 := conn
-				co.Go(func() { app.handlerService.Handle(conn2) })
-			}
-		})
-		if app.config.Acceptor.ProxyProtocol {
-			logger.Zap.Info("Enabling PROXY protocol for inbound connections")
-			a.EnableProxyProtocol()
-		} else {
-			logger.Zap.Debug("PROXY protocol is disabled for inbound connections")
-		}
-		co.Go(func() {
-			a.ListenAndServe()
-		})
-		logger.Sugar.Infof("Waiting for Acceptor %s to start on addr %s", reflect.TypeOf(a), a.GetConfiguredAddress())
-
-		for !a.IsRunning() {
-		}
-
-		logger.Sugar.Infof("Acceptor %s on addr %s is now accepting connections", reflect.TypeOf(a), a.GetAddr())
+	if err := app.startRuntimeTasks(); err != nil {
+		return err
 	}
 
 	// 改为强制唯一session
@@ -816,6 +794,46 @@ func (app *App) listen() {
 	logger.Zap.Info("all modules started!")
 
 	app.running = true
+	return nil
+}
+
+func (app *App) startRuntimeTasks() error {
+	for i := 0; i < app.config.Concurrency.Handler.Dispatch; i++ {
+		threadID := i // 避免闭包值拷贝问题
+		if err := co.Submit(func() { app.handlerService.Dispatch(threadID) }); err != nil {
+			return fmt.Errorf("start handler dispatcher %d: %w", threadID, err)
+		}
+	}
+	for _, acc := range app.acceptors {
+		a := acc
+		// TODO 池化效果待验证
+		if err := co.Submit(func() {
+			for conn := range a.GetConnChan() {
+				conn2 := conn
+				co.Go(func() { app.handlerService.Handle(conn2) })
+			}
+		}); err != nil {
+			return fmt.Errorf("start acceptor connection reader: %w", err)
+		}
+		if app.config.Acceptor.ProxyProtocol {
+			logger.Zap.Info("Enabling PROXY protocol for inbound connections")
+			a.EnableProxyProtocol()
+		} else {
+			logger.Zap.Debug("PROXY protocol is disabled for inbound connections")
+		}
+		if err := co.Submit(func() {
+			a.ListenAndServe()
+		}); err != nil {
+			return fmt.Errorf("start acceptor: %w", err)
+		}
+		logger.Sugar.Infof("Waiting for Acceptor %s to start on addr %s", reflect.TypeOf(a), a.GetConfiguredAddress())
+
+		for !a.IsRunning() {
+		}
+
+		logger.Sugar.Infof("Acceptor %s on addr %s is now accepting connections", reflect.TypeOf(a), a.GetAddr())
+	}
+	return nil
 }
 
 // SetDictionary sets routes map
@@ -957,9 +975,11 @@ func FileDescriptor(protoName string, protoDescs map[string]*descriptorpb.FileDe
 	return docgenerator.ProtoFileDescriptors(protoName, protoDescs)
 }
 
-// StartWorker configures, starts and returns pitaya worker
+// StartWorker starts the pitaya worker and panics if it cannot be admitted.
 func (app *App) StartWorker() {
-	app.worker.Start()
+	if err := app.worker.StartWithError(); err != nil {
+		panic(err)
+	}
 }
 
 // RegisterRPCJob registers rpc job to execute jobs with retries

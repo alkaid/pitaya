@@ -24,11 +24,14 @@ package modules
 
 import (
 	"bufio"
+	"fmt"
+	"io"
 	"os/exec"
 	"runtime"
 	"syscall"
 	"time"
 
+	"github.com/alkaid/pitaya/v2/co"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/logger"
 )
@@ -63,29 +66,65 @@ func (b *Binary) GetExitChannel() chan struct{} {
 	return b.exitCh
 }
 
+func closeBinaryPipe(parent io.Closer, child io.Writer) {
+	if parent != nil {
+		_ = parent.Close()
+	}
+	if childCloser, ok := child.(io.Closer); ok {
+		_ = childCloser.Close()
+	}
+}
+
 // Init initializes the binary
 func (b *Binary) Init() error {
 	b.cmd = exec.Command(b.binPath, b.args...)
-	stdout, _ := b.cmd.StdoutPipe()
+	stdout, err := b.cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("create binary stdout pipe: %w", err)
+	}
 	stdOutScanner := bufio.NewScanner(stdout)
-	stderr, _ := b.cmd.StderrPipe()
+	stderr, err := b.cmd.StderrPipe()
+	if err != nil {
+		closeBinaryPipe(stdout, b.cmd.Stdout)
+		return fmt.Errorf("create binary stderr pipe: %w", err)
+	}
 	stdErrScanner := bufio.NewScanner(stderr)
-	go func() {
-		for stdOutScanner.Scan() {
-			logger.Log.Info(stdOutScanner.Text())
+	processStarted := make(chan struct{})
+	monitors := []func(){
+		func() {
+			for stdOutScanner.Scan() {
+				logger.Log.Info(stdOutScanner.Text())
+			}
+		},
+		func() {
+			for stdErrScanner.Scan() {
+				logger.Log.Error(stdErrScanner.Text())
+			}
+		},
+		func() {
+			<-processStarted
+			_ = b.cmd.Wait()
+			close(b.exitCh)
+		},
+	}
+	for _, monitor := range monitors {
+		if err := co.Submit(monitor); err != nil {
+			closeBinaryPipe(stdout, b.cmd.Stdout)
+			closeBinaryPipe(stderr, b.cmd.Stderr)
+			close(processStarted)
+			return fmt.Errorf("start binary monitor: %w", err)
 		}
-	}()
-	go func() {
-		for stdErrScanner.Scan() {
-			logger.Log.Error(stdErrScanner.Text())
-		}
-	}()
-	err := b.cmd.Start()
-	go func() {
-		b.cmd.Wait()
-		close(b.exitCh)
-	}()
-	return err
+	}
+
+	err = b.cmd.Start()
+	if err != nil {
+		closeBinaryPipe(stdout, nil)
+		closeBinaryPipe(stderr, nil)
+		close(processStarted)
+		return err
+	}
+	close(processStarted)
+	return nil
 }
 
 // sendCtrlBreak sends a ctrl break signal to the process, this is a replacement for syscall.SIGTERM in windows
@@ -107,6 +146,9 @@ func sendCtrlBreak(pid int) error {
 
 // Shutdown shutdowns the binary module
 func (b *Binary) Shutdown() error {
+	if b.cmd == nil || b.cmd.Process == nil {
+		return nil
+	}
 	if runtime.GOOS == "windows" { // windows does not support SIGTERM
 		if err := sendCtrlBreak(b.cmd.Process.Pid); err != nil {
 			return err

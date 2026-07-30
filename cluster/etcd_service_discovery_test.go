@@ -25,15 +25,19 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
+	"os/exec"
 	"runtime"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/alkaid/ants/v2"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/helpers"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
@@ -597,7 +601,8 @@ func TestParallelGetter(t *testing.T) {
 		assert.NoError(t, err)
 	}
 
-	parallelGetter := newParallelGetter(cli, 5)
+	parallelGetter, err := newParallelGetter(cli, 5)
+	require.NoError(t, err)
 	for _, serverToAdd := range serversToAdd {
 		payload := []byte("{\"id\":\"" + serverToAdd.ID + "\",\"type\":\"" + serverToAdd.Type + "\",\"frontend\":true,\"hostname\":\"" + serverToAdd.ID + "\",\"metadata\":{\"region\":\"us\"}}")
 		parallelGetter.addWorkWithPayload(serverToAdd.Type, serverToAdd.ID, payload)
@@ -621,4 +626,21 @@ func TestParallelGetter(t *testing.T) {
 		assert.Equal(t, serverToAdd.ID, sv.ID)
 		assert.Equal(t, serverToAdd.Frontend, sv.Frontend)
 	}
+}
+
+func TestNewParallelGetterPropagatesSubmissionError(t *testing.T) {
+	if os.Getenv(statelessSubmissionErrorHelperEnv) != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestNewParallelGetterPropagatesSubmissionError$")
+		cmd.Env = append(os.Environ(), statelessSubmissionErrorHelperEnv+"=1")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("parallel getter submission helper failed: %v\n%s", err, output)
+		}
+		return
+	}
+
+	ants.Release()
+	getter, err := newParallelGetter(nil, 5)
+	require.ErrorIs(t, err, ants.ErrPoolClosed)
+	assert.Nil(t, getter)
 }

@@ -20,11 +20,16 @@
 package modules
 
 import (
+	"os"
+	"os/exec"
 	"testing"
 	"time"
 
+	"github.com/alkaid/ants/v2"
 	"github.com/stretchr/testify/assert"
 )
+
+const binarySubmissionErrorHelperEnv = "PITAYA_TEST_BINARY_SUBMISSION_ERROR"
 
 func TestNewBinary(t *testing.T) {
 	tables := []struct {
@@ -63,8 +68,44 @@ func TestInit(t *testing.T) {
 			b := NewBinary(table.binPath, table.args, table.gracefulShutdownInterval)
 			err := b.Init()
 			assert.NoError(t, err)
+			select {
+			case <-b.GetExitChannel():
+			case <-time.After(5 * time.Second):
+				t.Fatal("binary exit watcher did not observe process exit")
+			}
 		})
 	}
+}
+
+func TestInitPropagatesMonitorSubmissionError(t *testing.T) {
+	if os.Getenv(binarySubmissionErrorHelperEnv) != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestInitPropagatesMonitorSubmissionError$")
+		cmd.Env = append(os.Environ(), binarySubmissionErrorHelperEnv+"=1")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("binary submission helper failed: %v\n%s", err, output)
+		}
+		return
+	}
+
+	ants.Release()
+	b := NewBinary("go", []string{"version"})
+	err := b.Init()
+	assert.ErrorIs(t, err, ants.ErrPoolClosed)
+	assert.Nil(t, b.cmd.Process)
+	stdoutChild, ok := b.cmd.Stdout.(*os.File)
+	if !ok {
+		t.Fatalf("stdout child pipe = %T, want *os.File", b.cmd.Stdout)
+	}
+	stderrChild, ok := b.cmd.Stderr.(*os.File)
+	if !ok {
+		t.Fatalf("stderr child pipe = %T, want *os.File", b.cmd.Stderr)
+	}
+	_, stdoutErr := stdoutChild.Stat()
+	_, stderrErr := stderrChild.Stat()
+	assert.Error(t, stdoutErr)
+	assert.Error(t, stderrErr)
+	assert.NoError(t, b.Shutdown())
 }
 
 func TestShutdown(t *testing.T) {

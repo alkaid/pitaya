@@ -3,14 +3,55 @@ package worker
 import (
 	"context"
 	"errors"
+	"os"
+	"os/exec"
 	"testing"
 
+	"github.com/alkaid/ants/v2"
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/worker/mocks"
 	"github.com/stretchr/testify/assert"
 	workers "github.com/topfreegames/go-workers"
 	"go.uber.org/mock/gomock"
 )
+
+const workerSubmissionErrorHelperEnv = "PITAYA_TEST_WORKER_SUBMISSION_ERROR"
+
+type legacyWorkerStarter interface {
+	Start()
+}
+
+var _ legacyWorkerStarter = (*Worker)(nil)
+
+func TestStartPropagatesSubmissionError(t *testing.T) {
+	if os.Getenv(workerSubmissionErrorHelperEnv) != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestStartPropagatesSubmissionError$")
+		cmd.Env = append(os.Environ(), workerSubmissionErrorHelperEnv+"=1")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("worker submission helper failed: %v\n%s", err, output)
+		}
+		return
+	}
+
+	ants.Release()
+	w := &Worker{}
+	err := w.StartWithError()
+	assert.ErrorIs(t, err, ants.ErrPoolClosed)
+	assert.False(t, w.Started())
+
+	var panicValue any
+	func() {
+		defer func() { panicValue = recover() }()
+		w.Start()
+	}()
+	panicErr, ok := panicValue.(error)
+	if !ok {
+		t.Fatalf("panic = %v, want error", panicValue)
+	}
+	assert.ErrorIs(t, panicErr, ants.ErrPoolClosed)
+	assert.False(t, w.Started())
+}
 
 func TestParsedRPCJob(t *testing.T) {
 	t.Parallel()

@@ -23,17 +23,18 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strconv"
 
 	"go.uber.org/zap"
 
-	workers "github.com/topfreegames/go-workers"
 	"github.com/alkaid/pitaya/v2/co"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/logger/interfaces"
+	workers "github.com/topfreegames/go-workers"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -76,10 +77,20 @@ func (w *Worker) SetLogger(logger interfaces.Logger) {
 	workers.Logger = logger
 }
 
-// Start starts worker in another gorotine
+// Start starts worker in another goroutine and panics if it cannot be admitted.
 func (w *Worker) Start() {
-	co.Go(func() { workers.Start() })
+	if err := w.StartWithError(); err != nil {
+		panic(err)
+	}
+}
+
+// StartWithError starts worker in another goroutine and reports admission errors.
+func (w *Worker) StartWithError() error {
+	if err := co.Submit(workers.Start); err != nil {
+		return fmt.Errorf("start worker: %w", err)
+	}
 	w.started = true
+	return nil
 }
 
 // Started returns true if worker was started
