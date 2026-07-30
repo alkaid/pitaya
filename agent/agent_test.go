@@ -26,12 +26,15 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"net/http"
+	"net/netip"
 	"reflect"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/alkaid/goerrors/apierrors"
+	"github.com/alkaid/pitaya/v2/acceptor"
 	codecmocks "github.com/alkaid/pitaya/v2/conn/codec/mocks"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	messagemocks "github.com/alkaid/pitaya/v2/conn/message/mocks"
@@ -44,8 +47,10 @@ import (
 	"github.com/alkaid/pitaya/v2/mocks"
 	serializemocks "github.com/alkaid/pitaya/v2/serialize/mocks"
 	"github.com/alkaid/pitaya/v2/session"
+	netutil "github.com/alkaid/pitaya/v2/util/net"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 )
 
@@ -154,6 +159,42 @@ func TestNewAgent(t *testing.T) {
 	mockMetricsReporter.EXPECT().ReportGauge(metrics.ConnectedClients, gomock.Any(), gomock.Any())
 	ag = newAgent(nil, nil, mockEncoder, mockSerializer, hbTime, 10, dieChan, messageEncoder, mockMetricsReporters, sessionPool, serverID).(*agentImpl)
 	assert.NotNil(t, ag)
+}
+
+func TestAgentRemoteIPUsesConfiguredTrustedProxies(t *testing.T) {
+	trusted, err := netutil.ParseTrustedProxies([]string{"10.0.0.0/8"})
+	require.NoError(t, err)
+	req := &http.Request{
+		RemoteAddr: "10.0.0.2:443",
+		Header: http.Header{
+			"X-Forwarded-For": []string{"198.51.100.7"},
+		},
+	}
+	wsConn, err := acceptor.NewWSConn(nil, req)
+	require.NoError(t, err)
+
+	ag := &agentImpl{conn: wsConn, trustedProxies: trusted}
+	require.Equal(t, netip.MustParseAddr("198.51.100.7"), ag.RemoteIP())
+
+	ag.trustedProxies = netutil.TrustedProxies{}
+	require.Equal(t, netip.MustParseAddr("10.0.0.2"), ag.RemoteIP())
+}
+
+func TestAgentFactoryConstructorsPreserveDefaultAndTrustedPolicies(t *testing.T) {
+	constructorType := reflect.TypeOf(NewAgentFactory)
+	require.False(t, constructorType.IsVariadic())
+	require.Equal(t, 10, constructorType.NumIn())
+
+	trusted, err := netutil.ParseTrustedProxies([]string{"10.0.0.0/8"})
+	require.NoError(t, err)
+
+	defaultFactory := NewAgentFactory(nil, nil, nil, nil, 0, nil, 0, nil, nil, "").(*agentFactoryImpl)
+	require.False(t, defaultFactory.trustedProxies.Contains(netip.MustParseAddr("10.1.2.3")))
+
+	trustedFactory := NewAgentFactoryWithTrustedProxies(
+		nil, nil, nil, nil, 0, nil, 0, nil, nil, "", trusted,
+	).(*agentFactoryImpl)
+	require.True(t, trustedFactory.trustedProxies.Contains(netip.MustParseAddr("10.1.2.3")))
 }
 
 func TestKick(t *testing.T) {

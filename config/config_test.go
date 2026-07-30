@@ -159,6 +159,21 @@ func TestRPCFanoutConcurrencyConfig(t *testing.T) {
 	require.Equal(t, 7, NewPitayaConfig(NewConfig(viperConfig)).Cluster.RPC.FanoutConcurrency)
 }
 
+func TestTrustedProxyCIDRsConfig(t *testing.T) {
+	t.Parallel()
+
+	defaultConfig := NewDefaultPitayaConfig()
+	require.Empty(t, defaultConfig.Acceptor.TrustedProxyCIDRs)
+
+	viperConfig := viper.New()
+	viperConfig.Set("pitaya.acceptor.trustedproxycidrs", []string{"10.0.0.0/8", "2001:db8::/32"})
+	require.Equal(
+		t,
+		[]string{"10.0.0.0/8", "2001:db8::/32"},
+		NewPitayaConfig(NewConfig(viperConfig)).Acceptor.TrustedProxyCIDRs,
+	)
+}
+
 func TestGoPoolEscapeBudgetConfig(t *testing.T) {
 	t.Parallel()
 

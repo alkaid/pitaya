@@ -136,6 +136,7 @@ func (c *Config) fillDefaultValues() {
 		// a single backend server should have the config pitaya.buffer.cluster.rpc.server.nats.messages bigger
 		// than the sum of the config pitaya.concurrency.handler.dispatch among all frontend servers
 		"pitaya.acceptor.proxyprotocol":                    pitayaConfig.Acceptor.ProxyProtocol,
+		"pitaya.acceptor.trustedproxycidrs":                pitayaConfig.Acceptor.TrustedProxyCIDRs,
 		"pitaya.concurrency.handler.dispatch":              pitayaConfig.Concurrency.Handler.Dispatch,
 		"pitaya.defaultpipelines.structvalidation.enabled": pitayaConfig.DefaultPipelines.StructValidation.Enabled,
 		"pitaya.groups.etcd.dialtimeout":                   pitayaConfig.Groups.Etcd.DialTimeout,

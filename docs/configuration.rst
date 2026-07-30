@@ -4,6 +4,36 @@ Configuration
 
 Pitaya uses Viper to control its configuration. Below we describe the configuration variables split by topic. We judge the default values are good for most cases, but might need to be changed for some use cases.
 
+Network Trust
+=============
+
+WebSocket client addresses default to the socket peer. Forwarded headers are used
+only when the immediate peer is in ``pitaya.acceptor.trustedproxycidrs``. Each
+entry must be a CIDR. Pitaya walks the forwarded chain from right to left, removes
+only trusted proxy hops, and treats the first untrusted address as the client.
+
+.. list-table::
+  :widths: 25 10 10 45
+  :header-rows: 1
+  :stub-columns: 1
+
+  * - Configuration
+    - Default value
+    - Type
+    - Description
+  * - pitaya.acceptor.trustedproxycidrs
+    - []
+    - []string
+    - Trusted immediate reverse-proxy networks allowed to supply ``X-Forwarded-For`` or ``X-Real-IP``; changes require restart
+  * - pitaya.acceptor.proxyprotocol
+    - false
+    - bool
+    - Enables HAProxy PROXY protocol parsing for TCP; the listener must be restricted to trusted senders, and the WebSocket hook is not implemented
+
+Forwarded chains are limited to 4 KiB and 32 addresses. Invalid or oversized
+chains are ignored as a whole and fall back to the socket peer. See
+:doc:`security` for deployment constraints and examples.
+
 Service Discovery
 =================
 

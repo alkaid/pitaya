@@ -16,6 +16,7 @@ Welcome to Pitaya's documentation!
    handshake-validators
    communication
    actor-keyed-executor
+   security
    configuration
    logging
    API

@@ -1,6 +1,8 @@
 package pitaya
 
 import (
+	"fmt"
+
 	"github.com/alkaid/pitaya/v2/acceptor"
 	"github.com/alkaid/pitaya/v2/agent"
 	"github.com/alkaid/pitaya/v2/cluster"
@@ -19,6 +21,7 @@ import (
 	"github.com/alkaid/pitaya/v2/service"
 	"github.com/alkaid/pitaya/v2/session"
 	"github.com/alkaid/pitaya/v2/util"
+	netutil "github.com/alkaid/pitaya/v2/util/net"
 	"github.com/alkaid/pitaya/v2/worker"
 	"github.com/go-redis/redis/v8"
 	"go.uber.org/zap"
@@ -203,6 +206,10 @@ func (builder *Builder) AddPostBuildHook(hook func(app Pitaya)) {
 
 // Build returns a valid App instance
 func (builder *Builder) Build() Pitaya {
+	trustedProxies, err := netutil.ParseTrustedProxies(builder.Config.Acceptor.TrustedProxyCIDRs)
+	if err != nil {
+		panic(fmt.Errorf("invalid pitaya.acceptor.trustedproxycidrs: %w", err))
+	}
 	// 根据配置初始化zap
 	logger.InitLogMgr(builder.Config.Log.Development, builder.Config.Log.Level)
 	if builder.conf != nil {
@@ -242,7 +249,7 @@ func (builder *Builder) Build() Pitaya {
 		builder.RPCServer.SetPitayaServer(remoteService)
 	}
 
-	agentFactory := agent.NewAgentFactory(builder.DieChan,
+	agentFactory := agent.NewAgentFactoryWithTrustedProxies(builder.DieChan,
 		builder.PacketDecoder,
 		builder.PacketEncoder,
 		builder.Serializer,
@@ -252,6 +259,7 @@ func (builder *Builder) Build() Pitaya {
 		builder.SessionPool,
 		builder.MetricsReporters,
 		builder.Server.ID,
+		trustedProxies,
 	)
 
 	handlerService := service.NewHandlerService(

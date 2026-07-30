@@ -93,6 +93,7 @@ type (
 		metricsReporters     []metrics.Reporter
 		serializer           serialize.Serializer // message serializer
 		state                int32                // current agent state
+		trustedProxies       netutil.TrustedProxies
 	}
 
 	pendingMessage struct {
@@ -147,6 +148,7 @@ type (
 		metricsReporters   []metrics.Reporter
 		serializer         serialize.Serializer // message serializer
 		serverID           string
+		trustedProxies     netutil.TrustedProxies
 	}
 )
 
@@ -163,6 +165,64 @@ func NewAgentFactory(
 	metricsReporters []metrics.Reporter,
 	serverID string,
 ) AgentFactory {
+	return newAgentFactory(
+		appDieChan,
+		decoder,
+		encoder,
+		serializer,
+		heartbeatTimeout,
+		messageEncoder,
+		messagesBufferSize,
+		sessionPool,
+		metricsReporters,
+		serverID,
+		netutil.TrustedProxies{},
+	)
+}
+
+// NewAgentFactoryWithTrustedProxies creates an agent factory that accepts
+// forwarded client addresses from explicitly trusted proxy networks.
+func NewAgentFactoryWithTrustedProxies(
+	appDieChan chan bool,
+	decoder codec.PacketDecoder,
+	encoder codec.PacketEncoder,
+	serializer serialize.Serializer,
+	heartbeatTimeout time.Duration,
+	messageEncoder message.Encoder,
+	messagesBufferSize int,
+	sessionPool session.SessionPool,
+	metricsReporters []metrics.Reporter,
+	serverID string,
+	trustedProxies netutil.TrustedProxies,
+) AgentFactory {
+	return newAgentFactory(
+		appDieChan,
+		decoder,
+		encoder,
+		serializer,
+		heartbeatTimeout,
+		messageEncoder,
+		messagesBufferSize,
+		sessionPool,
+		metricsReporters,
+		serverID,
+		trustedProxies,
+	)
+}
+
+func newAgentFactory(
+	appDieChan chan bool,
+	decoder codec.PacketDecoder,
+	encoder codec.PacketEncoder,
+	serializer serialize.Serializer,
+	heartbeatTimeout time.Duration,
+	messageEncoder message.Encoder,
+	messagesBufferSize int,
+	sessionPool session.SessionPool,
+	metricsReporters []metrics.Reporter,
+	serverID string,
+	trustedProxies netutil.TrustedProxies,
+) AgentFactory {
 	return &agentFactoryImpl{
 		appDieChan:         appDieChan,
 		decoder:            decoder,
@@ -174,12 +234,13 @@ func NewAgentFactory(
 		metricsReporters:   metricsReporters,
 		serializer:         serializer,
 		serverID:           serverID,
+		trustedProxies:     trustedProxies,
 	}
 }
 
 // CreateAgent returns a new agent
 func (f *agentFactoryImpl) CreateAgent(conn net.Conn) Agent {
-	return newAgent(conn, f.decoder, f.encoder, f.serializer, f.heartbeatTimeout, f.messagesBufferSize, f.appDieChan, f.messageEncoder, f.metricsReporters, f.sessionPool, f.serverID)
+	return newAgentWithTrustedProxies(conn, f.decoder, f.encoder, f.serializer, f.heartbeatTimeout, f.messagesBufferSize, f.appDieChan, f.messageEncoder, f.metricsReporters, f.sessionPool, f.serverID, f.trustedProxies)
 }
 
 // NewAgent create new agent instance
@@ -195,6 +256,36 @@ func newAgent(
 	metricsReporters []metrics.Reporter,
 	sessionPool session.SessionPool,
 	serverID string,
+) Agent {
+	return newAgentWithTrustedProxies(
+		conn,
+		packetDecoder,
+		packetEncoder,
+		serializer,
+		heartbeatTime,
+		messagesBufferSize,
+		dieChan,
+		messageEncoder,
+		metricsReporters,
+		sessionPool,
+		serverID,
+		netutil.TrustedProxies{},
+	)
+}
+
+func newAgentWithTrustedProxies(
+	conn net.Conn,
+	packetDecoder codec.PacketDecoder,
+	packetEncoder codec.PacketEncoder,
+	serializer serialize.Serializer,
+	heartbeatTime time.Duration,
+	messagesBufferSize int,
+	dieChan chan bool,
+	messageEncoder message.Encoder,
+	metricsReporters []metrics.Reporter,
+	sessionPool session.SessionPool,
+	serverID string,
+	trustedProxies netutil.TrustedProxies,
 ) Agent {
 	// initialize heartbeat and handshake data on first user connection
 	serializerName := serializer.GetName()
@@ -222,6 +313,7 @@ func newAgent(
 		messageEncoder:       messageEncoder,
 		metricsReporters:     metricsReporters,
 		sessionPool:          sessionPool,
+		trustedProxies:       trustedProxies,
 	}
 
 	// binding session
@@ -418,7 +510,7 @@ func (a *agentImpl) RemoteAddr() net.Addr {
 
 func (a *agentImpl) RemoteIP() netip.Addr {
 	if wsConn, ok := a.conn.(*acceptor.WSConn); ok && wsConn.InnerReq() != nil {
-		return netutil.GetClientIP(wsConn.InnerReq())
+		return netutil.GetClientIPWithTrustedProxies(wsConn.InnerReq(), a.trustedProxies)
 	}
 	return netip.Addr{}
 }

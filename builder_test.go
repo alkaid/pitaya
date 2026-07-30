@@ -114,6 +114,17 @@ func TestBuilderPassesRPCFanoutConcurrency(t *testing.T) {
 	assert.Equal(t, int64(7), configuredConcurrency)
 }
 
+func TestBuilderReadsTrustedProxyConfigAtBuild(t *testing.T) {
+	pitayaConfig := config.NewDefaultPitayaConfig()
+	pitayaConfig.Acceptor.TrustedProxyCIDRs = []string{"10.0.0.0/8"}
+	builder := NewDefaultBuilder(false, "standalone", Standalone, nil, *pitayaConfig)
+	builder.Config.Acceptor.TrustedProxyCIDRs = []string{"not-a-cidr"}
+
+	assert.Panics(t, func() {
+		builder.Build()
+	})
+}
+
 func TestBuilderStartConfigModulePolicy(t *testing.T) {
 	for _, mode := range []string{"snapshot", "reloadable"} {
 		t.Run(mode, func(t *testing.T) {

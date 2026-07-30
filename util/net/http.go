@@ -275,82 +275,187 @@ func GetHTTPClient(req *http.Request) string {
 	return "unknown"
 }
 
-// SourceIPs splits the comma separated X-Forwarded-For header and joins it with
-// the X-Real-Ip header and/or req.RemoteAddr, ignoring invalid IPs.
-// The X-Real-Ip is omitted if it's already present in the X-Forwarded-For chain.
-// The req.RemoteAddr is always the last IP in the returned list.
-// It returns nil if all of these are empty or invalid.
-func SourceIPs(req *http.Request) []netip.Addr {
-	var srcIPs []netip.Addr
+const (
+	maxForwardedForHeaderBytes = 4 << 10
+	maxForwardedForAddresses   = 32
+)
 
-	hdr := req.Header
-	// First check the X-Forwarded-For header for requests via proxy.
-	hdrForwardedFor := hdr.Get("X-Forwarded-For")
-	if hdrForwardedFor != "" {
-		// X-Forwarded-For can be a csv of IPs in case of multiple proxies.
-		// Use the first valid one.
-		parts := strings.Split(hdrForwardedFor, ",")
-		for _, part := range parts {
-			ip, err := netip.ParseAddr(strings.TrimSpace(part))
-			if err != nil {
-				logger.Zap.Warn("get ip error", zap.Error(err))
-			} else {
-				srcIPs = append(srcIPs, ip)
-			}
-		}
-	}
-
-	// Try the X-Real-Ip header.
-	hdrRealIp := hdr.Get("X-Real-Ip")
-	if hdrRealIp != "" {
-		ip, err := netip.ParseAddr(strings.TrimSpace(hdrRealIp))
-		if err != nil {
-			logger.Zap.Warn("get ip error", zap.Error(err))
-		} else if !containsIP(srcIPs, ip) {
-			// Only append the X-Real-Ip if it's not already contained in the X-Forwarded-For chain.
-			srcIPs = append(srcIPs, ip)
-		}
-	}
-
-	// Always include the request Remote Address as it cannot be easily spoofed.
-	var remoteIP netip.Addr
-	// Remote Address in Go's HTTP server is in the form host:port so we need to split that first.
-	host, _, err := net.SplitHostPort(req.RemoteAddr)
-	if err == nil {
-		remoteIP, err = netip.ParseAddr(host)
-	}
-	// Fallback if Remote Address was just IP.
-	if err != nil {
-		remoteIP, err = netip.ParseAddr(host)
-	}
-
-	// Don't duplicate remote IP if it's already the last address in the chain.
-	if err == nil && (len(srcIPs) == 0 || remoteIP.Compare(srcIPs[len(srcIPs)-1]) != 0) {
-		srcIPs = append(srcIPs, remoteIP)
-	}
-
-	return srcIPs
+// TrustedProxies is an immutable set of proxy network prefixes.
+type TrustedProxies struct {
+	prefixes []netip.Prefix
 }
 
-// Checks whether the given IP address is contained in the list of IPs.
-func containsIP(ips []netip.Addr, ip netip.Addr) bool {
-	for _, v := range ips {
-		if v.Compare(ip) == 0 {
+// ParseTrustedProxies validates and compiles configured proxy CIDRs.
+func ParseTrustedProxies(cidrs []string) (TrustedProxies, error) {
+	prefixes := make([]netip.Prefix, 0, len(cidrs))
+	for i, cidr := range cidrs {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(cidr))
+		if err != nil {
+			return TrustedProxies{}, fmt.Errorf("trusted proxy CIDR %d %q: %w", i, cidr, err)
+		}
+		prefix, err = normalizeTrustedPrefix(prefix)
+		if err != nil {
+			return TrustedProxies{}, fmt.Errorf("trusted proxy CIDR %d %q: %w", i, cidr, err)
+		}
+		prefixes = append(prefixes, prefix)
+	}
+	return TrustedProxies{prefixes: prefixes}, nil
+}
+
+// Contains reports whether an address belongs to a trusted proxy network.
+func (p TrustedProxies) Contains(ip netip.Addr) bool {
+	ip = normalizeIP(ip)
+	for _, prefix := range p.prefixes {
+		if prefix.Contains(ip) {
 			return true
 		}
 	}
 	return false
 }
 
-// Extracts and returns the clients IP from the given request.
-// Looks at X-Forwarded-For header, X-Real-Ip header and request.RemoteAddr in that order.
-// Returns nil if none of them are set or is set to an invalid value.
+// SourceIPs returns only the socket peer unless trusted proxies are explicitly configured.
+func SourceIPs(req *http.Request) []netip.Addr {
+	return sourceIPsWithTrustedProxies(req, TrustedProxies{})
+}
+
+func sourceIPsWithTrustedProxies(req *http.Request, trustedProxies TrustedProxies) []netip.Addr {
+	if req == nil {
+		return nil
+	}
+	remoteIP, err := parseRemoteIP(req.RemoteAddr)
+	if err != nil {
+		return nil
+	}
+	socketPeer := []netip.Addr{remoteIP}
+	if !trustedProxies.Contains(remoteIP) {
+		return socketPeer
+	}
+
+	forwarded, err := parseForwardedIPs(req.Header)
+	if err != nil {
+		logger.Zap.Warn("ignored forwarded client IP headers",
+			zap.String("peer", remoteIP.String()),
+			zap.Error(err))
+		return socketPeer
+	}
+	if len(forwarded) == 0 {
+		return socketPeer
+	}
+	if forwarded[len(forwarded)-1] == remoteIP {
+		return authoritativeSourceIPs(forwarded, trustedProxies)
+	}
+	return authoritativeSourceIPs(append(forwarded, remoteIP), trustedProxies)
+}
+
+// GetClientIP returns the socket peer. Forwarded headers require explicit trust.
 func GetClientIP(req *http.Request) netip.Addr {
 	ips := SourceIPs(req)
 	if len(ips) == 0 {
 		return netip.Addr{}
 	}
 	return ips[0]
+}
+
+// GetClientIPWithTrustedProxies removes trusted hops from right to left and
+// returns the first untrusted address. A malformed chain falls back to the peer.
+func GetClientIPWithTrustedProxies(req *http.Request, trustedProxies TrustedProxies) netip.Addr {
+	ips := sourceIPsWithTrustedProxies(req, trustedProxies)
+	if len(ips) == 0 {
+		return netip.Addr{}
+	}
+	return ips[0]
+}
+
+func authoritativeSourceIPs(ips []netip.Addr, trustedProxies TrustedProxies) []netip.Addr {
+	firstAuthoritative := len(ips) - 1
+	current := ips[firstAuthoritative]
+	for i := firstAuthoritative - 1; i >= 0 && trustedProxies.Contains(current); i-- {
+		firstAuthoritative = i
+		current = ips[i]
+	}
+	return ips[firstAuthoritative:]
+}
+
+func parseRemoteIP(remoteAddr string) (netip.Addr, error) {
+	if addrPort, err := netip.ParseAddrPort(strings.TrimSpace(remoteAddr)); err == nil {
+		return normalizeIP(addrPort.Addr()), nil
+	}
+	ip, err := netip.ParseAddr(strings.TrimSpace(remoteAddr))
+	if err != nil {
+		return netip.Addr{}, err
+	}
+	return normalizeIP(ip), nil
+}
+
+func parseForwardedIPs(header http.Header) ([]netip.Addr, error) {
+	forwardedFor := header.Values("X-Forwarded-For")
+	if len(forwardedFor) > 0 {
+		return parseForwardedFor(forwardedFor)
+	}
+
+	realIPs := header.Values("X-Real-IP")
+	if len(realIPs) == 0 {
+		return nil, nil
+	}
+	if len(realIPs) != 1 {
+		return nil, fmt.Errorf("X-Real-IP has %d values", len(realIPs))
+	}
+	if len(realIPs[0]) > maxForwardedForHeaderBytes {
+		return nil, fmt.Errorf("X-Real-IP exceeds %d bytes", maxForwardedForHeaderBytes)
+	}
+	ip, err := netip.ParseAddr(strings.TrimSpace(realIPs[0]))
+	if err != nil {
+		return nil, errors.New("X-Real-IP contains an invalid address")
+	}
+	return []netip.Addr{normalizeIP(ip)}, nil
+}
+
+func parseForwardedFor(values []string) ([]netip.Addr, error) {
+	totalBytes := len(values) - 1
+	for _, value := range values {
+		totalBytes += len(value)
+	}
+	if totalBytes > maxForwardedForHeaderBytes {
+		return nil, fmt.Errorf("X-Forwarded-For exceeds %d bytes", maxForwardedForHeaderBytes)
+	}
+
+	addresses := make([]netip.Addr, 0, min(maxForwardedForAddresses, totalBytes/8+1))
+	for _, value := range values {
+		for {
+			token, remaining, found := strings.Cut(value, ",")
+			if len(addresses) == maxForwardedForAddresses {
+				return nil, fmt.Errorf("X-Forwarded-For exceeds %d addresses", maxForwardedForAddresses)
+			}
+			ip, err := netip.ParseAddr(strings.TrimSpace(token))
+			if err != nil {
+				return nil, fmt.Errorf("X-Forwarded-For address %d is invalid", len(addresses))
+			}
+			addresses = append(addresses, normalizeIP(ip))
+			if !found {
+				break
+			}
+			value = remaining
+		}
+	}
+	return addresses, nil
+}
+
+func normalizeIP(ip netip.Addr) netip.Addr {
+	ip = ip.Unmap()
+	if ip.Zone() != "" {
+		ip = ip.WithZone("")
+	}
+	return ip
+}
+
+func normalizeTrustedPrefix(prefix netip.Prefix) (netip.Prefix, error) {
+	if !prefix.Addr().Is4In6() {
+		return prefix.Masked(), nil
+	}
+	if prefix.Bits() < 96 {
+		return netip.Prefix{}, errors.New("IPv4-mapped CIDR prefix length must be at least 96")
+	}
+	return netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96).Masked(), nil
 }
 
 // Prepares the X-Forwarded-For header for another forwarding hop by appending the previous sender's

@@ -51,7 +51,8 @@ type PitayaConfig struct {
 	} `mapstructure:"session"`
 
 	Acceptor struct {
-		ProxyProtocol bool `mapstructure:"proxyprotocol"`
+		ProxyProtocol     bool     `mapstructure:"proxyprotocol"`
+		TrustedProxyCIDRs []string `mapstructure:"trustedproxycidrs"` // Applied at Build; changes require restart.
 	} `mapstructure:"acceptor"`
 	Conn struct {
 		RateLimiting RateLimitingConfig `mapstructure:"rateLimiting"`
@@ -186,9 +187,11 @@ func NewDefaultPitayaConfig() *PitayaConfig {
 		Worker:  *newDefaultWorkerConfig(),
 		Modules: *newDefaultModulesConfig(),
 		Acceptor: struct {
-			ProxyProtocol bool `mapstructure:"proxyprotocol"`
+			ProxyProtocol     bool     `mapstructure:"proxyprotocol"`
+			TrustedProxyCIDRs []string `mapstructure:"trustedproxycidrs"`
 		}{
-			ProxyProtocol: false,
+			ProxyProtocol:     false,
+			TrustedProxyCIDRs: nil,
 		},
 		Conn: struct {
 			RateLimiting RateLimitingConfig `mapstructure:"rateLimiting"`
