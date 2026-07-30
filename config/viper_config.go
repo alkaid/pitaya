@@ -31,9 +31,9 @@ import (
 	errors2 "github.com/alkaid/goerrors/errors"
 	"go.uber.org/zap"
 
+	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/viper"
 	_ "github.com/alkaid/viper/remote"
-	"github.com/alkaid/pitaya/v2/logger"
 )
 
 // ConfLoader 重载监听
@@ -103,6 +103,7 @@ func (c *Config) fillDefaultValues() {
 		"pitaya.buffer.handler.localprocess":                    pitayaConfig.Buffer.Handler.LocalProcess,
 		"pitaya.buffer.handler.remoteprocess":                   pitayaConfig.Buffer.Handler.RemoteProcess,
 		"pitaya.cluster.info.region":                            pitayaConfig.Cluster.Info.Region,
+		"pitaya.cluster.rpc.fanout_concurrency":                 pitayaConfig.Cluster.RPC.FanoutConcurrency,
 		"pitaya.cluster.rpc.client.grpc.dialtimeout":            pitayaConfig.Cluster.RPC.Client.Grpc.DialTimeout,
 		"pitaya.cluster.rpc.client.grpc.requesttimeout":         pitayaConfig.Cluster.RPC.Client.Grpc.RequestTimeout,
 		"pitaya.cluster.rpc.client.grpc.lazyconnection":         pitayaConfig.Cluster.RPC.Client.Grpc.LazyConnection,

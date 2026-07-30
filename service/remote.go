@@ -22,16 +22,19 @@ package service
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
-	"k8s.io/utils/strings/slices"
 	"net/http"
 	"reflect"
+	"runtime/debug"
+	"sort"
 	"sync"
+	"sync/atomic"
 
-	"github.com/alkaid/goerrors/errors"
+	goerrors "github.com/alkaid/goerrors/errors"
 	"github.com/samber/lo"
+	"k8s.io/utils/strings/slices"
 
-	"github.com/alkaid/pitaya/v2/co"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/alkaid/goerrors/apierrors"
@@ -75,9 +78,24 @@ type RemoteService struct {
 	remotes                map[string]*component.Remote      // all remote method
 	remoteSessionListeners []cluster.RemoteSessionListener   // session生命周期监听
 	interceptors           map[string]*component.Interceptor // 所有拦截分发器,优先级别高于 remotes
+	fanoutConcurrency      int
 }
 
-// NewRemoteService creates and return a new RemoteService
+// RemoteServiceOption customizes a RemoteService without changing existing
+// constructor call sites.
+type RemoteServiceOption func(*RemoteService)
+
+// WithFanoutConcurrency sets the maximum number of RPCs a single fanout
+// operation runs concurrently. Non-positive values keep the framework default.
+func WithFanoutConcurrency(concurrency int) RemoteServiceOption {
+	return func(remote *RemoteService) {
+		if concurrency > 0 {
+			remote.fanoutConcurrency = concurrency
+		}
+	}
+}
+
+// NewRemoteService creates and returns a RemoteService with framework defaults.
 func NewRemoteService(
 	rpcClient cluster.RPCClient,
 	rpcServer cluster.RPCServer,
@@ -91,6 +109,50 @@ func NewRemoteService(
 	remoteHooks *pipeline.RemoteHooks,
 	handlerHooks *pipeline.HandlerHooks,
 	handlerPool *HandlerPool,
+
+) *RemoteService {
+	return newRemoteService(
+		rpcClient, rpcServer, sd, encoder, serializer, router, messageEncoder,
+		server, sessionPool, remoteHooks, handlerHooks, handlerPool,
+	)
+}
+
+// NewRemoteServiceWithOptions creates a RemoteService with optional settings.
+func NewRemoteServiceWithOptions(
+	rpcClient cluster.RPCClient,
+	rpcServer cluster.RPCServer,
+	sd cluster.ServiceDiscovery,
+	encoder codec.PacketEncoder,
+	serializer serialize.Serializer,
+	router *router.Router,
+	messageEncoder message.Encoder,
+	server *cluster.Server,
+	sessionPool session.SessionPool,
+	remoteHooks *pipeline.RemoteHooks,
+	handlerHooks *pipeline.HandlerHooks,
+	handlerPool *HandlerPool,
+	opts ...RemoteServiceOption,
+) *RemoteService {
+	return newRemoteService(
+		rpcClient, rpcServer, sd, encoder, serializer, router, messageEncoder,
+		server, sessionPool, remoteHooks, handlerHooks, handlerPool, opts...,
+	)
+}
+
+func newRemoteService(
+	rpcClient cluster.RPCClient,
+	rpcServer cluster.RPCServer,
+	sd cluster.ServiceDiscovery,
+	encoder codec.PacketEncoder,
+	serializer serialize.Serializer,
+	router *router.Router,
+	messageEncoder message.Encoder,
+	server *cluster.Server,
+	sessionPool session.SessionPool,
+	remoteHooks *pipeline.RemoteHooks,
+	handlerHooks *pipeline.HandlerHooks,
+	handlerPool *HandlerPool,
+	opts ...RemoteServiceOption,
 ) *RemoteService {
 	remote := &RemoteService{
 		services:               make(map[string]*component.Service),
@@ -109,10 +171,14 @@ func NewRemoteService(
 		remotes:                make(map[string]*component.Remote),
 		remoteSessionListeners: make([]cluster.RemoteSessionListener, 0),
 		interceptors:           make(map[string]*component.Interceptor),
+		fanoutConcurrency:      constants.DefaultRPCFanoutConcurrency,
 	}
 
 	remote.remoteHooks = remoteHooks
 	remote.handlerHooks = handlerHooks
+	for _, opt := range opts {
+		opt(remote)
+	}
 
 	return remote
 }
@@ -290,7 +356,7 @@ func (r *RemoteService) DoRPC(ctx context.Context, serverID string, route *route
 
 	target, _ := r.serviceDiscovery.GetServer(serverID)
 	if target == nil {
-		return nil, errors.WithStack(fmt.Errorf("%w svID=%s", constants.ErrServerNotFound, serverID))
+		return nil, goerrors.WithStack(fmt.Errorf("%w svID=%s", constants.ErrServerNotFound, serverID))
 	}
 
 	return r.remoteCall(ctx, target, protos.RPCType_User, route, session, msg)
@@ -323,6 +389,235 @@ func (r *RemoteService) DoNotify(ctx context.Context, serverID string, route *ro
 	return err
 }
 
+type remoteFanoutTask struct {
+	server  *cluster.Server
+	route   *route.Route
+	session session.Session
+	msg     *message.Message
+}
+
+type remoteFanoutResult struct {
+	started  bool
+	server   *cluster.Server
+	response *protos.Response
+	err      error
+}
+
+func (r *RemoteService) runFanout(ctx context.Context, tasks []remoteFanoutTask) ([]*protos.Response, error) {
+	responses := make([]*protos.Response, 0, len(tasks))
+	if len(tasks) == 0 {
+		return responses, nil
+	}
+
+	concurrency := r.fanoutConcurrency
+	if concurrency <= 0 {
+		concurrency = constants.DefaultRPCFanoutConcurrency
+	}
+	concurrency = min(concurrency, len(tasks))
+
+	results := make([]remoteFanoutResult, len(tasks))
+	var next atomic.Int64
+	next.Store(-1)
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
+	for range concurrency {
+		go func() {
+			defer wg.Done()
+			for {
+				if ctx.Err() != nil {
+					return
+				}
+				index := int(next.Add(1))
+				if index >= len(tasks) {
+					return
+				}
+				// Cancellation can race with claiming the next task. Recheck before
+				// marking it started so canceled fanouts do not open another RPC.
+				if ctx.Err() != nil {
+					return
+				}
+				results[index].started = true
+				r.executeFanoutTask(ctx, tasks[index], &results[index])
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	errs := make([]error, 0)
+	firstUnstarted := -1
+	for i, result := range results {
+		if !result.started {
+			if firstUnstarted < 0 {
+				firstUnstarted = i
+			}
+			continue
+		}
+		if result.err != nil {
+			errs = append(errs, tasks[i].wrapError(result.server, result.err))
+			continue
+		}
+	}
+
+	if firstUnstarted >= 0 && ctx.Err() != nil {
+		errs = append(errs, tasks[firstUnstarted].wrapError(nil, fmt.Errorf("fanout stopped: %w", ctx.Err())))
+	} else if ctxErr := ctx.Err(); ctxErr != nil {
+		contextReported := false
+		for _, err := range errs {
+			if stderrors.Is(err, ctxErr) {
+				contextReported = true
+				break
+			}
+		}
+		if !contextReported {
+			errs = append(errs, fmt.Errorf("fanout: %w", ctxErr))
+		}
+	}
+
+	successes := make([]int, 0, len(results))
+	for i, result := range results {
+		if result.started && result.err == nil && result.response != nil {
+			successes = append(successes, i)
+		}
+	}
+	sort.Slice(successes, func(i, j int) bool {
+		left := results[successes[i]].server
+		right := results[successes[j]].server
+		if left.ID == right.ID {
+			return left.Type < right.Type
+		}
+		return left.ID < right.ID
+	})
+	for _, index := range successes {
+		responses = append(responses, results[index].response)
+	}
+
+	return responses, stderrors.Join(errs...)
+}
+
+func (r *RemoteService) executeFanoutTask(ctx context.Context, task remoteFanoutTask, result *remoteFanoutResult) {
+	defer func() {
+		if panicValue := recover(); panicValue != nil {
+			result.err = fmt.Errorf("fanout RPC panic: %v", panicValue)
+			logger.Zap.Error("panic in fanout RPC",
+				zap.Any("panic", panicValue),
+				zap.ByteString("stack", debug.Stack()),
+			)
+		}
+	}()
+
+	result.server = task.server
+	if result.server == nil {
+		result.server, result.err = r.resolveRemoteTarget(
+			ctx,
+			protos.RPCType_User,
+			task.route,
+			task.session,
+			task.msg,
+		)
+		if result.err != nil {
+			return
+		}
+	}
+	result.response, result.err = r.remoteCall(
+		ctx,
+		result.server,
+		protos.RPCType_User,
+		task.route,
+		task.session,
+		task.msg,
+	)
+}
+
+func (task remoteFanoutTask) wrapError(target *cluster.Server, err error) error {
+	if target == nil {
+		target = task.server
+	}
+	if target == nil {
+		return fmt.Errorf("server type %s: %w", task.route.SvType, err)
+	}
+	return fmt.Errorf("server %s: %w", target.ID, err)
+}
+
+func (r *RemoteService) snapshotFanoutServers(servers map[string]*cluster.Server) []*cluster.Server {
+	targets := make([]*cluster.Server, 0, len(servers))
+	for _, server := range servers {
+		if server == nil {
+			continue
+		}
+		if r.server != nil && r.server.ID == server.ID {
+			continue
+		}
+		targets = append(targets, server)
+	}
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].ID == targets[j].ID {
+			return targets[i].Type < targets[j].Type
+		}
+		return targets[i].ID < targets[j].ID
+	})
+	return targets
+}
+
+func snapshotServerTypes(servers map[string]*cluster.Server) []*cluster.Server {
+	targets := make([]*cluster.Server, 0, len(servers))
+	for _, server := range servers {
+		if server != nil {
+			targets = append(targets, server)
+		}
+	}
+	sort.Slice(targets, func(i, j int) bool {
+		if targets[i].Type == targets[j].Type {
+			return targets[i].ID < targets[j].ID
+		}
+		return targets[i].Type < targets[j].Type
+	})
+	return targets
+}
+
+func sortFanoutTasks(tasks []remoteFanoutTask) {
+	sort.Slice(tasks, func(i, j int) bool {
+		if tasks[i].route.SvType != tasks[j].route.SvType {
+			return tasks[i].route.SvType < tasks[j].route.SvType
+		}
+		if tasks[i].server == nil {
+			return tasks[j].server != nil
+		}
+		if tasks[j].server == nil {
+			return false
+		}
+		return tasks[i].server.ID < tasks[j].server.ID
+	})
+
+	type taskGroup struct {
+		next int
+		end  int
+	}
+	groups := make([]taskGroup, 0)
+	for start := 0; start < len(tasks); {
+		end := start + 1
+		for end < len(tasks) && tasks[end].route.SvType == tasks[start].route.SvType {
+			end++
+		}
+		groups = append(groups, taskGroup{next: start, end: end})
+		start = end
+	}
+
+	ordered := make([]remoteFanoutTask, 0, len(tasks))
+	for len(groups) > 0 {
+		remaining := groups[:0]
+		for _, group := range groups {
+			ordered = append(ordered, tasks[group.next])
+			group.next++
+			if group.next < group.end {
+				remaining = append(remaining, group)
+			}
+		}
+		groups = remaining
+	}
+	copy(tasks, ordered)
+}
+
 func (r *RemoteService) DoFork(ctx context.Context, route *route.Route, protoData []byte, session session.Session) error {
 	msg := &message.Message{
 		Type:  message.Notify,
@@ -331,6 +626,9 @@ func (r *RemoteService) DoFork(ctx context.Context, route *route.Route, protoDat
 	}
 	// 路由的不是本服务则直接send无须排除
 	if route.SvType != r.server.Type {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("fork stopped: %w", ctxErr)
+		}
 		err := r.rpcClient.Fork(ctx, route, session, msg)
 		if err != nil {
 			logger.Zap.Error("error making fork",
@@ -344,21 +642,23 @@ func (r *RemoteService) DoFork(ctx context.Context, route *route.Route, protoDat
 	if err != nil {
 		return err
 	}
-	// 排除当前副本
-	for _, server := range svs {
-		if r.server.ID == server.ID {
-			continue
+	targets := r.snapshotFanoutServers(svs)
+	errs := make([]error, 0)
+	for _, server := range targets {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			errs = append(errs, fmt.Errorf("server %s: fanout stopped: %w", server.ID, ctxErr))
+			break
 		}
-		_, err2 := r.remoteCall(ctx, server, protos.RPCType_User, route, session, msg)
-		if err2 != nil {
-			err = err2
+		_, callErr := r.remoteCall(ctx, server, protos.RPCType_User, route, session, msg)
+		if callErr != nil {
+			errs = append(errs, fmt.Errorf("server %s: %w", server.ID, callErr))
 			logger.Zap.Error("error making fork",
 				zap.String("uid", lo.If(session == nil, "").ElseF(func() string { return session.UID() })),
 				zap.Stringer("route", route),
-				zap.Error(err))
+				zap.Error(callErr))
 		}
 	}
-	return err
+	return stderrors.Join(errs...)
 }
 
 func (r *RemoteService) DoForkRequest(ctx context.Context, route *route.Route, protoData []byte, session session.Session) ([]*protos.Response, error) {
@@ -371,133 +671,118 @@ func (r *RemoteService) DoForkRequest(ctx context.Context, route *route.Route, p
 	if err != nil {
 		return nil, err
 	}
-	var resps []*protos.Response
-	var ch = make(chan *protos.Response, 1)
-	// TODO 可能需要限制goroutine数量
-	for _, server2 := range svs {
-		if r.server.ID == server2.ID {
-			continue
-		}
-		server := server2
-		co.Go(func() {
-			resp, err2 := r.remoteCall(ctx, server, protos.RPCType_User, route, session, msg)
-			if err2 != nil {
-				err = err2
-			}
-			ch <- resp
+	targets := r.snapshotFanoutServers(svs)
+	tasks := make([]remoteFanoutTask, 0, len(targets))
+	for _, target := range targets {
+		tasks = append(tasks, remoteFanoutTask{
+			server:  target,
+			route:   route,
+			session: session,
+			msg:     msg,
 		})
 	}
-	for {
-		select {
-		case resp := <-ch:
-			resps = append(resps, resp)
-			if len(resps) >= len(svs)-1 {
-				return resps, err
-			}
-		}
-	}
+	return r.runFanout(ctx, tasks)
 }
+
 func (r *RemoteService) DoPublish(ctx context.Context, rt *route.Route, protoData []byte, session session.Session) error {
-	var err error
-	for _, server := range r.serviceDiscovery.GetServerTypes() {
+	errs := make([]error, 0)
+	for _, server := range snapshotServerTypes(r.serviceDiscovery.GetServerTypes()) {
 		sub := server.GetSubscribe(rt.Service, rt.Method)
 		// 排除非订阅者
 		if sub == nil {
 			continue
 		}
-		rt.SvType = server.Type
 		// 非fork时 排除当前服务
-		if server.Type == r.server.Type && !sub.Fork {
-			continue
-		}
-		if sub.Fork {
-			err2 := r.DoFork(ctx, rt, protoData, session)
-			if err2 != nil {
-				err = err2
-			}
+		if r.server != nil && server.Type == r.server.Type && !sub.Fork {
 			continue
 		}
 		// 排除session未绑定的sessionStickness服务
-		if server.SessionStickiness && session != nil {
-			svId := session.GetBackendID(server.Type)
-			if svId == "" {
+		if !sub.Fork && server.SessionStickiness && session != nil {
+			svID := session.GetBackendID(server.Type)
+			if svID == "" {
 				logger.Zap.Debug("DoPublish ignore unbound sessionStickness server", zap.String("server", server.Type))
 				continue
 			}
 		}
-		err2 := r.DoNotify(ctx, "", rt, protoData, session)
-		if err2 != nil {
-			err = err2
-		}
-	}
-	return err
-}
-func (r *RemoteService) DoPublishRequest(ctx context.Context, ro *route.Route, protoData []byte, session session.Session) (resps []*protos.Response, err error) {
-	var ch = make(chan *protos.Response, 10)
-	done := make(chan struct{})
-	svs := r.serviceDiscovery.GetServerTypes()
-	wg := sync.WaitGroup{}
-	// 收集响应
-	co.Go(func() {
-		defer close(done)
-		for resp := range ch {
-			if resp != nil {
-				resps = append(resps, resp)
+
+		targetRoute := route.NewRoute(server.Type, rt.Service, rt.Method)
+		if sub.Fork {
+			if err := r.DoFork(ctx, targetRoute, protoData, session); err != nil {
+				errs = append(errs, fmt.Errorf("server type %s: %w", server.Type, err))
 			}
-		}
-	})
-	// TODO 优化项 控制goroutine数量
-	for _, server2 := range svs {
-		sub2 := server2.GetSubscribe(ro.Service, ro.Method)
-		// 排除非订阅者
-		if sub2 == nil {
 			continue
 		}
-		wg.Add(1)
-		sub := sub2
-		server := server2
-		co.Go(func() {
-			defer func() {
-				wg.Done()
-			}()
-			// 非fork时 排除当前服务
-			if server.Type == r.server.Type && !sub.Fork {
-				return
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			errs = append(errs, fmt.Errorf("server type %s: publish stopped: %w", server.Type, ctxErr))
+			break
+		}
+		if err := r.DoNotify(ctx, "", targetRoute, protoData, session); err != nil {
+			errs = append(errs, fmt.Errorf("server type %s: %w", server.Type, err))
+		}
+	}
+	return stderrors.Join(errs...)
+}
+
+func (r *RemoteService) DoPublishRequest(ctx context.Context, ro *route.Route, protoData []byte, session session.Session) ([]*protos.Response, error) {
+	msg := &message.Message{
+		Type:  message.Request,
+		Route: ro.Short(),
+		Data:  protoData,
+	}
+	tasks := make([]remoteFanoutTask, 0)
+	snapshotErrs := make([]error, 0)
+
+	for _, server := range snapshotServerTypes(r.serviceDiscovery.GetServerTypes()) {
+		sub := server.GetSubscribe(ro.Service, ro.Method)
+		// 排除非订阅者
+		if sub == nil {
+			continue
+		}
+		// 非fork时 排除当前服务
+		if r.server != nil && server.Type == r.server.Type && !sub.Fork {
+			continue
+		}
+
+		targetRoute := route.NewRoute(server.Type, ro.Service, ro.Method)
+		if sub.Fork {
+			servers, err := r.serviceDiscovery.GetServersByType(server.Type)
+			if err != nil {
+				snapshotErrs = append(snapshotErrs, fmt.Errorf("server type %s: %w", server.Type, err))
+				continue
 			}
-			rt := route.NewRoute(server.Type, ro.Service, ro.Method)
-			rt.SvType = server.Type
-			if sub.Fork {
-				rs, err2 := r.DoForkRequest(ctx, rt, protoData, session)
-				if err2 != nil {
-					err = err2
-				}
-				for _, rp := range rs {
-					ch <- rp
-				}
-				return
+			for _, target := range r.snapshotFanoutServers(servers) {
+				tasks = append(tasks, remoteFanoutTask{
+					server:  target,
+					route:   targetRoute,
+					session: session,
+					msg:     msg,
+				})
 			}
-			// 排除session未绑定的sessionStickness服务
-			if server.SessionStickiness && session != nil {
-				svId := session.GetBackendID(server.Type)
-				if svId == "" {
-					logger.Zap.Debug("DoPublish ignore unbound sessionStickness server", zap.String("server", server.Type))
-					return
-				}
+			continue
+		}
+
+		// 排除session未绑定的sessionStickness服务
+		if server.SessionStickiness && session != nil {
+			svID := session.GetBackendID(server.Type)
+			if svID == "" {
+				logger.Zap.Debug("DoPublish ignore unbound sessionStickness server", zap.String("server", server.Type))
+				continue
 			}
-			rp, err2 := r.DoRPC(ctx, "", rt, protoData, session)
-			// 这里的err会有竞态问题，返回的是随机一个error.后续应该优化成errors group
-			if err2 != nil {
-				err = err2
-			}
-			ch <- rp
+		}
+
+		tasks = append(tasks, remoteFanoutTask{
+			route:   targetRoute,
+			session: session,
+			msg:     msg,
 		})
 	}
-	wg.Wait()
-	// 通知收集goroutine结束
-	close(ch)
-	// 等待收集goroutine完成
-	<-done
-	return resps, err
+
+	sortFanoutTasks(tasks)
+	responses, fanoutErr := r.runFanout(ctx, tasks)
+	if fanoutErr != nil {
+		snapshotErrs = append(snapshotErrs, fanoutErr)
+	}
+	return responses, stderrors.Join(snapshotErrs...)
 }
 
 // RPC makes rpcs
@@ -507,7 +792,7 @@ func (r *RemoteService) RPC(ctx context.Context, serverID string, route *route.R
 	if arg != nil {
 		data, err = proto.Marshal(arg)
 		if err != nil {
-			return errors.WithStack(err)
+			return goerrors.WithStack(err)
 		}
 	}
 	res, err := r.DoRPC(ctx, serverID, route, data, session)
@@ -522,7 +807,7 @@ func (r *RemoteService) RPC(ctx context.Context, serverID string, route *route.R
 	if reply != nil {
 		err = proto.Unmarshal(res.GetData(), reply)
 		if err != nil {
-			return errors.WithStack(err)
+			return goerrors.WithStack(err)
 		}
 	}
 	return nil
@@ -563,7 +848,7 @@ func (r *RemoteService) NotifyAll(ctx context.Context, ro *route.Route, arg prot
 		}
 	}
 	if ro.SvType != "" {
-		return errors.WithStack(constants.ErrNotifyAllSvTypeNotEmpty)
+		return goerrors.WithStack(constants.ErrNotifyAllSvTypeNotEmpty)
 	}
 	// 服务器为空 全局广播(每种服务器只有一个实例消费)
 	for _, server := range r.serviceDiscovery.GetServerTypes() {
@@ -624,7 +909,7 @@ func (r *RemoteService) Register(comp component.Component, opts []component.Opti
 	services := lo.If(s.Options.Subscriber, r.subscribers).Else(r.services)
 
 	if _, ok := services[s.Name]; ok {
-		return errors.WithStack(fmt.Errorf("remote: service already defined: %s", s.Name))
+		return goerrors.WithStack(fmt.Errorf("remote: service already defined: %s", s.Name))
 	}
 
 	if err := s.ExtractRemote(); err != nil {
@@ -641,10 +926,10 @@ func (r *RemoteService) Register(comp component.Component, opts []component.Opti
 		r.remotes[remoteName] = remote
 	}
 	if s.Options.Subscriber {
-		fork := lo.If(len(s.Options.ForkMethods) == 0, s.Options.ForkAll).Else(false)
 		// 注册订阅信息到服务发现，供后续同步订阅时使用
-		for name, _ := range s.Remotes {
-			if !fork {
+		for name := range s.Remotes {
+			fork := s.Options.ForkAll
+			if len(s.Options.ForkMethods) > 0 {
 				fork = slices.Contains(s.Options.ForkMethods, name)
 			}
 			r.server.AddSubscribe(s.Name, name, fork)
@@ -950,21 +1235,13 @@ func (r *RemoteService) remoteCall(
 	session session.Session,
 	msg *message.Message,
 ) (*protos.Response, error) {
-	svType := route.SvType
-
 	var err error
 	target := server
 
 	if target == nil {
-		target, err = r.router.Route(ctx, rpcType, svType, route, msg, session)
+		target, err = r.resolveRemoteTarget(ctx, rpcType, route, session, msg)
 		if err != nil {
-			apiErr := apierrors.FromError(err)
-			if rpcType == protos.RPCType_Sys {
-				logW := util.GetLoggerFromCtx(ctx)
-				logFun := lo.If(int(apiErr.Status.Code) >= http.StatusInternalServerError, logW.Error).Else(logW.Warn)
-				logFun("Failed to respond to remote server", zap.String("route", route.String()), zap.Error(err))
-			}
-			return nil, apiErr
+			return nil, err
 		}
 	}
 
@@ -980,6 +1257,30 @@ func (r *RemoteService) remoteCall(
 		return nil, err
 	}
 	return res, err
+}
+
+func (r *RemoteService) resolveRemoteTarget(
+	ctx context.Context,
+	rpcType protos.RPCType,
+	route *route.Route,
+	session session.Session,
+	msg *message.Message,
+) (*cluster.Server, error) {
+	target, err := r.router.Route(ctx, rpcType, route.SvType, route, msg, session)
+	if err == nil && target == nil {
+		err = fmt.Errorf("%w server=%s", constants.ErrServerNotFound, route.SvType)
+	}
+	if err == nil {
+		return target, nil
+	}
+
+	apiErr := apierrors.FromError(err)
+	if rpcType == protos.RPCType_Sys {
+		logW := util.GetLoggerFromCtx(ctx)
+		logFun := lo.If(int(apiErr.Status.Code) >= http.StatusInternalServerError, logW.Error).Else(logW.Warn)
+		logFun("Failed to respond to remote server", zap.String("route", route.String()), zap.Error(err))
+	}
+	return nil, apiErr
 }
 
 // DumpServices outputs all registered services

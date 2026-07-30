@@ -103,6 +103,17 @@ func TestBuilderModeValidation(t *testing.T) {
 	})
 }
 
+func TestBuilderPassesRPCFanoutConcurrency(t *testing.T) {
+	pitayaConfig := config.NewDefaultPitayaConfig()
+	pitayaConfig.Cluster.RPC.FanoutConcurrency = 7
+
+	builder := NewDefaultBuilder(false, "cluster", Cluster, nil, *pitayaConfig)
+	app := builder.Build().(*App)
+
+	configuredConcurrency := reflect.ValueOf(app.remoteService).Elem().FieldByName("fanoutConcurrency").Int()
+	assert.Equal(t, int64(7), configuredConcurrency)
+}
+
 func TestBuilderStartConfigModulePolicy(t *testing.T) {
 	for _, mode := range []string{"snapshot", "reloadable"} {
 		t.Run(mode, func(t *testing.T) {

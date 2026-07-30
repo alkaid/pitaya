@@ -20,6 +20,10 @@
 
 package constants
 
+// DefaultRPCFanoutConcurrency bounds concurrent RPC fanout calls when no
+// explicit positive limit is configured.
+const DefaultRPCFanoutConcurrency = 32
+
 const (
 	_ int32 = iota
 	// StatusStart status

@@ -26,8 +26,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/viper"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMain(m *testing.M) {
@@ -140,6 +142,21 @@ func TestGetInt(t *testing.T) {
 			assert.Equal(t, table.val, c.GetInt(table.key))
 		})
 	}
+}
+
+func TestRPCFanoutConcurrencyConfig(t *testing.T) {
+	t.Parallel()
+
+	defaultConfig := NewDefaultPitayaConfig()
+	require.Equal(t, constants.DefaultRPCFanoutConcurrency, defaultConfig.Cluster.RPC.FanoutConcurrency)
+
+	configWithDefaults := NewConfig()
+	require.Equal(t, constants.DefaultRPCFanoutConcurrency, configWithDefaults.GetInt("pitaya.cluster.rpc.fanout_concurrency"))
+	require.Equal(t, constants.DefaultRPCFanoutConcurrency, NewPitayaConfig(configWithDefaults).Cluster.RPC.FanoutConcurrency)
+
+	viperConfig := viper.New()
+	viperConfig.Set("pitaya.cluster.rpc.fanout_concurrency", 7)
+	require.Equal(t, 7, NewPitayaConfig(NewConfig(viperConfig)).Cluster.RPC.FanoutConcurrency)
 }
 
 func TestGetStringSlice(t *testing.T) {

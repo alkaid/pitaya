@@ -223,7 +223,7 @@ func (builder *Builder) Build() Pitaya {
 
 		builder.Router.SetServiceDiscovery(builder.ServiceDiscovery)
 
-		remoteService = service.NewRemoteService(
+		remoteService = service.NewRemoteServiceWithOptions(
 			builder.RPCClient,
 			builder.RPCServer,
 			builder.ServiceDiscovery,
@@ -236,6 +236,7 @@ func (builder *Builder) Build() Pitaya {
 			builder.RemoteHooks,
 			builder.HandlerHooks,
 			handlerPool,
+			service.WithFanoutConcurrency(builder.Config.Cluster.RPC.FanoutConcurrency),
 		)
 
 		builder.RPCServer.SetPitayaServer(remoteService)

@@ -3,6 +3,7 @@ package config
 import (
 	"time"
 
+	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/metrics/models"
 	"github.com/go-redis/redis/v8"
 )
@@ -597,7 +598,8 @@ type ClusterConfig struct {
 }
 
 type ClusterRPCConfig struct {
-	Client struct {
+	FanoutConcurrency int `mapstructure:"fanout_concurrency"`
+	Client            struct {
 		Grpc GRPCClientConfig    `mapstructure:"grpc"`
 		Nats NatsRPCClientConfig `mapstructure:"nats"`
 	} `mapstructure:"client"`
@@ -609,6 +611,7 @@ type ClusterRPCConfig struct {
 
 func newDefaultClusterRPCConfig() *ClusterRPCConfig {
 	return &ClusterRPCConfig{
+		FanoutConcurrency: constants.DefaultRPCFanoutConcurrency,
 		Client: struct {
 			Grpc GRPCClientConfig    `mapstructure:"grpc"`
 			Nats NatsRPCClientConfig `mapstructure:"nats"`
