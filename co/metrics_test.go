@@ -122,10 +122,10 @@ func TestStatefulPoolReportsPoolWithIDMetrics(t *testing.T) {
 	assertPoolGauge(t, reporter, metrics.PoolEscapeEventsDropped, map[string]string{"pool": "test"}, 0)
 	assertPoolGauge(t, reporter, metrics.PoolEscapeBudgetLimit, map[string]string{
 		"pool": "test", "scope": poolEscapeScopeGlobal,
-	}, float64(ants.DefaultAntsPoolSize/4))
+	}, 128)
 	assertPoolGauge(t, reporter, metrics.PoolEscapeBudgetLimit, map[string]string{
 		"pool": "test", "scope": poolEscapeScopePerID,
-	}, 10)
+	}, 1)
 	assertPoolGauge(t, reporter, metrics.PoolEscapeBudgetExhausted, map[string]string{
 		"pool": "test", "scope": poolEscapeScopeGlobal,
 	}, 1)

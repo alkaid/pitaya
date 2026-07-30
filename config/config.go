@@ -82,14 +82,17 @@ type ConfSource struct {
 }
 
 type GoPool struct {
-	Name                string          // 线程池名
-	Expire              time.Duration   // 线程池回收不使用的goroutine的间隔时长
-	RunningTaskTimeout  time.Duration   // 任务超时逃逸判定阈值
-	DisablePurge        bool            // 是否禁止超时回收
-	DisablePurgeRunning bool            // 是否禁止回收有任务运行中的线程(即使超时)
-	TaskBuffer          int             // 每个worker的队列长度
-	DisableTimeoutWatch bool            // 是否禁用监控超时
-	TimeoutBuckets      []time.Duration // 监控项
+	Name                    string          // 线程池名
+	Expire                  time.Duration   // 线程池回收不使用的goroutine的间隔时长
+	RunningTaskTimeout      time.Duration   // 任务超时逃逸判定阈值
+	MaxEscapedWorkers       int             // 全池仍存活的逃逸worker上限
+	MaxEscapedWorkersPerID  int             // 单个ID仍存活的逃逸worker上限
+	EnableRunningTaskEscape bool            // 是否显式允许运行中任务逃逸
+	DisablePurge            bool            // 是否禁止超时回收
+	DisablePurgeRunning     bool            // 是否禁止回收有任务运行中的线程(即使超时)
+	TaskBuffer              int             // 每个worker的队列长度
+	DisableTimeoutWatch     bool            // 是否禁用监控超时
+	TimeoutBuckets          []time.Duration // 监控项
 }
 
 // NewDefaultPitayaConfig provides default configuration for Pitaya App

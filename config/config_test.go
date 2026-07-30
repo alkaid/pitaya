@@ -159,6 +159,21 @@ func TestRPCFanoutConcurrencyConfig(t *testing.T) {
 	require.Equal(t, 7, NewPitayaConfig(NewConfig(viperConfig)).Cluster.RPC.FanoutConcurrency)
 }
 
+func TestGoPoolEscapeBudgetConfig(t *testing.T) {
+	t.Parallel()
+
+	viperConfig := viper.New()
+	viperConfig.Set("pitaya.gopools.default.maxescapedworkers", 7)
+	viperConfig.Set("pitaya.gopools.default.maxescapedworkersperid", 2)
+	viperConfig.Set("pitaya.gopools.default.enablerunningtaskescape", true)
+
+	pool, ok := NewPitayaConfig(NewConfig(viperConfig)).GoPools["default"]
+	require.True(t, ok)
+	require.Equal(t, 7, pool.MaxEscapedWorkers)
+	require.Equal(t, 2, pool.MaxEscapedWorkersPerID)
+	require.True(t, pool.EnableRunningTaskEscape)
+}
+
 func TestGetStringSlice(t *testing.T) {
 	t.Parallel()
 

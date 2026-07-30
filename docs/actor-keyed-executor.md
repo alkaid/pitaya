@@ -296,33 +296,37 @@ Handler 内不要调用 `WaitWithUser` 等待相同 UID，也不要设计同步 
 
 | Pool | 用途 | key | 默认回收行为 |
 | --- | --- | --- | --- |
-| `user` | 已绑定用户任务 | UID 转换后的整数 | 空闲 owner 回收，长任务允许 escape |
-| `session` | 未绑定 session 任务 | 本地 SID 或 frontend/session 哈希 | 空闲 owner 回收，长任务允许 escape |
-| `default` | 显式 `GoWithID` 的默认 pool | 调用方指定整数 | 空闲 owner 回收，长任务允许 escape |
-| `persist` | 框架常驻任务和 main lane | 调用方指定整数 | 强制禁用 running-task 回收，空闲周期为 1 小时 |
+| `user` | 已绑定用户任务 | UID 转换后的整数 | 空闲 owner 回收，默认禁止 running-task escape |
+| `session` | 未绑定 session 任务 | 本地 SID 或 frontend/session 哈希 | 空闲 owner 回收，默认禁止 running-task escape |
+| `default` | 显式 `GoWithID` 的默认 pool | 调用方指定整数 | 空闲 owner 回收，长任务可在 `128/1` 预算内 escape |
+| `persist` | 框架常驻任务和 main lane | 调用方指定整数 | 默认禁止 running-task escape，空闲周期为 1 小时 |
+
+除 framework `default` pool 外，自定义 pool 也默认禁止 running-task escape。这样只调整 `Expire` 或 `TaskBuffer` 不会意外放松单写者语义；确实需要 escape 时必须使用下述正向 opt-in。
 
 通用字段及当前默认值如下：
 
 | 字段 | 默认值 | 作用 | 与顺序有关的注意事项 |
 | --- | --- | --- | --- |
-| `Expire` | 23 分钟 | 回收空闲 owner | 不会取消正在执行的任务 |
+| `Expire` | 10 分钟；`persist` 为 1 小时 | 回收空闲 owner | 不会取消正在执行的任务 |
 | `RunningTaskTimeout` | 10 分钟 | 判定 running owner 是否 escape | escape 后新旧任务可能重叠 |
+| `MaxEscapedWorkers` | 128 | 限制全池仍存活的 escaped worker | 正值固定，不随 pool `Tune` 改变 |
+| `MaxEscapedWorkersPerID` | 1 | 限制单个 ID 仍存活的 escaped worker | 同时受 global budget 约束 |
+| `EnableRunningTaskEscape` | `false` | 为除 `default` 外的 pool 正向开启 escape | 开启前必须有 fencing、版本或幂等保护 |
 | `DisablePurge` | `false` | 同时禁用空闲回收和 running escape | 开启后永久阻塞任务不会被替换 |
-| `DisablePurgeRunning` | `false` | 只禁用 running escape | 严格单写者场景应考虑设为 `true` |
+| `DisablePurgeRunning` | 除 `default` 外为 `true` | 只禁用 running escape | 构造器根据正向 opt-in 归一化 |
 | `TaskBuffer` | 100 | 每个 key 的非阻塞水位和队列参数 | blocking submit 还能使用预留空间并等待，不是全局上限 |
 | `DisableTimeoutWatch` | `false` | 关闭超时日志和 deadline 指标 | 不会关闭 running escape |
 | `TimeoutBuckets` | 5 秒、10 秒、1 分钟、10 分钟 | 分阶段记录慢任务 | 只观测，不取消任务 |
 
 `TimeoutBuckets` 当前通过连续的 `time.After` 逐段等待，因此实际日志时间是累计值：约 5 秒、15 秒、1 分 15 秒和 11 分 15 秒。指标标签记录的是当前 bucket 时长，不是任务已经运行的总时长。
 
-严格单写者配置可以从下面的设置开始，再根据业务最长耗时和活跃 UID 数量调整：
+严格 pool 即使只覆盖部分配置也会保留串行。下面的设置调整 user pool 的空闲回收和队列参数，但不会意外开启 running-task escape：
 
 ```go
 cfg := config.NewDefaultPitayaConfig()
 cfg.GoPools[co.UserGoPoolName] = config.GoPool{
-	Expire:              5 * time.Minute,
-	DisablePurgeRunning: true,
-	TaskBuffer:          100,
+	Expire:     5 * time.Minute,
+	TaskBuffer: 100,
 	TimeoutBuckets: []time.Duration{
 		2 * time.Second,
 		5 * time.Second,
@@ -339,9 +343,20 @@ builder := pitaya.NewDefaultBuilder(
 )
 ```
 
-使用 Viper 配置源时，对应配置位于 `pitaya.gopools.<pool-name>`。`persist` pool 的配置会被模块强制改为 `DisablePurgeRunning=true` 和 `Expire=1h`。
+如果业务经过评审后要给严格 pool 开启可用性优先的 escape，必须使用正向 opt-in，并显式写出预算：
 
-当前 pool capacity 使用 `ants.DefaultAntsPoolSize`，值为 `math.MaxInt32`。每个活跃 key 可以拥有独立 owner 和队列，默认 23 分钟内出现过的大量 UID 会增加 goroutine、队列和内存占用。escape 上限目前硬编码为每个 key 10 个、全局 `DefaultAntsPoolSize/4`，全局值实际上很高，不能把它当作有效的资源保护。
+```go
+cfg.GoPools[co.UserGoPoolName] = config.GoPool{
+	EnableRunningTaskEscape: true,
+	RunningTaskTimeout:      2 * time.Minute,
+	MaxEscapedWorkers:       32,
+	MaxEscapedWorkersPerID:  1,
+}
+```
+
+使用 Viper 配置源时，对应配置位于 `pitaya.gopools.<pool-name>`；新增键为 `maxescapedworkers`、`maxescapedworkersperid` 和 `enablerunningtaskescape`。未显式配置 `persist.expire` 时仍使用 1 小时。`DisablePurge=true` 的组合语义更强，即使正向 opt-in 也不会启动 running escape。
+
+当前 pool capacity 使用 `ants.DefaultAntsPoolSize`，值为 `math.MaxInt32`。每个活跃 key 可以拥有独立 owner 和队列，默认 10 分钟内出现过的大量 UID 仍会增加 goroutine、队列和内存占用。允许 escape 的 pool 默认最多保留 128 个 escaped worker、每个 ID 最多 1 个；自定义正值预算在 `Tune` 后保持不变。预算只能限制 replacement 放大，不能停止已经卡住的任务。
 
 高基数服务应监控 active worker 和 RSS，并在 actor-per-active-UID 与固定数量 hash-sharded lane 之间取舍。固定分片可以限制 goroutine 数，但哈希到同一分片的无关用户会出现队首阻塞。
 
@@ -353,7 +368,8 @@ builder := pitaya.NewDefaultBuilder(
 | 提交前 context 已取消 | 返回 nil `done` 和 `ctx.Err()`，任务未执行 | 不重试非幂等任务，按入口取消语义结束 |
 | 已接纳后等待 context 取消 | `Wait` 返回 `ctx.Err()`；task 仍可能继续 | 不把返回当作 task 停止屏障；资源生命周期覆盖 task 实际退出 |
 | 任务 panic | `defer close(done)` 关闭完成信号，ants 恢复并记录 panic | `done` 不承载 panic result；需要业务错误时由 task 自身返回/记录 |
-| 任务超过 running timeout | 旧 worker escape，replacement 可以处理后续任务 | 严格顺序时禁用 escape，或给写入加 fencing/version |
+| 任务超过 running timeout | 严格 pool 保持阻塞；允许 escape 的 pool 在预算内启动 replacement | 开启 escape 前给写入加 fencing/version |
+| escape budget 耗尽 | 不再启动 replacement，该 ID 保持被旧任务阻塞 | 告警并处置旧任务或进程，不自动扩大预算 |
 | UID 队列达到容量 | blocking submit 可能等待，nonblocking submit 可能拒绝 | 限制单 UID 流量，设置入口背压和超时 |
 | backend 进程退出 | 在途任务和内存队列丢失 | command 幂等，必要时使用持久有序队列 |
 | 节点加入或离开 | UID 可能映射到新节点，旧节点仍有在途任务 | owner drain、epoch 和 fencing |

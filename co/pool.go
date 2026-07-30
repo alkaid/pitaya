@@ -16,9 +16,11 @@ import (
 )
 
 const (
-	DefaultStatefulPoolExpire     = time.Minute * 23
-	DefaultRunningTaskTimeout     = time.Minute * 10
-	DefaultStatefulPoolTaskBuffer = 100
+	DefaultStatefulPoolExpire                 = time.Minute * 10
+	DefaultRunningTaskTimeout                 = time.Minute * 10
+	DefaultStatefulPoolTaskBuffer             = 100
+	DefaultStatefulPoolMaxEscapedWorkers      = 128
+	DefaultStatefulPoolMaxEscapedWorkersPerID = 1
 )
 
 var DefaultStatefulPoolTimeoutBuckets = []time.Duration{5 * time.Second, 10 * time.Second, 1 * time.Minute, 10 * time.Minute}
@@ -37,6 +39,7 @@ func NewStatefulPool(config config.GoPool, reporters []metrics.Reporter, options
 	if config.Name == "" {
 		return nil, errors.New("stateful pool name cannot be nil")
 	}
+	config = resolvePoolConfig(config.Name, config)
 	if config.Expire == 0 {
 		config.Expire = DefaultStatefulPoolExpire
 	}
@@ -46,6 +49,12 @@ func NewStatefulPool(config config.GoPool, reporters []metrics.Reporter, options
 	if config.TaskBuffer == 0 {
 		config.TaskBuffer = DefaultStatefulPoolTaskBuffer
 	}
+	if config.MaxEscapedWorkers == 0 {
+		config.MaxEscapedWorkers = DefaultStatefulPoolMaxEscapedWorkers
+	}
+	if config.MaxEscapedWorkersPerID == 0 {
+		config.MaxEscapedWorkersPerID = DefaultStatefulPoolMaxEscapedWorkersPerID
+	}
 	if len(config.TimeoutBuckets) == 0 {
 		config.TimeoutBuckets = DefaultStatefulPoolTimeoutBuckets
 	}
@@ -53,8 +62,8 @@ func NewStatefulPool(config config.GoPool, reporters []metrics.Reporter, options
 		ants.WithTaskBuffer(config.TaskBuffer),
 		ants.WithExpiryDuration(config.Expire),
 		ants.WithRunningTaskTimeout(config.RunningTaskTimeout),
-		ants.WithMaxEscapedWorkersPerID(10),
-		ants.WithMaxEscapedWorkers(ants.DefaultAntsPoolSize/4),
+		ants.WithMaxEscapedWorkers(config.MaxEscapedWorkers),
+		ants.WithMaxEscapedWorkersPerID(config.MaxEscapedWorkersPerID),
 		ants.WithDisablePurgeRunning(config.DisablePurgeRunning),
 		ants.WithDisablePurge(config.DisablePurge))
 	p, err := ants.NewPoolWithID(ants.DefaultAntsPoolSize, options...)

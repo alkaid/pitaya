@@ -42,26 +42,32 @@ func NewStatefulPoolsModule(poolsCfg map[string]config.GoPool, reporters []metri
 	module := StatefulPoolsModule{
 		reporters:    reporters,
 		pools:        map[string]*StatefulPool{},
-		cfgMap:       poolsCfg,
+		cfgMap:       make(map[string]config.GoPool, len(poolsCfg)+len(builtinPool)),
 		reportPeriod: resolveStatefulPoolMetricsPeriod(reportPeriod),
 	}
-	for name, pool := range module.cfgMap {
-		pool.Name = name
-		module.cfgMap[name] = pool
+	for name, pool := range poolsCfg {
+		module.cfgMap[name] = resolvePoolConfig(name, pool)
 	}
-	if module.cfgMap == nil {
-		module.cfgMap = map[string]config.GoPool{}
-	}
-	// 若没有配置内建线程池,要加上
 	for _, name := range builtinPool {
-		_, ok := module.cfgMap[name]
-		if !ok {
-			module.cfgMap[name] = config.GoPool{Name: name}
+		if _, ok := module.cfgMap[name]; !ok {
+			module.cfgMap[name] = resolvePoolConfig(name, config.GoPool{})
 		}
 	}
-	module.cfgMap[PersistGoPoolName] = config.GoPool{Name: PersistGoPoolName, DisablePurgeRunning: true, Expire: time.Hour}
 	instance = &module
 	return &module
+}
+
+func resolvePoolConfig(name string, cfg config.GoPool) config.GoPool {
+	cfg.Name = name
+	if cfg.EnableRunningTaskEscape {
+		cfg.DisablePurgeRunning = false
+	} else if name != DefaultGoPoolName {
+		cfg.DisablePurgeRunning = true
+	}
+	if name == PersistGoPoolName && cfg.Expire == 0 {
+		cfg.Expire = time.Hour
+	}
+	return cfg
 }
 
 func (p *StatefulPoolsModule) Init() error {
