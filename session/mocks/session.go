@@ -399,9 +399,11 @@ func (mr *MockSessionMockRecorder) GetSubscriptions() *gomock.Call {
 }
 
 // Go mocks base method.
-func (m *MockSession) Go(ctx context.Context, task func(context.Context)) {
+func (m *MockSession) Go(ctx context.Context, task func(context.Context)) error {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "Go", ctx, task)
+	ret := m.ctrl.Call(m, "Go", ctx, task)
+	ret0, _ := ret[0].(error)
+	return ret0
 }
 
 // Go indicates an expected call of Go.

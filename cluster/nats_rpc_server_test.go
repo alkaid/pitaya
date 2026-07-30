@@ -22,12 +22,17 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"google.golang.org/protobuf/proto"
+	"os"
+	"os/exec"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/alkaid/ants/v2"
+	"github.com/alkaid/goerrors/apierrors"
+	"github.com/alkaid/pitaya/v2/co"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/helpers"
@@ -37,8 +42,133 @@ import (
 	sessionmocks "github.com/alkaid/pitaya/v2/session/mocks"
 	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
+	"google.golang.org/protobuf/proto"
 )
+
+const statelessSubmissionErrorHelperEnv = "PITAYA_TEST_STATELESS_SUBMISSION_ERROR"
+
+func TestGoWithRequestRejectsInvalidSubmission(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	ran := make(chan struct{}, 1)
+
+	err := GoWithRequest(ctx, &protos.Request{Session: &protos.Session{Uid: "42"}}, func(context.Context) {
+		ran <- struct{}{}
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("GoWithRequest error = %v, want %v", err, context.Canceled)
+	}
+	select {
+	case <-ran:
+		t.Fatal("pre-canceled request task ran")
+	default:
+	}
+
+	err = GoWithRequest(context.Background(), nil, nil)
+	if !errors.Is(err, co.ErrNilTask) {
+		t.Fatalf("nil task error = %v, want %v", err, co.ErrNilTask)
+	}
+}
+
+func TestGoWithRequestPropagatesStatelessSubmissionError(t *testing.T) {
+	if os.Getenv(statelessSubmissionErrorHelperEnv) != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestGoWithRequestPropagatesStatelessSubmissionError$")
+		cmd.Env = append(os.Environ(), statelessSubmissionErrorHelperEnv+"=1")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("stateless submission helper failed: %v\n%s", err, output)
+		}
+		return
+	}
+
+	ants.Release()
+	var ran bool
+
+	err := GoWithRequest(context.Background(), nil, func(context.Context) {
+		ran = true
+	})
+	if !errors.Is(err, ants.ErrPoolClosed) {
+		t.Fatalf("GoWithRequest error = %v, want %v", err, ants.ErrPoolClosed)
+	}
+	if ran {
+		t.Fatal("stateless task ran after submission rejection")
+	}
+}
+
+func TestNormalizeTaskSubmissionError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		code int
+	}{
+		{name: "canceled", err: context.Canceled, code: 499},
+		{name: "deadline", err: context.DeadlineExceeded, code: 504},
+		{name: "closed", err: ants.ErrPoolClosed, code: 503},
+		{name: "overload", err: ants.ErrPoolOverload, code: 503},
+		{name: "nil task", err: co.ErrNilTask, code: 500},
+		{name: "invalid user ID", err: co.ErrInvalidUserID, code: 500},
+		{name: "unknown", err: errors.New("internal detail"), code: 500},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := NormalizeTaskSubmissionError(test.err)
+			assert.Equal(t, test.code, apierrors.Code(got))
+			assert.ErrorIs(t, got, test.err)
+			assert.NotContains(t, apierrors.FromError(got).Status.Message, test.err.Error())
+		})
+	}
+}
+
+func TestNatsRPCServerPublishesSubmissionErrorResponse(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, nil, nil)
+	require.NoError(t, err)
+
+	natsServer := helpers.GetTestNatsServer(t)
+	t.Cleanup(natsServer.Shutdown)
+	conn, err := setupNatsConn(fmt.Sprintf("nats://%s", natsServer.Addr()), nil)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	rpcServer.conn = conn
+
+	reply := nats.NewInbox()
+	sub, err := conn.SubscribeSync(reply)
+	require.NoError(t, err)
+	require.NoError(t, conn.Flush())
+
+	processDone := make(chan struct{})
+	go func() {
+		defer close(processDone)
+		rpcServer.processMessages(0)
+	}()
+	t.Cleanup(func() {
+		close(rpcServer.GetUnhandledRequestsChannel())
+		<-processDone
+	})
+
+	rpcServer.GetUnhandledRequestsChannel() <- &protos.Request{
+		Session:  &protos.Session{Uid: "0"},
+		Metadata: []byte("{}"),
+		Msg: &protos.Msg{
+			Id:    1,
+			Type:  protos.MsgType_MsgRequest,
+			Route: "svc.method",
+			Reply: reply,
+		},
+	}
+
+	msg, err := sub.NextMsg(3 * time.Second)
+	require.NoError(t, err)
+	response := &protos.Response{}
+	require.NoError(t, proto.Unmarshal(msg.Data, response))
+	require.NotNil(t, response.Status)
+	assert.Equal(t, int32(500), response.Status.Code)
+	assert.Equal(t, "task submission failed", response.Status.Message)
+	assert.NotContains(t, response.Status.Message, co.ErrInvalidUserID.Error())
+}
 
 type funcPtrMatcher struct {
 	ptr uintptr

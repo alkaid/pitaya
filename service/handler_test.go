@@ -213,7 +213,7 @@ func TestHandlerServiceProcessMessage(t *testing.T) {
 						scheduledCtx = ctx
 						assert.NotNil(t, task)
 					},
-				).Times(1)
+				).Return(nil).Times(1)
 			}
 
 			svc.processMessage(mockAgent, table.msg)
@@ -224,6 +224,62 @@ func TestHandlerServiceProcessMessage(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHandlerServiceProcessMessageReportsSubmissionError(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	submitErr := errors.New("stateful pool rejected task")
+	msg := &message.Message{ID: 42, Type: message.Request, Route: "local.handle"}
+	mockSession := mocks.NewMockSession(ctrl)
+	mockSession.EXPECT().Go(gomock.Any(), gomock.Any()).Return(submitErr).Times(1)
+	mockAgent := agentmocks.NewMockAgent(ctrl)
+	mockAgent.EXPECT().GetSession().Return(mockSession).AnyTimes()
+	mockAgent.EXPECT().AnswerWithError(gomock.Any(), msg.ID, gomock.Any()).Do(
+		func(_ context.Context, _ uint, err error) {
+			assert.True(t, apierrors.IsInternalServer(err))
+			assert.ErrorIs(t, err, submitErr)
+			assert.Equal(t, "task submission failed", apierrors.FromError(err).Status.Message)
+		},
+	).Times(1)
+	svc := NewHandlerService(
+		nil,
+		nil,
+		0,
+		0,
+		&cluster.Server{ID: "frontend-1", Type: "frontend"},
+		&RemoteService{},
+		nil,
+		nil,
+		nil,
+		NewHandlerPool(),
+	)
+
+	svc.processMessage(mockAgent, msg)
+}
+
+func TestHandlerServiceProcessNotifyLogsSubmissionErrorWithoutResponse(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	submitErr := errors.New("stateful pool rejected notify")
+	msg := &message.Message{Type: message.Notify, Route: "local.handle"}
+	mockSession := mocks.NewMockSession(ctrl)
+	mockSession.EXPECT().Go(gomock.Any(), gomock.Any()).Return(submitErr).Times(1)
+	mockAgent := agentmocks.NewMockAgent(ctrl)
+	mockAgent.EXPECT().GetSession().Return(mockSession).AnyTimes()
+	mockAgent.EXPECT().AnswerWithError(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	svc := NewHandlerService(
+		nil,
+		nil,
+		0,
+		0,
+		&cluster.Server{ID: "frontend-1", Type: "frontend"},
+		&RemoteService{},
+		nil,
+		nil,
+		nil,
+		NewHandlerPool(),
+	)
+
+	svc.processMessage(mockAgent, msg)
 }
 
 func TestHandlerServiceProcessMessageRejectsReservedSysRoutes(t *testing.T) {

@@ -23,6 +23,9 @@ const (
 
 var DefaultStatefulPoolTimeoutBuckets = []time.Duration{5 * time.Second, 10 * time.Second, 1 * time.Minute, 10 * time.Minute}
 
+// ErrNilTask is returned when a pool API is called without a task.
+var ErrNilTask = errors.New("pool task cannot be nil")
+
 // StatefulPool 带状态的线程池
 type StatefulPool struct {
 	pool      *ants.PoolWithID
@@ -75,16 +78,29 @@ func (s *StatefulPool) Name() string {
 //	@receiver h
 //	@param goID
 //	@param task
-func (s *StatefulPool) Go(ctx context.Context, goID int, task func(ctx context.Context), disableTimeoutWatch bool) (done chan struct{}) {
-	done = make(chan struct{})
+func (s *StatefulPool) Go(ctx context.Context, goID int, task func(ctx context.Context), disableTimeoutWatch bool) (<-chan struct{}, error) {
+	ctx = normalizeContext(ctx)
+	if task == nil {
+		return nil, ErrNilTask
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	done := make(chan struct{})
 	fields := util.LogFieldsFromCtx(ctx)
 	fields = append(fields, zap.String("pool", s.Name()), zap.Int("goID", goID))
 	logg := logger.Zap.With(fields...)
 	taskWithDone := func() {
+		defer close(done)
 		task(ctx)
-		close(done)
 	}
-	submitted := false
+	logg.Debug("submit")
+	err := s.pool.Submit(goID, taskWithDone)
+	if err != nil {
+		logg.Error("submit task with id error", zap.Error(err))
+		return nil, err
+	}
 	if !s.config.DisableTimeoutWatch && !disableTimeoutWatch {
 		timeoutErr := errors.NewWithStack("goroutine timeout")
 		Go(func() {
@@ -95,26 +111,32 @@ func (s *StatefulPool) Go(ctx context.Context, goID int, task func(ctx context.C
 				case <-ctx.Done():
 					return
 				case <-time.After(timeout):
-					logg.Error("", zap.Duration("timeout", timeout), zap.Bool("submitted", submitted), zap.Error(timeoutErr))
+					logg.Error("", zap.Duration("timeout", timeout), zap.Error(timeoutErr))
 					metrics.ReportPoolGoDeadlines(ctx, s.Name(), int(timeout/time.Second), s.reporters)
 				}
 			}
 		})
 	}
-	logg.Debug("submit")
-	err := s.pool.Submit(goID, taskWithDone)
-	if err != nil {
-		logg.Error("submit task with id error", zap.Error(err))
-		return
-	}
-	submitted = true
-	return done
+	return done, nil
 }
 
-func (s *StatefulPool) Wait(ctx context.Context, goID int, task func(ctx context.Context), disableTimeoutWatch bool) {
-	done := s.Go(ctx, goID, task, disableTimeoutWatch)
+func (s *StatefulPool) Wait(ctx context.Context, goID int, task func(ctx context.Context), disableTimeoutWatch bool) error {
+	ctx = normalizeContext(ctx)
+	done, err := s.Go(ctx, goID, task, disableTimeoutWatch)
+	if err != nil {
+		return err
+	}
 	select {
 	case <-done:
+		return nil
 	case <-ctx.Done():
+		return ctx.Err()
 	}
+}
+
+func normalizeContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return ctx
 }

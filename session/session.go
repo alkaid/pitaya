@@ -315,7 +315,8 @@ type SessPublic interface {
 	// Go 派发到该session独立线程,若已绑定uid则派发到user独立线程
 	//  @see co.GoWithUser
 	//  @param task
-	Go(ctx context.Context, task func(ctx context.Context))
+	//  @return error
+	Go(ctx context.Context, task func(ctx context.Context)) error
 }
 
 // Session represents a client session, which can store data during the connection.
@@ -1926,14 +1927,15 @@ func FrontendSessHash(frontendID string, sid int64) int64 {
 	return int64(crc32.ChecksumIEEE([]byte(fmt.Sprintf("%s-%d", frontendID, sid))))
 }
 
-func (s *sessionImpl) Go(ctx context.Context, task func(ctx context.Context)) {
+func (s *sessionImpl) Go(ctx context.Context, task func(ctx context.Context)) error {
 	uidInt := s.UIDInt()
 	if uidInt != 0 {
-		co.GoWithUser(ctx, uidInt, task)
-		return
+		_, err := co.GoWithUser(ctx, uidInt, task)
+		return err
 	}
 	sid := lo.If(s.IsFrontend, s.id).Else(FrontendSessHash(s.frontendID, s.frontendSessionID))
-	co.GoWithID(ctx, sid, task, co.WithPoolName(co.SessionGoPoolName))
+	_, err := co.GoWithID(ctx, sid, task, co.WithPoolName(co.SessionGoPoolName))
+	return err
 }
 
 func (s *sessionImpl) HasRequestsInFlight() bool {

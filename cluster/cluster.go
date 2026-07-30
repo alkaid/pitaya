@@ -197,19 +197,28 @@ func buildRequest(
 	return req, nil
 }
 
-func GoWithRequest(ctx context.Context, req *protos.Request, task func(ctx context.Context)) {
+func GoWithRequest(ctx context.Context, req *protos.Request, task func(ctx context.Context)) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if task == nil {
+		return co.ErrNilTask
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if req == nil || req.Session == nil {
 		// TODO 限制并发数并提取配置
-		co.Go(func() {
+		return co.Submit(func() {
 			task(ctx)
 		})
-		return
 	}
 	if req.Session.Uid != "" {
 		uidInt := util.ForceIdStrToInt(req.Session.Uid)
-		co.GoWithUser(ctx, uidInt, task)
-		return
+		_, err := co.GoWithUser(ctx, uidInt, task)
+		return err
 	}
 	sid := session.FrontendSessHash(req.FrontendID, req.Session.Id)
-	co.GoWithID(ctx, sid, task, co.WithPoolName(co.SessionGoPoolName))
+	_, err := co.GoWithID(ctx, sid, task, co.WithPoolName(co.SessionGoPoolName))
+	return err
 }

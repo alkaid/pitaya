@@ -52,7 +52,7 @@ flowchart TD
         NatsServer --> Dispatch[GoWithRequest]
         Dispatch -->|request has UID| BEUser["user pool<br/>key = UID"]
         Dispatch -->|session without UID| BESession["session pool<br/>key = hash(frontendID, sessionID)"]
-        Dispatch -->|no session| Stateless[stateless co.Go]
+        Dispatch -->|no session| Stateless[stateless co.Submit]
         BEUser --> RemoteCall[RemoteService.Call]
         BESession --> RemoteCall
         Stateless --> RemoteCall
@@ -168,7 +168,7 @@ flowchart TD
 | 客户端本地 handler | 经 `Session.Go` | 可以，限当前 frontend 进程 |
 | NATS RPC 携带 UID session | 经 `GoWithRequest` 和 `user` pool | 可以，限 backend 当前 owner |
 | NATS RPC 携带未绑定 session | 经 `session` pool | 可以，key 是 frontend/session 组合 |
-| NATS RPC 不携带 session | 使用无状态 `co.Go` | 不可以 |
+| NATS RPC 不携带 session | 使用无状态 `co.Submit` | 不可以 |
 | gRPC RPC | 直接调用 `PitayaServer.Call` | 不可以 |
 | 自定义 route | 完全由 route 函数选择节点 | 取决于应用实现 |
 | 一致性哈希查询失败 | 随机选择节点 | 不可以 |
@@ -218,15 +218,20 @@ if uidInt <= 0 {
 	return fmt.Errorf("invalid uid %q", uid)
 }
 
-done := co.GoWithUser(ctx, uidInt, func(ctx context.Context) {
+done, err := co.GoWithUser(ctx, uidInt, func(ctx context.Context) {
 	updateUserState(ctx, uid)
 })
-if done == nil {
-	return fmt.Errorf("user task was not accepted")
+if err != nil {
+	return fmt.Errorf("submit user task: %w", err)
 }
+<-done
 ```
 
-当前 `co.GoWithUser` 和 `StatefulPool.Go` 没有返回 submission error。底层拒绝任务时只记录日志，返回的 `done` 也不会关闭。因此，持久任务不能把函数返回当作可靠接纳确认。需要可靠执行的任务应先写入持久队列或 outbox，消费成功后再确认；框架 API 后续也需要改成显式返回 `error`。
+`co.GoWithUser` 和 `StatefulPool.Go` 返回 `(<-chan struct{}, error)`。closed、overload、nil task 或 pre-canceled context 会返回 nil done 和同步 error；成功返回的 done 一定会在 task 正常退出或 panic 时关闭。channel close 只表示 task 已退出，不携带 task panic result；panic 由底层 pool 恢复并记录。需要持久交付保证的任务仍应先写入持久队列或 outbox，不能把内存队列的接纳当作 durable ack。
+
+`StatefulPool.Wait` 和 `co.Wait*` 返回 submission error 或等待期间的 `ctx.Err()`。ctx 在任务接纳后取消时，`Wait` 可以先返回，但 task 仍可能继续运行；调用方不能据此释放会被 task 使用的状态，也不能立即在其他 lane 重做同一非幂等写入。底层 blocking `Submit` 当前没有 context-aware 中断接口，因此只有进入 Submit 前已经取消的 context 能保证不接纳任务。
+
+无状态任务需要确认接纳时使用 `co.Submit`。legacy `co.Go` 保留原有 void/best-effort 契约，只记录提交错误，供明确允许丢弃的既有后台任务兼容使用；先增加 WaitGroup、占用令牌或承诺启动成功的路径不能依赖 `co.Go`。
 
 ### RPC 必须携带 session
 
@@ -344,8 +349,10 @@ builder := pitaya.NewDefaultBuilder(
 
 | 事件 | 当前结果 | 应用侧处理 |
 | --- | --- | --- |
-| `Submit` 因 pool 关闭或过载失败 | 只记录日志，任务未执行，`done` 不关闭 | 持久任务使用 outbox/消息队列，监控提交错误 |
-| 任务 panic | ants 可以恢复 worker，但 `taskWithDone` 没有 `defer close(done)` | 不把 `done` 当作 panic-safe 完成信号 |
+| `Submit` 因 pool 关闭或过载失败 | 返回 nil `done` 和原始 submission error，任务未执行 | 立即传播或按业务策略重试；持久任务使用 outbox/消息队列 |
+| 提交前 context 已取消 | 返回 nil `done` 和 `ctx.Err()`，任务未执行 | 不重试非幂等任务，按入口取消语义结束 |
+| 已接纳后等待 context 取消 | `Wait` 返回 `ctx.Err()`；task 仍可能继续 | 不把返回当作 task 停止屏障；资源生命周期覆盖 task 实际退出 |
+| 任务 panic | `defer close(done)` 关闭完成信号，ants 恢复并记录 panic | `done` 不承载 panic result；需要业务错误时由 task 自身返回/记录 |
 | 任务超过 running timeout | 旧 worker escape，replacement 可以处理后续任务 | 严格顺序时禁用 escape，或给写入加 fencing/version |
 | UID 队列达到容量 | blocking submit 可能等待，nonblocking submit 可能拒绝 | 限制单 UID 流量，设置入口背压和超时 |
 | backend 进程退出 | 在途任务和内存队列丢失 | command 幂等，必要时使用持久有序队列 |
@@ -398,7 +405,7 @@ builder := pitaya.NewDefaultBuilder(
 3. 明确一致性策略。严格顺序的 pool 禁止 running escape；允许 escape 的业务写入必须校验 fencing token 或状态版本。
 4. backend owner 交接包含 drain、epoch 和 fencing。新 owner 生效后，存储拒绝旧 owner 的迟到写入。
 5. command 携带 request ID；需要跨生产者顺序时再携带 sequence，并在状态层去重和校验版本。
-6. 提交 API 返回明确的 `error`，拒绝任务时关闭完成信号；完成信号通过 `defer` 保证 panic 路径也能结束。
+6. 提交 API 返回明确的 `error`，拒绝任务时返回 nil 完成信号；成功任务的完成信号通过 `defer` 保证 panic 路径也能结束。
 7. session 从 SID key 切换到 UID key 时执行队列迁移或 drain/activate 屏障。
 8. 根据 UID 基数选择 64 位/string key 或固定 hash shard，避免 CRC32 碰撞和 owner 数无界增长。
 

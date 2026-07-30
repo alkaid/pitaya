@@ -90,10 +90,13 @@ func TestStatefulPoolReportsPoolWithIDMetrics(t *testing.T) {
 
 	started := make(chan struct{})
 	release := make(chan struct{})
-	done := pool.Go(context.Background(), 1, func(context.Context) {
+	done, err := pool.Go(context.Background(), 1, func(context.Context) {
 		close(started)
 		<-release
 	}, true)
+	if err != nil {
+		t.Fatalf("submit metrics task: %v", err)
+	}
 	<-started
 	t.Cleanup(func() {
 		close(release)

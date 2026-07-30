@@ -26,9 +26,11 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/alkaid/ants/v2"
 	"github.com/alkaid/goerrors/apierrors"
 	"github.com/alkaid/pitaya/v2/cluster"
 	clustermocks "github.com/alkaid/pitaya/v2/cluster/mocks"
+	"github.com/alkaid/pitaya/v2/co"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/service"
@@ -546,7 +548,7 @@ func TestKickBackendFrontendPreservesMismatchedBinding(t *testing.T) {
 func TestSessionKickedBackendUsesBindingIdentity(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
-	// Keep this unit on the synchronous binding-mutation path; listener delivery owns the co pool fixture.
+	// The synchronous binding mutation happens before listener submission is rejected.
 	uid := ""
 	msg := &protos.BindBackendMsg{Uid: uid, Btype: "game", Bid: "game-1"}
 
@@ -562,6 +564,69 @@ func TestSessionKickedBackendUsesBindingIdentity(t *testing.T) {
 	sys := NewSys(sessionPool, cluster.NewServer("chat-1", "chat", false), nil, nil, &service.RemoteService{})
 	res, err := sys.SessionKickedBackend(context.Background(), msg)
 
-	require.NoError(t, err)
-	require.NotNil(t, res)
+	require.ErrorIs(t, err, co.ErrInvalidUserID)
+	require.Nil(t, res)
+}
+
+func TestSysPropagatesStatefulListenerSubmissionErrors(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	sessionPool := mocks.NewMockSessionPool(ctrl)
+	sessionPool.EXPECT().GetSessionByUID("0").Return(nil).Times(1)
+	sys := NewSys(
+		sessionPool,
+		cluster.NewServer("frontend-1", "frontend", true),
+		nil,
+		nil,
+		&service.RemoteService{},
+	)
+
+	tests := []struct {
+		name string
+		call func() (*protos.Response, error)
+	}{
+		{name: "session bound", call: func() (*protos.Response, error) {
+			return sys.SessionBound(context.Background(), &protos.BindMsg{Uid: "0"})
+		}},
+		{name: "session closed", call: func() (*protos.Response, error) {
+			return sys.SessionClosed(context.Background(), &protos.KickMsg{UserId: "0"})
+		}},
+		{name: "backend bound fork", call: func() (*protos.Response, error) {
+			return sys.SessionBoundBackendFork(context.Background(), &protos.BindBackendMsg{Uid: "0"})
+		}},
+		{name: "backend bound", call: func() (*protos.Response, error) {
+			return sys.SessionBoundBackend(context.Background(), &protos.BindBackendMsg{Uid: "0"})
+		}},
+		{name: "backend kicked", call: func() (*protos.Response, error) {
+			return sys.SessionKickedBackend(context.Background(), &protos.BindBackendMsg{Uid: "0"})
+		}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response, err := test.call()
+			require.ErrorIs(t, err, co.ErrInvalidUserID)
+			assert.Equal(t, 500, apierrors.Code(err))
+			assert.Equal(t, "task submission failed", apierrors.FromError(err).Status.Message)
+			assert.NotContains(t, apierrors.FromError(err).Status.Message, co.ErrInvalidUserID.Error())
+			require.Nil(t, response)
+		})
+	}
+}
+
+func TestSysPropagatesStatelessListenerSubmissionErrors(t *testing.T) {
+	ants.Release()
+	t.Cleanup(ants.Reboot)
+	sys := NewSys(nil, nil, nil, nil, &service.RemoteService{})
+
+	response, err := sys.SessionClosed(context.Background(), &protos.KickMsg{})
+	require.ErrorIs(t, err, ants.ErrPoolClosed)
+	assert.Equal(t, 503, apierrors.Code(err))
+	assert.Equal(t, "task submission unavailable", apierrors.FromError(err).Status.Message)
+	require.Nil(t, response)
+
+	response, err = sys.SessionBoundBackendFork(context.Background(), &protos.BindBackendMsg{})
+	require.ErrorIs(t, err, ants.ErrPoolClosed)
+	assert.Equal(t, 503, apierrors.Code(err))
+	assert.Equal(t, "task submission unavailable", apierrors.FromError(err).Status.Message)
+	require.Nil(t, response)
 }

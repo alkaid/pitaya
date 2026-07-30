@@ -54,6 +54,7 @@ import (
 	"github.com/alkaid/pitaya/v2/session"
 	"github.com/alkaid/pitaya/v2/timer"
 	"github.com/alkaid/pitaya/v2/tracing"
+	"github.com/alkaid/pitaya/v2/util"
 )
 
 var (
@@ -342,19 +343,30 @@ func (h *HandlerService) processMessage(a agent.Agent, msg *message.Message) {
 
 	if r.SvType == h.server.Type {
 		// 派发给session独立线程避免互相影响
-		a.GetSession().Go(ctx, func(ctx context.Context) {
+		err = a.GetSession().Go(ctx, func(ctx context.Context) {
 			metrics.ReportMessageProcessDelayFromCtx(ctx, h.metricsReporters, "local")
 			h.localProcess(ctx, a, r, msg)
 		})
 	} else {
 		if h.remoteService != nil {
-			a.GetSession().Go(ctx, func(ctx context.Context) {
+			err = a.GetSession().Go(ctx, func(ctx context.Context) {
 				metrics.ReportMessageProcessDelayFromCtx(ctx, h.metricsReporters, "remote")
 				h.remoteService.remoteProcess(ctx, nil, a, r, msg)
 			})
 		} else {
 			logger.Log.Warnf("request made to another server type but no remoteService running")
 		}
+	}
+	if err != nil {
+		logg := util.GetLoggerFromCtx(ctx)
+		logg.Error("handler task submission failed", zap.Error(err))
+		publicErr := cluster.NormalizeTaskSubmissionError(err)
+		if msg.Type == message.Notify {
+			tracing.FinishSpan(ctx, publicErr)
+			metrics.ReportTimingFromCtx(ctx, h.metricsReporters, handlerType, publicErr)
+			return
+		}
+		a.AnswerWithError(ctx, msg.ID, publicErr)
 	}
 }
 

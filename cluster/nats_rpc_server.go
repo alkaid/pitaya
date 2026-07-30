@@ -27,8 +27,6 @@ import (
 	"time"
 
 	"github.com/alkaid/goerrors/apierrors"
-	nats "github.com/nats-io/nats.go"
-	"github.com/pkg/errors"
 	"github.com/alkaid/pitaya/v2/co"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/constants"
@@ -37,6 +35,8 @@ import (
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/session"
 	"github.com/alkaid/pitaya/v2/util"
+	nats "github.com/nats-io/nats.go"
+	"github.com/pkg/errors"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )
@@ -313,7 +313,7 @@ func (ns *NatsRPCServer) processMessages(threadID int) {
 		}
 		logg := util.GetLoggerFromCtx(ctx)
 		logg.Debug("rpcsv processing msg")
-		GoWithRequest(ctx, req, func(ctx context.Context) {
+		submitErr := GoWithRequest(ctx, req, func(ctx context.Context) {
 			resp, err := ns.pitayaServer.Call(ctx, req)
 			if err != nil {
 				// pitayaServer.Call已有打印error,这里不再重复
@@ -327,6 +327,18 @@ func (ns *NatsRPCServer) processMessages(threadID int) {
 				}
 			}
 		})
+		if submitErr != nil {
+			logg.Error("rpc task submission failed", zap.Error(submitErr))
+			if req.GetMsg().Type != protos.MsgType_MsgNotify {
+				publicErr := NormalizeTaskSubmissionError(submitErr)
+				response := &protos.Response{Status: &apierrors.FromError(publicErr).Status}
+				// Status responses intentionally make marshalResponse return the status error.
+				payload, _ := ns.marshalResponse(response)
+				if publishErr := ns.conn.Publish(req.GetMsg().GetReply(), payload); publishErr != nil {
+					logg.Error("error sending task submission response", zap.Error(publishErr))
+				}
+			}
+		}
 	}
 }
 
