@@ -1141,19 +1141,18 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 	if remote.HasArgs {
 		params = append(params, reflect.ValueOf(arg))
 	}
-	if remote.Options.TaskGoProvider != nil {
-		// 若提供了自定义派发线程
-		var wg sync.WaitGroup
-		wg.Add(1)
-		final := func() { wg.Done() }
-		remote.Options.TaskGoProvider(ctx, final, func(ctx context.Context) {
-			defer final()
-			params[1] = reflect.ValueOf(ctx)
-			ret, err = util.Pcall(remote.Method, params)
-		})
-		wg.Wait()
-	} else {
+	executionErr := executeTask(ctx, remote.Options.TaskExecutor, func(taskCtx context.Context) error {
+		params[1] = reflect.ValueOf(taskCtx)
 		ret, err = util.Pcall(remote.Method, params)
+		return nil
+	})
+	if executionErr != nil {
+		if acknowledgeSkippedTask(req.GetMsg().GetType(), executionErr, rt, "remote") {
+			response.Data = []byte("ack")
+			return response
+		}
+		response.Status = &apierrors.FromError(normalizeTaskExecutionError(executionErr)).Status
+		return response
 	}
 
 	ret, err = r.remoteHooks.AfterHandler.ExecuteAfterPipeline(ctx, rt, arg, ret, err)

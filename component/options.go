@@ -24,13 +24,13 @@ import "context"
 
 type (
 	options struct {
-		name             string                                                                  // component name
-		nameFunc         func(string) string                                                     // rename handler name
-		Subscriber       bool                                                                    // 是否订阅者 对应Publish
-		ForkMethods      []string                                                                // 每个服务副本都能消费的methods,优先级高于ForkAll
-		ForkAll          bool                                                                    // 是否所有方法都能每个服务副本都消费，当ForkMethods为空时生效
-		ReceiverProvider func(ctx context.Context) Component                                     // 延迟绑定的receiver实例
-		TaskGoProvider   func(ctx context.Context, final func(), task func(ctx context.Context)) // 异步任务派发线程提供者, final:框架层必须执行的逻辑。若业务侧忽略执行 task,须调用 final.
+		name             string                              // component name
+		nameFunc         func(string) string                 // rename handler name
+		Subscriber       bool                                // 是否订阅者 对应Publish
+		ForkMethods      []string                            // 每个服务副本都能消费的methods,优先级高于ForkAll
+		ForkAll          bool                                // 是否所有方法都能每个服务副本都消费，当ForkMethods为空时生效
+		ReceiverProvider func(ctx context.Context) Component // 延迟绑定的receiver实例
+		TaskExecutor     TaskExecutor                        // 自定义任务执行器，返回前必须完成或明确拒绝任务
 	}
 
 	// Option used to customize handler
@@ -102,12 +102,12 @@ func WithReceiverProvider(receiverProvider func(ctx context.Context) Component) 
 	}
 }
 
-// WithTaskGoProvider 注册延迟动态绑定的异步任务派发线程
+// WithTaskExecutor registers a custom component task executor.
 //
-//	@param taskGoProvider
+//	@param taskExecutor
 //	@return Option
-func WithTaskGoProvider(taskGoProvider func(ctx context.Context, final func(), task func(ctx context.Context))) Option {
+func WithTaskExecutor(taskExecutor TaskExecutor) Option {
 	return func(opt *options) {
-		opt.TaskGoProvider = taskGoProvider
+		opt.TaskExecutor = taskExecutor
 	}
 }

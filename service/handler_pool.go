@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
-	"sync"
 
 	"go.uber.org/zap"
 
@@ -165,20 +164,19 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		args = append(args, reflect.ValueOf(arg))
 	}
 	var resp any
-	if handler.Options.TaskGoProvider != nil {
-		// 若提供了自定义派发线程
-		var wg sync.WaitGroup
-		wg.Add(1)
-		final := func() { wg.Done() }
-		handler.Options.TaskGoProvider(ctx, final, func(ctx context.Context) {
-			defer final()
-			args[1] = reflect.ValueOf(ctx)
-			resp, err = util.Pcall(handler.Method, args)
-		})
-		wg.Wait()
-	} else {
-		// 默认在rpc server提供的线程里
+	executionErr := executeTask(ctx, handler.Options.TaskExecutor, func(taskCtx context.Context) error {
+		args[1] = reflect.ValueOf(taskCtx)
 		resp, err = util.Pcall(handler.Method, args)
+		return nil
+	})
+	if executionErr != nil {
+		if acknowledgeSkippedTask(msgTypeIface, executionErr, rt, "handler") {
+			if remote {
+				resp = []byte("ack")
+			}
+			return serializeReturn(serializer, resp)
+		}
+		return nil, normalizeTaskExecutionError(executionErr)
 	}
 	if remote && msgType == message.Notify {
 		// This is a special case and should only happen with nats rpc client

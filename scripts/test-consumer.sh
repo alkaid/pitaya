@@ -17,15 +17,26 @@ cat >"$tmpdir/consumer_test.go" <<'EOF'
 package consumer_test
 
 import (
+	"context"
+
 	pitaya "github.com/alkaid/pitaya/v2"
 	"github.com/alkaid/pitaya/v2/client"
+	"github.com/alkaid/pitaya/v2/component"
 	"github.com/alkaid/pitaya/v2/config"
 )
+
+func executeTask(ctx context.Context, task component.Task) error {
+	return task(ctx)
+}
 
 var (
 	_ *pitaya.App
 	_ client.PitayaClient
 	_ *config.Config
+	_ component.TaskExecutor = component.TaskExecutorFunc(executeTask)
+	_ component.Option       = component.WithTaskExecutor(component.TaskExecutorFunc(executeTask))
+	_                        = component.ErrTaskSkipped
+	_                        = component.ErrTaskInvocationClosed
 )
 EOF
 
