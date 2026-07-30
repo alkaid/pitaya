@@ -30,6 +30,7 @@ type poolMonitorState struct {
 	perIDExhausted    int
 	globalBudgetLimit int
 	perIDBudgetLimit  int
+	droppedEvents     uint64
 }
 
 func resolveStatefulPoolMetricsPeriod(periods []time.Duration) time.Duration {
@@ -45,15 +46,21 @@ func newPoolMonitorState(snapshot ants.PoolWithIDEscapeSnapshot) *poolMonitorSta
 	return state
 }
 
-func (s *poolMonitorState) reconcile(snapshot ants.PoolWithIDEscapeSnapshot) {
+func (s *poolMonitorState) reconcile(snapshot ants.PoolWithIDEscapeSnapshot) uint64 {
+	previousDroppedEvents := s.droppedEvents
 	s.exhaustedByID = make(map[int]ants.PoolWithIDEscapeBudgetReason, len(snapshot.ExhaustedByID))
 	s.globalExhausted = 0
 	s.perIDExhausted = 0
 	s.globalBudgetLimit = snapshot.GlobalBudget
 	s.perIDBudgetLimit = snapshot.PerIDBudget
+	s.droppedEvents = snapshot.DroppedEvents
 	for id, reason := range snapshot.ExhaustedByID {
 		s.setReason(id, reason)
 	}
+	if snapshot.DroppedEvents <= previousDroppedEvents {
+		return 0
+	}
+	return snapshot.DroppedEvents - previousDroppedEvents
 }
 
 func (s *poolMonitorState) apply(event ants.PoolWithIDEscapeEvent) {
@@ -96,15 +103,20 @@ func (s *poolMonitorState) setReason(id int, reason ants.PoolWithIDEscapeBudgetR
 }
 
 func (s *StatefulPool) monitorMetrics(ctx context.Context, period time.Duration) {
-	state := newPoolMonitorState(s.pool.EscapeSnapshot())
-	s.reportMetrics(state)
+	state := &poolMonitorState{}
+	s.reconcileMonitorState(state, s.pool.EscapeSnapshot())
 
-	reportTicker := time.NewTicker(period)
+	var reportTicker *time.Ticker
+	var reportC <-chan time.Time
+	if len(s.reporters) > 0 {
+		reportTicker = time.NewTicker(period)
+		reportC = reportTicker.C
+		defer reportTicker.Stop()
+	}
 	// EscapeEvents is best effort and budget recovery has no event of its own.
 	// Periodically reconcile from the authoritative snapshot so gauges cannot
 	// remain stale forever after a dropped event or a silent recovery.
 	snapshotReconcileTicker := time.NewTicker(statefulPoolMetricsReconcilePeriod)
-	defer reportTicker.Stop()
 	defer snapshotReconcileTicker.Stop()
 
 	for {
@@ -113,18 +125,34 @@ func (s *StatefulPool) monitorMetrics(ctx context.Context, period time.Duration)
 			state.apply(event)
 			s.logEscapeEvent(event)
 			s.reportEscapeEvent(event)
-		case <-reportTicker.C:
+		case <-reportC:
 			s.reportMetrics(state)
 		case <-snapshotReconcileTicker.C:
-			state.reconcile(s.pool.EscapeSnapshot())
-			s.reportMetrics(state)
+			s.reconcileMonitorState(state, s.pool.EscapeSnapshot())
 		case <-ctx.Done():
+			s.reconcileMonitorState(state, s.pool.EscapeSnapshot())
 			return
 		}
 	}
 }
 
+func (s *StatefulPool) reconcileMonitorState(
+	state *poolMonitorState,
+	snapshot ants.PoolWithIDEscapeSnapshot,
+) {
+	if droppedDelta := state.reconcile(snapshot); droppedDelta > 0 {
+		logger.Zap.Error("stateful pool escape events dropped",
+			zap.String("pool", s.Name()),
+			zap.Uint64("droppedDelta", droppedDelta),
+			zap.Uint64("droppedTotal", snapshot.DroppedEvents))
+	}
+	s.reportMetrics(state)
+}
+
 func (s *StatefulPool) logEscapeEvent(event ants.PoolWithIDEscapeEvent) {
+	if event.Type != ants.PoolWithIDWorkerEscaped && event.Type != ants.PoolWithIDEscapeBudgetExhausted {
+		return
+	}
 	fields := []zap.Field{
 		zap.String("pool", s.Name()),
 		zap.Int("goID", event.ID),
@@ -145,6 +173,9 @@ func (s *StatefulPool) logEscapeEvent(event ants.PoolWithIDEscapeEvent) {
 }
 
 func (s *StatefulPool) reportMetrics(state *poolMonitorState) {
+	if len(s.reporters) == 0 {
+		return
+	}
 	managed := s.pool.Running()
 	escaped := s.pool.Escaped()
 	total := s.pool.TotalWorkers()
@@ -183,6 +214,9 @@ func (s *StatefulPool) reportMetrics(state *poolMonitorState) {
 }
 
 func (s *StatefulPool) reportEscapeEvent(event ants.PoolWithIDEscapeEvent) {
+	if len(s.reporters) == 0 {
+		return
+	}
 	tags := map[string]string{
 		"pool":   s.Name(),
 		"event":  poolEscapeEventName(event.Type),

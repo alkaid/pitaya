@@ -189,6 +189,54 @@ func TestStatefulPoolLogsEscapeErrors(t *testing.T) {
 	}
 }
 
+func TestStatefulPoolReconcileLogsDroppedEscapeEvents(t *testing.T) {
+	core, observed := observer.New(zapcore.ErrorLevel)
+	previousLogger := logger.Zap
+	logger.Zap = zap.New(core)
+	t.Cleanup(func() { logger.Zap = previousLogger })
+
+	pool, err := NewStatefulPool(config.GoPool{
+		Name:                "dropped-events",
+		DisablePurge:        true,
+		DisableTimeoutWatch: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewStatefulPool: %v", err)
+	}
+	t.Cleanup(pool.pool.Release)
+
+	state := &poolMonitorState{}
+	pool.reconcileMonitorState(state, ants.PoolWithIDEscapeSnapshot{
+		DroppedEvents: 3,
+		GlobalBudget:  128,
+		PerIDBudget:   1,
+	})
+	pool.reconcileMonitorState(state, ants.PoolWithIDEscapeSnapshot{
+		DroppedEvents: 3,
+		GlobalBudget:  128,
+		PerIDBudget:   1,
+	})
+	pool.reconcileMonitorState(state, ants.PoolWithIDEscapeSnapshot{
+		DroppedEvents: 7,
+		GlobalBudget:  128,
+		PerIDBudget:   1,
+	})
+
+	entries := observed.FilterMessage("stateful pool escape events dropped").All()
+	if len(entries) != 2 {
+		t.Fatalf("got %d dropped-event logs, want 2: %+v", len(entries), entries)
+	}
+	firstFields := entries[0].ContextMap()
+	if firstFields["pool"] != "dropped-events" || firstFields["droppedDelta"] != uint64(3) ||
+		firstFields["droppedTotal"] != uint64(3) {
+		t.Fatalf("unexpected first dropped-event fields: %+v", firstFields)
+	}
+	secondFields := entries[1].ContextMap()
+	if secondFields["droppedDelta"] != uint64(4) || secondFields["droppedTotal"] != uint64(7) {
+		t.Fatalf("unexpected second dropped-event fields: %+v", secondFields)
+	}
+}
+
 func assertPoolBudgetState(
 	t *testing.T,
 	state *poolMonitorState,

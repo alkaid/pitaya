@@ -83,7 +83,7 @@ func (p *StatefulPoolsModule) Init() error {
 }
 
 func (p *StatefulPoolsModule) AfterInit() {
-	if len(p.reporters) == 0 || p.monitorCancel != nil {
+	if p.monitorCancel != nil {
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -96,15 +96,16 @@ func (p *StatefulPoolsModule) AfterInit() {
 }
 
 func (p *StatefulPoolsModule) BeforeShutdown() {
-	if p.monitorCancel != nil {
-		p.monitorCancel()
-	}
+	// Keep consumers alive while every module runs its BeforeShutdown hook.
 }
 
 func (p *StatefulPoolsModule) Shutdown() error {
 	if p.monitorCancel != nil {
 		p.monitorCancel()
-		p.monitorWG.Wait()
+	}
+	p.monitorWG.Wait()
+	for _, pool := range p.pools {
+		pool.pool.Release()
 	}
 	return nil
 }

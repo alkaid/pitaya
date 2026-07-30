@@ -22,23 +22,21 @@ package metrics
 
 import (
 	"fmt"
-
-	"github.com/alkaid/pitaya/v2/logger"
-	"go.uber.org/zap"
-
 	"net/http"
 	"sync"
 
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/constants"
+	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/metrics/models"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.uber.org/zap"
 )
 
 var (
-	prometheusReporter *PrometheusReporter
-	once               sync.Once
+	prometheusReporter   *PrometheusReporter
+	prometheusReporterMu sync.Mutex
 )
 
 // PrometheusReporter reports metrics to prometheus
@@ -115,7 +113,8 @@ func (p *PrometheusReporter) registerCustomMetrics(
 func (p *PrometheusReporter) registerMetrics(
 	constLabels, additionalLabels map[string]string,
 	spec *models.CustomMetricsSpec,
-) {
+	registerer prometheus.Registerer,
+) error {
 
 	constLabels["game"] = p.game
 	constLabels["serverType"] = p.serverType
@@ -378,7 +377,35 @@ func (p *PrometheusReporter) registerMetrics(
 		toRegister = append(toRegister, c)
 	}
 
-	prometheus.MustRegister(toRegister...)
+	for i, collector := range toRegister {
+		if err := registerer.Register(collector); err != nil {
+			for registered := i - 1; registered >= 0; registered-- {
+				registerer.Unregister(toRegister[registered])
+			}
+			return fmt.Errorf("register prometheus metric: %w", err)
+		}
+	}
+	return nil
+}
+
+func newPrometheusReporter(
+	serverType string,
+	config config.MetricsConfig,
+	metricsSpecs *models.CustomMetricsSpec,
+	registerer prometheus.Registerer,
+) (*PrometheusReporter, error) {
+	reporter := &PrometheusReporter{
+		serverType:            serverType,
+		game:                  config.Game,
+		countReportersMap:     make(map[string]*prometheus.CounterVec),
+		histogramReportersMap: make(map[string]*prometheus.HistogramVec),
+		summaryReportersMap:   make(map[string]*prometheus.SummaryVec),
+		gaugeReportersMap:     make(map[string]*prometheus.GaugeVec),
+	}
+	if err := reporter.registerMetrics(config.ConstLabels, config.AdditionalLabels, metricsSpecs, registerer); err != nil {
+		return nil, err
+	}
+	return reporter, nil
 }
 
 // GetPrometheusReporter gets the prometheus reporter singleton
@@ -395,24 +422,29 @@ func getPrometheusReporter(
 	config config.MetricsConfig,
 	metricsSpecs *models.CustomMetricsSpec,
 ) (*PrometheusReporter, error) {
-	once.Do(func() {
-		prometheusReporter = &PrometheusReporter{
-			serverType:            serverType,
-			game:                  config.Game,
-			countReportersMap:     make(map[string]*prometheus.CounterVec),
-			histogramReportersMap: make(map[string]*prometheus.HistogramVec),
-			summaryReportersMap:   make(map[string]*prometheus.SummaryVec),
-			gaugeReportersMap:     make(map[string]*prometheus.GaugeVec),
+	prometheusReporterMu.Lock()
+	defer prometheusReporterMu.Unlock()
+	if prometheusReporter != nil {
+		return prometheusReporter, nil
+	}
+
+	reporter, err := newPrometheusReporter(
+		serverType,
+		config,
+		metricsSpecs,
+		prometheus.DefaultRegisterer,
+	)
+	if err != nil {
+		return nil, err
+	}
+	prometheusReporter = reporter
+	http.Handle("/metrics", promhttp.Handler())
+	go (func() {
+		err := http.ListenAndServe(fmt.Sprintf(":%d", config.Prometheus.Port), nil)
+		if err != nil {
+			logger.Zap.Error("prometheus reporter serve start failed", zap.Error(err))
 		}
-		prometheusReporter.registerMetrics(config.ConstLabels, config.AdditionalLabels, metricsSpecs)
-		http.Handle("/metrics", promhttp.Handler())
-		go (func() {
-			err := http.ListenAndServe(fmt.Sprintf(":%d", config.Prometheus.Port), nil)
-			if err != nil {
-				logger.Zap.Error("prometheus reporter serve start failed", zap.Error(err))
-			}
-		})()
-	})
+	})()
 
 	return prometheusReporter, nil
 }
