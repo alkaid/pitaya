@@ -76,6 +76,7 @@ type etcdServiceDiscovery struct {
 	serverTypesBlacklist   []string
 	syncServersParallelism int
 	syncServersRunning     chan bool
+	consistentHashLock     sync.RWMutex
 	consistentHash         map[string]*hash.ConsistentHash
 
 	// 选主相关
@@ -308,6 +309,25 @@ func (sd *etcdServiceDiscovery) writeLockScope(f func()) {
 	f()
 }
 
+func (sd *etcdServiceDiscovery) getConsistentHash(serverType string) *hash.ConsistentHash {
+	sd.consistentHashLock.RLock()
+	ha := sd.consistentHash[serverType]
+	sd.consistentHashLock.RUnlock()
+	return ha
+}
+
+func (sd *etcdServiceDiscovery) getOrCreateConsistentHash(serverType string) *hash.ConsistentHash {
+	sd.consistentHashLock.Lock()
+	defer sd.consistentHashLock.Unlock()
+
+	ha := sd.consistentHash[serverType]
+	if ha == nil {
+		ha = hash.NewConsistentHash()
+		sd.consistentHash[serverType] = ha
+	}
+	return ha
+}
+
 func (sd *etcdServiceDiscovery) deleteServer(serverID string) {
 	if actual, ok := sd.serverMapByID.Load(serverID); ok {
 		sv := actual.(*Server)
@@ -317,8 +337,8 @@ func (sd *etcdServiceDiscovery) deleteServer(serverID string) {
 				delete(svMap, sv.ID)
 			}
 		})
-		if sd.consistentHash[sv.Type] != nil {
-			sd.consistentHash[sv.Type].Remove(sv.ID)
+		if ha := sd.getConsistentHash(sv.Type); ha != nil {
+			ha.Remove(sv.ID)
 		}
 		sd.notifyListeners(DEL, sv)
 	}
@@ -369,11 +389,11 @@ func (sd *etcdServiceDiscovery) GetServersByType(serverType string) (map[string]
 }
 
 func (sd *etcdServiceDiscovery) GetConsistentHashNode(serverType string, sessionID string) (string, error) {
-	ha := sd.consistentHash[serverType]
+	ha := sd.getConsistentHash(serverType)
 	if ha == nil {
 		return "", errors.WithStack(fmt.Errorf("%w server=%s,sid=%s", constants.ErrServerNotFound, serverType, sessionID))
 	}
-	node, ok := sd.consistentHash[serverType].Get(sessionID)
+	node, ok := ha.Get(sessionID)
 	if !ok {
 		return "", errors.WithStack(fmt.Errorf("%w server=%s,sid=%s", constants.ErrServerNotFound, serverType, sessionID))
 	}
@@ -772,10 +792,7 @@ func (sd *etcdServiceDiscovery) addServer(sv *Server) {
 	})
 	if sv.ID != sd.server.ID {
 		if !loaded {
-			if sd.consistentHash[sv.Type] == nil {
-				sd.consistentHash[sv.Type] = hash.NewConsistentHash()
-			}
-			sd.consistentHash[sv.Type].Add(sv.ID)
+			sd.getOrCreateConsistentHash(sv.Type).Add(sv.ID)
 			sd.notifyListeners(ADD, sv)
 		} else {
 			sd.notifyListeners(Modify, sv, old.(*Server))

@@ -22,7 +22,11 @@ package cluster
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"math"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -185,6 +189,134 @@ func TestEtcdSDDeleteServer(t *testing.T) {
 			_, err = e.GetServersByType(table.server.Type)
 			assert.ErrorIs(t, err, constants.ErrNoServersAvailableOfType)
 		})
+	}
+}
+
+func TestEtcdSDConsistentHashLifecycle(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
+	self := NewServer("frontend-self", "frontend", true, nil)
+	sd := getEtcdSD(t, cfg, self, nil)
+
+	_, err := sd.GetConsistentHashNode("room", "session-1")
+	assert.ErrorIs(t, err, constants.ErrServerNotFound)
+
+	server := NewServer("room-1", "room", false, nil)
+	sd.addServer(server)
+	node, err := sd.GetConsistentHashNode(server.Type, "session-1")
+	assert.NoError(t, err)
+	assert.Equal(t, server.ID, node)
+
+	sd.deleteServer(server.ID)
+	_, err = sd.GetConsistentHashNode(server.Type, "session-1")
+	assert.ErrorIs(t, err, constants.ErrServerNotFound)
+}
+
+func TestEtcdSDConsistentHashConcurrentFirstServers(t *testing.T) {
+	for removedServer := 0; removedServer < 2; removedServer++ {
+		t.Run(fmt.Sprintf("remove-%d", removedServer), func(t *testing.T) {
+			cfg := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
+			self := NewServer("frontend-self", "frontend", true, nil)
+			sd := getEtcdSD(t, cfg, self, nil)
+			servers := []*Server{
+				NewServer("room-1", "room", false, nil),
+				NewServer("room-2", "room", false, nil),
+			}
+
+			start := make(chan struct{})
+			var wg sync.WaitGroup
+			for _, server := range servers {
+				server := server
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					<-start
+					sd.addServer(server)
+				}()
+			}
+			close(start)
+			wg.Wait()
+
+			sd.deleteServer(servers[removedServer].ID)
+			remainingServer := servers[1-removedServer]
+			node, err := sd.GetConsistentHashNode(remainingServer.Type, "session-1")
+			assert.NoError(t, err)
+			assert.Equal(t, remainingServer.ID, node)
+
+			sd.deleteServer(remainingServer.ID)
+			_, err = sd.GetConsistentHashNode(remainingServer.Type, "session-1")
+			assert.ErrorIs(t, err, constants.ErrServerNotFound)
+		})
+	}
+}
+
+func TestEtcdSDConsistentHashConcurrentMutationAndLookup(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
+	self := NewServer("frontend-self", "frontend", true, nil)
+	sd := getEtcdSD(t, cfg, self, nil)
+
+	const (
+		typesPerRound = 32
+		rounds        = 8
+		lookupWorkers = 8
+	)
+
+	serverTypes := make([]string, 0, rounds*typesPerRound)
+	for round := 0; round < rounds; round++ {
+		for typeIndex := 0; typeIndex < typesPerRound; typeIndex++ {
+			serverTypes = append(serverTypes, fmt.Sprintf("room-%d-%d", round, typeIndex))
+		}
+	}
+
+	start := make(chan struct{})
+	unexpectedErrors := make(chan error, lookupWorkers*len(serverTypes)*rounds)
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for round := 0; round < rounds; round++ {
+			for typeIndex := 0; typeIndex < typesPerRound; typeIndex++ {
+				serverType := fmt.Sprintf("room-%d-%d", round, typeIndex)
+				sd.addServer(NewServer(serverType+"-1", serverType, false, nil))
+				runtime.Gosched()
+			}
+			// This is the cleanup path used by SyncServers after applying its snapshot.
+			sd.deleteLocalInvalidServers(nil)
+		}
+	}()
+
+	for worker := 0; worker < lookupWorkers; worker++ {
+		worker := worker
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for round := 0; round < rounds; round++ {
+				for _, serverType := range serverTypes {
+					node, err := sd.GetConsistentHashNode(serverType, fmt.Sprintf("session-%d-%d", worker, round))
+					if err != nil && !errors.Is(err, constants.ErrServerNotFound) {
+						unexpectedErrors <- err
+					}
+					if err == nil && node != serverType+"-1" {
+						unexpectedErrors <- fmt.Errorf("unexpected node %q returned for %s", node, serverType)
+					}
+				}
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(unexpectedErrors)
+	for err := range unexpectedErrors {
+		assert.NoError(t, err)
+	}
+
+	sd.deleteLocalInvalidServers(nil)
+	for _, serverType := range serverTypes {
+		_, err := sd.GetConsistentHashNode(serverType, "session-final")
+		assert.ErrorIs(t, err, constants.ErrServerNotFound)
 	}
 }
 
