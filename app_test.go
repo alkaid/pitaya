@@ -74,9 +74,7 @@ func newAppTestBuilder(
 	serverMetadata map[string]string,
 	pitayaConfig config.PitayaConfig,
 ) *Builder {
-	builder := NewDefaultBuilder(isFrontend, serverType, serverMode, serverMetadata, pitayaConfig)
-	builder.conf = config.NewConfig()
-	return builder
+	return NewDefaultBuilder(isFrontend, serverType, serverMode, serverMetadata, pitayaConfig)
 }
 
 func newAppTestApp(

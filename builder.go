@@ -1,7 +1,6 @@
 package pitaya
 
 import (
-	"github.com/go-redis/redis/v8"
 	"github.com/alkaid/pitaya/v2/acceptor"
 	"github.com/alkaid/pitaya/v2/agent"
 	"github.com/alkaid/pitaya/v2/cluster"
@@ -21,6 +20,7 @@ import (
 	"github.com/alkaid/pitaya/v2/session"
 	"github.com/alkaid/pitaya/v2/util"
 	"github.com/alkaid/pitaya/v2/worker"
+	"github.com/go-redis/redis/v8"
 	"go.uber.org/zap"
 )
 
@@ -205,9 +205,11 @@ func (builder *Builder) AddPostBuildHook(hook func(app Pitaya)) {
 func (builder *Builder) Build() Pitaya {
 	// 根据配置初始化zap
 	logger.InitLogMgr(builder.Config.Log.Development, builder.Config.Log.Level)
-	builder.conf.AddLoader(logger.Manager.ReloadFactory("pitaya.log", func() {
-		logger.ResetGlobalVar()
-	}))
+	if builder.conf != nil {
+		builder.conf.AddLoader(logger.Manager.ReloadFactory("pitaya.log", func() {
+			logger.ResetGlobalVar()
+		}))
+	}
 	handlerPool := service.NewHandlerPool()
 	var remoteService *service.RemoteService
 	if builder.ServerMode == Standalone {
