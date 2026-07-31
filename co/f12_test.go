@@ -47,23 +47,41 @@ func TestStatefulPoolUsesBoundedDefaults(t *testing.T) {
 	}
 }
 
-func TestStatefulPoolsModuleUsesStrictBuiltinDefaults(t *testing.T) {
+func TestStatefulPoolRunningTaskTimeoutDefaultsToExpire(t *testing.T) {
+	const expire = 37 * time.Minute
+	pool, err := NewStatefulPool(config.GoPool{
+		Name:                "legacy-running-timeout",
+		Expire:              expire,
+		DisablePurge:        true,
+		DisableTimeoutWatch: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewStatefulPool: %v", err)
+	}
+	t.Cleanup(pool.pool.Release)
+
+	if pool.config.RunningTaskTimeout != expire {
+		t.Fatalf("RunningTaskTimeout = %v, want legacy Expire %v", pool.config.RunningTaskTimeout, expire)
+	}
+}
+
+func TestStatefulPoolsModulePreservesLegacyBuiltinDefaults(t *testing.T) {
 	module := NewStatefulPoolsModule(nil, nil)
 
-	for _, name := range []string{SessionGoPoolName, UserGoPoolName, PersistGoPoolName} {
-		if !module.cfgMap[name].DisablePurgeRunning {
-			t.Errorf("pool %q allows running-task escape by default", name)
+	for _, name := range []string{SessionGoPoolName, UserGoPoolName, DefaultGoPoolName} {
+		if module.cfgMap[name].DisablePurgeRunning {
+			t.Errorf("pool %q disables running-task escape by default", name)
 		}
 	}
-	if module.cfgMap[DefaultGoPoolName].DisablePurgeRunning {
-		t.Error("default pool unexpectedly disables running-task escape")
+	if !module.cfgMap[PersistGoPoolName].DisablePurgeRunning {
+		t.Error("persist pool unexpectedly allows running-task escape")
 	}
 	if module.cfgMap[PersistGoPoolName].Expire != time.Hour {
 		t.Fatalf("persist Expire = %v, want 1h", module.cfgMap[PersistGoPoolName].Expire)
 	}
 }
 
-func TestStatefulPoolsModuleResolvesStrictDefaultsAndExplicitEscape(t *testing.T) {
+func TestStatefulPoolsModulePreservesEscapeDefaultsAndExplicitStrictMode(t *testing.T) {
 	configured := map[string]config.GoPool{
 		"room": {
 			Expire:     5 * time.Minute,
@@ -73,34 +91,32 @@ func TestStatefulPoolsModuleResolvesStrictDefaultsAndExplicitEscape(t *testing.T
 			Expire: 90 * time.Minute,
 		},
 		UserGoPoolName: {
-			Expire:                  2 * time.Hour,
-			EnableRunningTaskEscape: true,
+			Expire:              2 * time.Hour,
+			DisablePurgeRunning: true,
 		},
 		PersistGoPoolName: {
-			Expire:                  3 * time.Hour,
-			MaxEscapedWorkers:       7,
-			MaxEscapedWorkersPerID:  2,
-			EnableRunningTaskEscape: true,
+			Expire:                 3 * time.Hour,
+			MaxEscapedWorkers:      7,
+			MaxEscapedWorkersPerID: 2,
 		},
 	}
 	module := NewStatefulPoolsModule(configured, nil)
 
 	room := module.cfgMap["room"]
-	if room.Expire != 5*time.Minute || room.TaskBuffer != 1000 || !room.DisablePurgeRunning {
-		t.Fatalf("custom room pool lost the strict default: %+v", room)
+	if room.Expire != 5*time.Minute || room.TaskBuffer != 1000 || room.DisablePurgeRunning {
+		t.Fatalf("custom room pool lost the legacy escape default: %+v", room)
 	}
 	session := module.cfgMap[SessionGoPoolName]
-	if session.Expire != 90*time.Minute || !session.DisablePurgeRunning {
-		t.Fatalf("partial session config lost the strict default: %+v", session)
+	if session.Expire != 90*time.Minute || session.DisablePurgeRunning {
+		t.Fatalf("partial session config lost the legacy escape default: %+v", session)
 	}
 	user := module.cfgMap[UserGoPoolName]
-	if user.Name != UserGoPoolName || user.Expire != 2*time.Hour || user.DisablePurgeRunning ||
-		!user.EnableRunningTaskEscape {
-		t.Fatalf("explicit user config was not preserved: %+v", user)
+	if user.Name != UserGoPoolName || user.Expire != 2*time.Hour || !user.DisablePurgeRunning {
+		t.Fatalf("explicit strict user config was not preserved: %+v", user)
 	}
 	persist := module.cfgMap[PersistGoPoolName]
 	if persist.Name != PersistGoPoolName || persist.Expire != 3*time.Hour ||
-		persist.DisablePurgeRunning || !persist.EnableRunningTaskEscape || persist.MaxEscapedWorkers != 7 ||
+		!persist.DisablePurgeRunning || persist.MaxEscapedWorkers != 7 ||
 		persist.MaxEscapedWorkersPerID != 2 {
 		t.Fatalf("explicit persist config was not preserved: %+v", persist)
 	}
@@ -153,6 +169,7 @@ func TestStatefulPoolStrictModeDoesNotEscape(t *testing.T) {
 		RunningTaskTimeout:     5 * time.Millisecond,
 		MaxEscapedWorkers:      1,
 		MaxEscapedWorkersPerID: 1,
+		DisablePurgeRunning:    true,
 		TaskBuffer:             2,
 		DisableTimeoutWatch:    true,
 	}, nil, 1)
@@ -173,14 +190,13 @@ func TestStatefulPoolStrictModeDoesNotEscape(t *testing.T) {
 	}, true)
 
 	escapeControl := newTestStatefulPoolWithConfig(t, config.GoPool{
-		Name:                    "room-escape-control",
-		Expire:                  time.Hour,
-		RunningTaskTimeout:      5 * time.Millisecond,
-		MaxEscapedWorkers:       1,
-		MaxEscapedWorkersPerID:  1,
-		EnableRunningTaskEscape: true,
-		TaskBuffer:              2,
-		DisableTimeoutWatch:     true,
+		Name:                   "room-escape-control",
+		Expire:                 time.Hour,
+		RunningTaskTimeout:     5 * time.Millisecond,
+		MaxEscapedWorkers:      1,
+		MaxEscapedWorkersPerID: 1,
+		TaskBuffer:             2,
+		DisableTimeoutWatch:    true,
 	}, nil, 1)
 	controlRelease := newF12TaskRelease(t)
 	controlFirstStarted := make(chan struct{})
@@ -215,14 +231,13 @@ func TestStatefulPoolStrictModeDoesNotEscape(t *testing.T) {
 
 func TestStatefulPoolGlobalEscapeBudget(t *testing.T) {
 	pool := newTestStatefulPoolWithConfig(t, config.GoPool{
-		Name:                    "global-budget",
-		Expire:                  time.Hour,
-		RunningTaskTimeout:      5 * time.Millisecond,
-		MaxEscapedWorkers:       2,
-		MaxEscapedWorkersPerID:  1,
-		EnableRunningTaskEscape: true,
-		TaskBuffer:              2,
-		DisableTimeoutWatch:     true,
+		Name:                   "global-budget",
+		Expire:                 time.Hour,
+		RunningTaskTimeout:     5 * time.Millisecond,
+		MaxEscapedWorkers:      2,
+		MaxEscapedWorkersPerID: 1,
+		TaskBuffer:             2,
+		DisableTimeoutWatch:    true,
 	}, nil, 3)
 
 	releases := make(map[int]*f12TaskRelease, 3)
@@ -310,14 +325,13 @@ func TestStatefulPoolGlobalEscapeBudget(t *testing.T) {
 
 func TestStatefulPoolPerIDEscapeBudget(t *testing.T) {
 	pool := newTestStatefulPoolWithConfig(t, config.GoPool{
-		Name:                    "per-id-budget",
-		Expire:                  time.Hour,
-		RunningTaskTimeout:      5 * time.Millisecond,
-		MaxEscapedWorkers:       4,
-		MaxEscapedWorkersPerID:  1,
-		EnableRunningTaskEscape: true,
-		TaskBuffer:              3,
-		DisableTimeoutWatch:     true,
+		Name:                   "per-id-budget",
+		Expire:                 time.Hour,
+		RunningTaskTimeout:     5 * time.Millisecond,
+		MaxEscapedWorkers:      4,
+		MaxEscapedWorkersPerID: 1,
+		TaskBuffer:             3,
+		DisableTimeoutWatch:    true,
 	}, nil, 1)
 	releaseFirst := newF12TaskRelease(t)
 	releaseSecond := newF12TaskRelease(t)

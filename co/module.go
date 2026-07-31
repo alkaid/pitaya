@@ -46,11 +46,11 @@ func NewStatefulPoolsModule(poolsCfg map[string]config.GoPool, reporters []metri
 		reportPeriod: resolveStatefulPoolMetricsPeriod(reportPeriod),
 	}
 	for name, pool := range poolsCfg {
-		module.cfgMap[name] = resolvePoolConfig(name, pool)
+		module.cfgMap[name] = resolveModulePoolConfig(name, pool)
 	}
 	for _, name := range builtinPool {
 		if _, ok := module.cfgMap[name]; !ok {
-			module.cfgMap[name] = resolvePoolConfig(name, config.GoPool{})
+			module.cfgMap[name] = resolveModulePoolConfig(name, config.GoPool{})
 		}
 	}
 	instance = &module
@@ -59,13 +59,16 @@ func NewStatefulPoolsModule(poolsCfg map[string]config.GoPool, reporters []metri
 
 func resolvePoolConfig(name string, cfg config.GoPool) config.GoPool {
 	cfg.Name = name
-	if cfg.EnableRunningTaskEscape {
-		cfg.DisablePurgeRunning = false
-	} else if name != DefaultGoPoolName {
+	return cfg
+}
+
+func resolveModulePoolConfig(name string, cfg config.GoPool) config.GoPool {
+	cfg = resolvePoolConfig(name, cfg)
+	if name == PersistGoPoolName {
 		cfg.DisablePurgeRunning = true
-	}
-	if name == PersistGoPoolName && cfg.Expire == 0 {
-		cfg.Expire = time.Hour
+		if cfg.Expire == 0 {
+			cfg.Expire = time.Hour
+		}
 	}
 	return cfg
 }

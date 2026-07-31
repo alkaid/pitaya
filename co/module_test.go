@@ -21,13 +21,12 @@ func TestStatefulPoolsModuleConsumesEscapeEventsWithoutReporters(t *testing.T) {
 
 	module := NewStatefulPoolsModule(map[string]config.GoPool{
 		DefaultGoPoolName: {
-			Expire:                  time.Hour,
-			RunningTaskTimeout:      time.Millisecond,
-			TaskBuffer:              2,
-			MaxEscapedWorkers:       1,
-			MaxEscapedWorkersPerID:  1,
-			EnableRunningTaskEscape: true,
-			DisableTimeoutWatch:     true,
+			Expire:                 time.Hour,
+			RunningTaskTimeout:     time.Millisecond,
+			TaskBuffer:             2,
+			MaxEscapedWorkers:      1,
+			MaxEscapedWorkersPerID: 1,
+			DisableTimeoutWatch:    true,
 		},
 	}, nil, time.Hour)
 	if err := module.Init(); err != nil {
@@ -74,13 +73,12 @@ func TestStatefulPoolsModuleReconcilesDroppedEventsWithoutReporters(t *testing.T
 
 	module := NewStatefulPoolsModule(map[string]config.GoPool{
 		DefaultGoPoolName: {
-			Expire:                  time.Hour,
-			RunningTaskTimeout:      time.Millisecond,
-			TaskBuffer:              2,
-			MaxEscapedWorkers:       1,
-			MaxEscapedWorkersPerID:  1,
-			EnableRunningTaskEscape: true,
-			DisableTimeoutWatch:     true,
+			Expire:                 time.Hour,
+			RunningTaskTimeout:     time.Millisecond,
+			TaskBuffer:             2,
+			MaxEscapedWorkers:      1,
+			MaxEscapedWorkersPerID: 1,
+			DisableTimeoutWatch:    true,
 		},
 	}, nil, time.Hour)
 	if err := module.Init(); err != nil {

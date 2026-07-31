@@ -44,7 +44,7 @@ func NewStatefulPool(config config.GoPool, reporters []metrics.Reporter, options
 		config.Expire = DefaultStatefulPoolExpire
 	}
 	if config.RunningTaskTimeout == 0 {
-		config.RunningTaskTimeout = DefaultRunningTaskTimeout
+		config.RunningTaskTimeout = config.Expire
 	}
 	if config.TaskBuffer == 0 {
 		config.TaskBuffer = DefaultStatefulPoolTaskBuffer
