@@ -3,6 +3,16 @@
 Pitaya separates public client traffic from trusted cluster traffic. Deployments
 must preserve that boundary at the listener, proxy, and transport layers.
 
+## Reporting a vulnerability
+
+This fork does not use the former upstream security mailbox. Do not send fork
+reports there, and do not disclose exploit details, credentials, packet captures,
+or private deployment information in a public issue.
+
+Use [GitHub private vulnerability reporting](https://github.com/alkaid/pitaya/security/advisories/new)
+for this fork. It is the fork-owned channel for sharing sensitive details with
+the repository maintainer. Do not redirect fork reports to the upstream project.
+
 ## Public routes
 
 The `sys` service namespace is reserved for framework remotes. Client request and
@@ -49,9 +59,18 @@ PROXY protocol on a TCP listener reachable by arbitrary clients.
 
 NATS credentials and subject ACLs are the supported boundary for cluster remotes,
 including `sys.*`. Give frontend and backend identities only the subjects they
-need and keep the broker off public networks.
+need, reject broad publish/subscribe wildcards where possible, rotate credentials,
+and keep the broker off public networks. Client identities must never receive
+cluster credentials.
 
 The retained gRPC RPC implementation does not authenticate peers or provide mTLS.
 It is not a supported business-traffic deployment path. If it must be enabled for
 temporary compatibility, bind it to loopback or a controlled sidecar network, or
 place both directions behind explicit network ACLs.
+
+## Dependency findings
+
+`make scan-deps` evaluates symbol reachability in the root, CLI, and xk6 modules.
+A reachable advisory fails the gate unless a time-bounded exception records the
+finding, affected modules, rationale, owner, mitigation, and expiry. Scanner or
+database errors also fail; they are not interpreted as an empty report.

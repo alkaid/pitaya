@@ -35,7 +35,7 @@ Acceptors are the entities responsible for listening for connections, establishi
 
 After the low level connection is established it is passed to the handler service to handle. The handler service is responsible for handling the lifecycle of the clients' connections. It reads from the low-level connection, decodes the received packets and handles them properly, calling the local server's handler if the target server type is the same as the local one or forwarding the message to the remote service otherwise.
 
-This fork dispatches local and remote client messages through a keyed executor. Messages for the same bound UID share the `user` pool and execute serially, while different UIDs can run concurrently. Unbound sessions use the `session` pool. The legacy `pitaya.concurrency.handler.dispatch` setting no longer controls client-handler concurrency. See [UID-serial actor/keyed executor](./actor-keyed-executor.md) for the routing, ordering, failure, and application-side contracts.
+This fork dispatches local and remote client messages through a keyed executor. Messages for the same bound UID share the `user` pool and execute serially, while different UIDs can run concurrently. Unbound sessions use the `session` pool. `pitaya.concurrency.handler.dispatch` still controls how many dispatcher loops read decoded agent messages, but it does not define handler-method concurrency or override keyed ordering. See [UID-serial actor/keyed executor](./actor-keyed-executor.md) for the routing, ordering, failure, and application-side contracts.
 
 ### Agent
 

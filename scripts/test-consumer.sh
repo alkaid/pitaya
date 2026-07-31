@@ -18,23 +18,81 @@ package consumer_test
 
 import (
 	"context"
+	"errors"
 
 	pitaya "github.com/alkaid/pitaya/v2"
 	"github.com/alkaid/pitaya/v2/client"
+	"github.com/alkaid/pitaya/v2/cluster"
+	"github.com/alkaid/pitaya/v2/co"
 	"github.com/alkaid/pitaya/v2/component"
 	"github.com/alkaid/pitaya/v2/config"
+	"github.com/alkaid/pitaya/v2/route"
+	"github.com/alkaid/pitaya/v2/router"
+	"github.com/alkaid/pitaya/v2/session"
 )
 
 func executeTask(ctx context.Context, task component.Task) error {
 	return task(ctx)
 }
 
+func newBuilderContract() *pitaya.Builder {
+	cfg := config.NewDefaultPitayaConfig()
+	return pitaya.NewDefaultBuilder(
+		true,
+		"connector",
+		pitaya.Standalone,
+		map[string]string{"region": "local"},
+		*cfg,
+	)
+}
+
+func routeRoom(
+	ctx context.Context,
+	target *route.Route,
+	payload []byte,
+	servers map[string]*cluster.Server,
+	sess session.Session,
+) (*cluster.Server, error) {
+	var selected *cluster.Server
+	for _, server := range servers {
+		if server != nil && (selected == nil || server.ID < selected.ID) {
+			selected = server
+		}
+	}
+	if selected == nil {
+		return nil, errors.New("no room server available")
+	}
+	return selected, nil
+}
+
+func statefulGoContract(
+	pool *co.StatefulPool,
+	ctx context.Context,
+	key int,
+	task func(context.Context),
+) (<-chan struct{}, error) {
+	return pool.Go(ctx, key, task, false)
+}
+
+func statefulWaitContract(
+	pool *co.StatefulPool,
+	ctx context.Context,
+	key int,
+	task func(context.Context),
+) error {
+	return pool.Wait(ctx, key, task, false)
+}
+
 var (
 	_ *pitaya.App
 	_ client.PitayaClient
 	_ *config.Config
+	_                          = newBuilderContract
+	_ router.RoutingFunc       = routeRoom
 	_ component.TaskExecutor = component.TaskExecutorFunc(executeTask)
 	_ component.Option       = component.WithTaskExecutor(component.TaskExecutorFunc(executeTask))
+	_                        = statefulGoContract
+	_                        = statefulWaitContract
 	_                        = component.ErrTaskSkipped
 	_                        = component.ErrTaskInvocationClosed
 )

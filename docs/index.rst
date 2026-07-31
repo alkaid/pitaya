@@ -3,8 +3,8 @@
    You can adapt this file completely to your liking, but it should at least
    contain the root `toctree` directive.
 
-Welcome to Pitaya's documentation!
-==================================
+Alkaid Pitaya documentation
+============================
 
 .. toctree::
    :maxdepth: 2
@@ -17,6 +17,9 @@ Welcome to Pitaya's documentation!
    communication
    actor-keyed-executor
    security
+   testing
+   migration-v2-ak
+   upstream-ledger
    configuration
    logging
    API

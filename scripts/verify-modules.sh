@@ -4,6 +4,7 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 workspace=$repo_root/go.work
 module_dirs=(. pitaya-cli xk6-pitaya)
+upstream_identity_pattern='(github\.com/topfreegames/|git@github\.com:topfreegames/)pitaya(/v2)?(\.git)?([\x27/@[:space:]"(),:;]|$)'
 manifests=(
 	go.mod
 	go.sum
@@ -29,14 +30,122 @@ snapshot_manifests() {
 	done
 }
 
+scan_upstream_identities() {
+	rg --hidden --no-ignore -n -i "$upstream_identity_pattern" "$1"
+}
+
+is_identity_candidate() {
+	local file=$1
+	local base=${file##*/}
+	case $base in
+		go.mod | go.sum | go.work | go.work.sum) return 0 ;;
+	esac
+	[[ $file == *.go || ${base,,} == *dockerfile* ]]
+}
+
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
+
+for upstream_sample in \
+	'github.com/topfreegames/pitaya' \
+	'github.com/topfreegames/pitaya/component' \
+	'github.com/topfreegames/pitaya/v2' \
+	'github.com/topfreegames/pitaya/v2/component' \
+	'github.com/topfreegames/pitaya@v2.11.24' \
+	'https://github.com/topfreegames/pitaya.git' \
+	'git@github.com:topfreegames/pitaya.git' \
+	"RUN git clone 'https://github.com/topfreegames/pitaya' /src" \
+	'HTTPS://GITHUB.COM/TopFreeGames/Pitaya/v2/component'; do
+	if ! rg -q -i "$upstream_identity_pattern" <<<"$upstream_sample"; then
+		echo "source identity detector missed: $upstream_sample" >&2
+		exit 1
+	fi
+done
+
+for identity_candidate in \
+	go.mod go.sum go.work go.work.sum main.go Dockerfile Dockerfile.release dev.Dockerfile; do
+	if ! is_identity_candidate "$identity_candidate"; then
+		echo "source identity candidate selector missed: $identity_candidate" >&2
+		exit 1
+	fi
+done
+for allowed_neighbor in \
+	'github.com/alkaid/pitaya/v2/component' \
+	'github.com/topfreegames/pitaya-cli' \
+	'github.com/topfreegames/pitaya-protos' \
+	'github.com/topfreegames/pitayadmin'; do
+	if rg -q -i "$upstream_identity_pattern" <<<"$allowed_neighbor"; then
+		echo "source identity detector rejected a neighboring module: $allowed_neighbor" >&2
+		exit 1
+	fi
+done
 
 stager=$tmpdir/stagecontext
 (
 	cd "$repo_root/tools"
 	GOWORK=off go build -o "$stager" ./cmd/stagecontext
 )
+
+stage_source_files() {
+	local repo=$1
+	local destination=$2
+	"$stager" \
+		-repo "$repo" \
+		-destination "$destination" \
+		-files-from-stdin \
+		-require-all
+}
+
+symlink_probe=$tmpdir/source-symlink-probe
+mkdir -p "$symlink_probe/repo"
+printf '%s\n' 'github.com/topfreegames/pitaya/v2' >"$symlink_probe/repo/payload.txt"
+ln -s payload.txt "$symlink_probe/repo/Dockerfile.probe"
+if printf 'Dockerfile.probe\0' | stage_source_files "$symlink_probe/repo" "$symlink_probe/staged" >/dev/null 2>&1; then
+	echo "source identity staging accepted a symlink candidate" >&2
+	exit 1
+fi
+
+hidden_probe=$tmpdir/hidden-probe/.hidden
+mkdir -p "$hidden_probe"
+printf '%s\n' 'import "github.com/topfreegames/pitaya/v2/component"' >"$hidden_probe/probe.go"
+if ! scan_upstream_identities "$tmpdir/hidden-probe" >/dev/null; then
+	echo "source identity scan skipped a hidden path" >&2
+	exit 1
+fi
+
+source_root=$tmpdir/source-identity
+source_files=$tmpdir/source-files
+source_file_count=0
+: >"$source_files"
+while IFS= read -r -d '' file; do
+	if is_identity_candidate "$file"; then
+		printf '%s\0' "$file" >>"$source_files"
+		((source_file_count += 1))
+	fi
+done < <(git -C "$repo_root" ls-files -z --cached --others --exclude-standard)
+
+((source_file_count > 0)) || {
+	echo "source identity scan has no input files" >&2
+	exit 1
+}
+stage_source_files "$repo_root" "$source_root" <"$source_files"
+[[ -d $source_root ]] || {
+	echo "source identity staging did not create its destination" >&2
+	exit 1
+}
+
+source_matches=$tmpdir/source-identity-matches
+if scan_upstream_identities "$source_root" >"$source_matches"; then
+	cat "$source_matches" >&2
+	echo "source, module manifest, or Dockerfile contains an upstream Pitaya identity" >&2
+	exit 1
+else
+	status=$?
+	if [[ $status -ne 1 ]]; then
+		echo "source identity scan failed with status $status" >&2
+		exit 1
+	fi
+fi
 
 stage_manifests() {
 	local destination=$1

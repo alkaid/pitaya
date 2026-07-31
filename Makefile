@@ -25,6 +25,9 @@ XK6_VERSION := v1.4.7
 K6_VERSION := v1.8.0
 DEV_IMAGE := pitaya-dev:go1.26.5
 WORKSPACE := $(abspath go.work)
+DOCS_BUILDDIR ?= $(abspath build/docs)
+SPHINXBUILD ?= sphinx-build
+SPHINXOPTS ?= -W --keep-going
 
 TESTABLE_PACKAGES = `go list ./... | $(GREP_CMD) examples | $(GREP_CMD) constants | $(GREP_CMD) mocks | $(GREP_CMD) helpers | $(GREP_CMD) interfaces | $(GREP_CMD) protos | $(GREP_CMD) e2e | $(GREP_CMD) benchmark`
 
@@ -65,10 +68,16 @@ logrus-verify:
 test-consumer:
 	@./scripts/test-consumer.sh
 
+docs-lint:
+	@./scripts/verify-docs.sh
+
+docs:
+	@$(MAKE) -C docs SPHINXBUILD="$(SPHINXBUILD)" SPHINXOPTS="$(SPHINXOPTS)" BUILDDIR="$(DOCS_BUILDDIR)" html
+
 test-distribution:
 	@./scripts/test-distribution.sh
 
-verify-fast: tools-verify module-verify logrus-verify compile test-unit vet test-consumer
+verify-fast: tools-verify module-verify logrus-verify docs-lint compile test-unit vet test-consumer
 
 scan-deps: init-toolchain
 	@./scripts/scan-deps.sh
@@ -241,7 +250,7 @@ test-coverage-func coverage-func: test-coverage
 	@echo "\033[1;34m=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\033[0m"
 	@go tool cover -func=coverprofile.out | grep -Ev "100[.]0%"
 
-.PHONY: compile-core compile-root compile-cli compile-xk6 compile test-unit vet verify-root module-verify tools-verify logrus-verify test-consumer test-distribution verify-fast scan-deps test-e2e-nats e2e-test-nats e2e-test test coverage init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
+.PHONY: compile-core compile-root compile-cli compile-xk6 compile test-unit vet verify-root module-verify tools-verify logrus-verify test-consumer test-distribution docs docs-lint verify-fast scan-deps test-e2e-nats e2e-test-nats e2e-test test coverage init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 
 mocks: agent-mock session-mock networkentity-mock pitaya-mock serializer-mock metrics-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 

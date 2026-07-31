@@ -4,31 +4,94 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 artifact_dir=$repo_root/build/verification/logrus
 mkdir -p "$artifact_dir"
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+
+run_rg_scan() {
+	local output=$1
+	shift
+	if "$@" >"$output"; then
+		return 0
+	else
+		local status=$?
+		[[ $status -eq 1 ]] && return 0
+		return "$status"
+	fi
+}
+
+if run_rg_scan "$tmpdir/error-probe" rg -n 'probe' "$tmpdir/missing" >/dev/null 2>&1; then
+	echo "Logrus scan error self-test unexpectedly passed" >&2
+	exit 1
+fi
 
 if [[ -n $(find "$repo_root/logger/logrus" "$repo_root/logger/test" -type f -print -quit 2>/dev/null) ]]; then
 	echo "removed first-party Logrus packages must not be restored" >&2
 	exit 1
 fi
 
-mapfile -t source_hits < <(
+source_hits=$tmpdir/source-hits
+if (
 	cd "$repo_root"
-	rg -n -i 'github.com/sirupsen/logrus|github.com/alkaid/pitaya/v2/logger/(logrus|test)' \
-		--glob '*.go' --glob '*.sh' --glob '*.yaml' --glob '*.yml' \
-		--glob 'Dockerfile*' --glob '!scripts/verify-logrus.sh' . || true
-)
-if ((${#source_hits[@]})); then
-	printf 'first-party Logrus references remain:\n%s\n' "${source_hits[*]}" >&2
+	run_rg_scan "$source_hits" rg --hidden -n -i \
+		'github.com/sirupsen/logrus|github.com/alkaid/pitaya/v2/logger/(logrus|test)' \
+		--iglob '*.go' --iglob '*.sh' --iglob '*.yaml' --iglob '*.yml' \
+		--iglob '*dockerfile*' --iglob '!scripts/verify-logrus.sh' .
+); then
+	:
+else
+	status=$?
+	echo "first-party Logrus source scan failed with status $status" >&2
+	exit "$status"
+fi
+if [[ -s $source_hits ]]; then
+	cat "$source_hits" >&2
+	echo "first-party Logrus references remain" >&2
 	exit 1
 fi
 
-mapfile -t doc_hits < <(
+doc_hits=$tmpdir/doc-hits
+if (
 	cd "$repo_root"
-	rg -n -i 'logrus|logger/test' --glob '*.md' --glob '!docs/logging.md' . || true
-)
-if ((${#doc_hits[@]})); then
-	printf 'undocumented Logrus references remain:\n%s\n' "${doc_hits[*]}" >&2
+	run_rg_scan "$doc_hits" rg --hidden --with-filename --no-line-number -i \
+		'logrus|logger/test' --iglob '*.md' --iglob '*.rst' .
+); then
+	:
+else
+	status=$?
+	echo "first-party Logrus documentation scan failed with status $status" >&2
+	exit "$status"
+fi
+
+expected_doc_hits=$tmpdir/expected-doc-hits
+actual_doc_hits=$tmpdir/actual-doc-hits
+printf '%s\n' \
+	'./docs/logging.md:## Migrate from the first-party Logrus packages' \
+	'./docs/logging.md:The deprecated `github.com/alkaid/pitaya/v2/logger/logrus` adapter and `github.com/alkaid/pitaya/v2/logger/test` helper have been removed. There is no compatibility shim and no general `pitaya.SetLogger` replacement.' \
+	'./docs/logging.md:The client no longer accepts a Logrus level. Construct it with the current API and provide an explicit disconnect reason:' \
+	'./docs/logging.md:`worker.SetLogger` remains a separate legacy integration that accepts `logger/interfaces.Logger`. Applications that still call it must own that adapter while migrating; Pitaya no longer provides a Logrus implementation for it.' \
+	'./docs/migration-v2-ak.md:## Removed Logrus packages' \
+	'./docs/migration-v2-ak.md:The first-party `logger/logrus` adapter and `logger/test` helper were removed' \
+	'./docs/testing.md:| `logrus-verify` | Removed first-party Logrus packages do not reappear |' | \
+	LC_ALL=C sort >"$expected_doc_hits"
+LC_ALL=C sort "$doc_hits" >"$actual_doc_hits"
+if ! cmp -s "$expected_doc_hits" "$actual_doc_hits"; then
+	diff -u "$expected_doc_hits" "$actual_doc_hits" >&2 || true
+	echo "Logrus documentation references differ from the reviewed set" >&2
 	exit 1
 fi
+
+rg -q -F 'github.com/alkaid/pitaya/v2/logger/logrus' "$repo_root/docs/logging.md" || {
+	echo "logging migration no longer documents the removed adapter" >&2
+	exit 1
+}
+rg -q -F '`logger/logrus` adapter' "$repo_root/docs/migration-v2-ak.md" || {
+	echo "fork migration no longer documents the removed adapter" >&2
+	exit 1
+}
+rg -q -F '`logrus-verify`' "$repo_root/docs/testing.md" || {
+	echo "testing guide no longer documents the Logrus verification target" >&2
+	exit 1
+}
 
 direct_logrus=$(
 	cd "$repo_root"

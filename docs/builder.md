@@ -11,11 +11,11 @@ A common use case is where it becomes necessary to perform configuration steps i
 
 ```go
 // main.go
-cfg := config.NewDefaultBuilderConfig()
+cfg := config.NewDefaultPitayaConfig()
 builder := pitaya.NewDefaultBuilder(isFrontEnd, "my-server-type", pitaya.Cluster, map[string]string{}, *cfg)
 
-customModule := NewCustomModule(builder)
-customModule.ConfigurePitaya(builder)
+customObject := NewCustomObject(builder)
+customObject.ConfigurePitaya()
 
 app := builder.Build()
 
@@ -32,7 +32,7 @@ func NewCustomObject(builder *pitaya.Builder) *CustomObject {
 
 func (object *CustomObject) ConfigurePitaya() {
 	object.builder.AddAcceptor(...)
-	object.builder.AddPostBuildHook(func (app pitaya.App) {
+	object.builder.AddPostBuildHook(func(app pitaya.Pitaya) {
 		app.Register(...)
 	})
 }

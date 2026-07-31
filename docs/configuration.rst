@@ -124,6 +124,10 @@ The configurations only need to be set if the RPC Service is enabled with the gi
     - Default value
     - Type
     - Description
+  * - pitaya.cluster.rpc.fanout_concurrency
+    - 32
+    - int
+    - Maximum RPCs started concurrently by each fanout call; non-positive values use 32, and concurrent calls have independent budgets
   * - pitaya.cluster.rpc.server.nats.buffer.messages
     - 75
     - int
@@ -400,12 +404,16 @@ Concurrency
   * - pitaya.concurrency.handler.dispatch
     - 25
     - int
-    - Number of goroutines processing messages at the handler service
+    - Number of dispatcher goroutines reading decoded agent messages. Handler method ordering and keyed execution are not controlled by this value.
 
 Modules
 =======
 
-These configurations are only used if the modules are created. It is recommended to use Binding Storage module with gRPC RPC service to be able to use all RPC service features.
+These configurations are only used if the modules are created. Binding Storage
+is retained for compatibility with the gRPC implementation, but gRPC is not a
+supported business-traffic path in this fork. Enabling this module does not add
+peer authentication, keyed dispatch parity, or transport security; see
+:doc:`security`.
 
 .. list-table::
   :widths: 15 10 10 50

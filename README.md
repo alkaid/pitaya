@@ -1,122 +1,136 @@
-# pitaya [![Build Status][7]][8] [![Go Reference][1]][2] [![Docs][11]][12] [![Go Report Card][3]][4] [![MIT licensed][5]][6]
+# Alkaid Pitaya
 
-*WARNING*: [Version v1.x](https://github.com/alkaid/pitaya/tree/v1) is deprecated. See the [v2 migration guide](https://github.com/topfreegames/pitaya/issues/240) for details.
-This README covers v2.x. See the v1 branch for the older documentation.
+[![Build Status](https://github.com/alkaid/pitaya/actions/workflows/tests.yaml/badge.svg)](https://github.com/alkaid/pitaya/actions/workflows/tests.yaml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/alkaid/pitaya/v2.svg)](https://pkg.go.dev/github.com/alkaid/pitaya/v2)
+[![MIT licensed](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
----
+This repository is the Alkaid-maintained Pitaya v2 fork. Its Go module is
+`github.com/alkaid/pitaya/v2`, and the source tree requires Go 1.26.5. It is a
+distributed game-server framework with an explicit application lifecycle,
+sessions, routing, NATS RPC, and keyed task execution.
 
-[1]: https://pkg.go.dev/badge/github.com/alkaid/pitaya/v2.svg
-[2]: https://pkg.go.dev/github.com/alkaid/pitaya/v2
-[3]: https://goreportcard.com/badge/github.com/alkaid/pitaya
-[4]: https://goreportcard.com/report/github.com/alkaid/pitaya
-[5]: https://img.shields.io/badge/license-MIT-blue.svg
-[6]: LICENSE
-[7]: https://github.com/alkaid/pitaya/actions/workflows/tests.yaml/badge.svg
-[8]: https://github.com/alkaid/pitaya/actions/workflows/tests.yaml
-[11]: https://readthedocs.org/projects/pitaya/badge/?version=latest
-[12]: https://pitaya.readthedocs.io/en/latest/?badge=latest
+The current `main` branch contains unreleased, compile-time API changes. The
+last independently verified public fork release is `v2.11.1-ak-35`:
 
-Pitaya is a fast, lightweight game server framework with clustering support and client libraries for iOS, Android, Unity, and other platforms through the [C SDK](https://github.com/topfreegames/libpitaya).
-It provides a basic development framework for distributed multiplayer games and server-side applications.
+```sh
+go get github.com/alkaid/pitaya/v2@v2.11.1-ak-35
+```
 
-## Getting Started
+Pin an explicit `-ak-` version. Do not use `@latest` until a newer stable fork
+tag is published and verified: inherited upstream stable tags can sort above
+fork prereleases while declaring a different module path.
 
-### Prerequisites
+## Fork contract
 
-* [Go](https://go.dev/) 1.26.5 or newer
-* [etcd](https://github.com/etcd-io/etcd) (optional, used for service discovery)
-* [NATS](https://github.com/nats-io/nats-server) (optional, used for sending and receiving RPCs)
-* [Docker](https://www.docker.com/) with [Docker Compose v2](https://docs.docker.com/compose/) (optional, used to run etcd and NATS in containers)
-* [protoc 35.1](https://github.com/protocolbuffers/protobuf/releases/tag/v35.1) (only required to regenerate protobuf files; Go plugins are pinned in [`tools/go.mod`](./tools/go.mod))
-* [Python 3.12 or newer](https://www.python.org/) (only required to build the documentation)
+The fork deliberately differs from the upstream product in several areas:
 
-### Installing
-Clone the repository:
+- the builder returns an explicit `App` instead of exposing a mutable default
+  application API; construct, build, and run only one `App` lifecycle per process;
+- UID identity snapshots use atomic request-path reads and session-pool lookup
+  uses `sync.Map`; lifecycle and backend-binding mutations have explicit
+  framework ownership;
+- keyed pools report admission errors, bound running-task escape, and expose
+  lifecycle metrics instead of silently accepting all work;
+- component scheduling uses `TaskExecutor`, whose completion and rejection
+  contract is owned and checked by the framework;
+- routing, publish subscribers, and per-instance fanout are supported on the
+  NATS cluster path;
+- client address forwarding is disabled unless the socket peer matches a
+  trusted-proxy CIDR compiled when the `App` is built; changes require restart;
+- the retained gRPC cluster transport is compatibility code, not a supported
+  business-traffic path. Keep it disabled or strictly network-isolated.
+
+See the [fork migration guide](docs/migration-v2-ak.md),
+[security boundaries](docs/security.md), and
+[actor/keyed executor model](docs/actor-keyed-executor.md) before upgrading an
+existing service.
+
+## Build from source
+
+Prerequisites:
+
+- Go 1.26.5;
+- Git submodule support;
+- `protoc` 35.1 only when regenerating protobuf files;
+- Python 3.12 or newer only when building documentation;
+- Docker Engine and Docker Compose v2 only for distribution and NATS E2E
+  checks.
+
 ```sh
 git clone https://github.com/alkaid/pitaya.git
 cd pitaya
-```
-Initialize the submodules and pinned Go tools:
-```sh
 make setup
+make verify-fast
 ```
 
-### Hacking pitaya
+`make verify-fast` verifies pinned tools, module identity, and fork documentation
+policy; compiles the root, CLI, and xk6 modules; then runs unit tests, vet, and an
+independent consumer smoke test. It does not start external services.
 
-Build the [pitaya-cli](https://github.com/alkaid/pitaya/tree/main/pitaya-cli)
-REPL client from the current checkout:
+The current checkout can also build the REPL client against the same workspace:
 
 ```sh
 make build-cli
 ```
 
-The repository workspace makes this build use the Pitaya source from the same
-checkout.
+## Verification
 
-## Running the tests
-
-Run the fast local verification gate while developing:
+Use the narrowest gate that matches a change:
 
 ```sh
-make verify-fast
+make verify-fast       # source, docs policy, unit, vet, and consumer checks
+make docs-lint         # fork identity, link policy, and ledger checks
+make docs              # warning-free Sphinx build
+make test-e2e-nats     # isolated Docker-backed NATS/etcd/Redis path
+make test-distribution # versioned CLI/xk6/module/Docker smoke
+make scan-deps         # reachable dependency report
 ```
 
-This checks the pinned tools and module graph, compiles the root, CLI, and xk6
-modules, and runs unit tests, vet, and the external consumer smoke test. It does
-not start Docker or other service dependencies.
+The dependency scan intentionally returns a non-zero status for an unaccepted
+reachable vulnerability. See [Testing the fork](docs/testing.md) for lane
+dependencies, timeouts, artifacts, and the legacy benchmark limitations.
 
-Run the NATS end-to-end suite explicitly:
+## Documentation
+
+- [Overview](docs/overview.md)
+- [Features and support boundaries](docs/features.md)
+- [API guide](docs/API.md)
+- [Configuration](docs/configuration.rst)
+- [Testing](docs/testing.md)
+- [Security](docs/security.md)
+- [Migration to the Alkaid v2 fork](docs/migration-v2-ak.md)
+- [Upstream review ledger](docs/upstream-ledger.md)
+
+The docs can be built locally after installing the pinned requirements:
 
 ```sh
-make test-e2e-nats
+python3 -m venv build/docs-venv
+build/docs-venv/bin/python -m pip install -r docs/requirements.txt
+make docs SPHINXBUILD="$PWD/build/docs-venv/bin/sphinx-build"
 ```
-
-The E2E command creates a unique Docker Compose project, starts pinned NATS,
-etcd, and Redis images on dynamic loopback ports, and waits for their health
-checks. It removes that project's containers and volumes when the run finishes;
-on failure, it also prints the service state and recent logs.
-
-## Building the documentation
-
-Build the documentation in an isolated Python environment:
-
-```sh
-cd docs
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-make SPHINXBUILD=.venv/bin/sphinx-build html
-```
-
-## Contributing
-#TODO
-
-## Authors
-* **TFG Co** - Initial work
-
-## License
-[MIT License](./LICENSE)
-
-## Acknowledgements
-* [nano](https://github.com/lonnng/nano) authors for building the framework pitaya is based on.
-* [pomelo](https://github.com/NetEase/pomelo) authors for the inspiration on the distributed design and protocol
 
 ## Security
-If you have found a security vulnerability, please email security@tfgco.com
 
-## Resources
-- Other pitaya-related projects
-  + [libpitaya-cluster](https://github.com/topfreegames/libpitaya-cluster)
-  + [libpitaya](https://github.com/topfreegames/libpitaya)
-  + [pitaya-admin](https://github.com/topfreegames/pitaya-admin)
-  + [pitaya-bot](https://github.com/topfreegames/pitaya-bot)
-  + [pitaya-cli](https://github.com/alkaid/pitaya/tree/main/pitaya-cli)
-  + [pitaya-protos](https://github.com/topfreegames/pitaya-protos)
+Do not report fork vulnerabilities to the former upstream security mailbox and
+do not post sensitive details in a public issue. Use
+[GitHub private vulnerability reporting](https://github.com/alkaid/pitaya/security/advisories/new)
+for this repository. Deployment boundaries and the reporting procedure are
+defined in [docs/security.md](docs/security.md).
 
-- Documents
-  + [API Reference](https://pkg.go.dev/github.com/alkaid/pitaya/v2)
-  + [In-depth documentation](https://pitaya.readthedocs.io/en/latest/)
+## Lineage
 
-- Demo
-  + [Implement a chat room in ~100 lines with pitaya and WebSocket](./examples/demo/chat) (adapted from [nano](https://github.com/lonnng/nano)'s example)
-  + [Pitaya cluster mode example](./examples/demo/cluster)
-  + [Pitaya cluster mode with protobuf protocol example](./examples/demo/cluster_protobuf)
+Pitaya was originally developed by TFG Co and is based on nano and ideas from
+Pomelo. This fork preserves that lineage while maintaining a separate module,
+runtime contract, and release process. Historical upstream material is tracked
+explicitly in the [upstream ledger](docs/upstream-ledger.md); availability in an
+upstream branch is not evidence that a change is safe for this fork.
+
+- [Upstream Pitaya project](https://github.com/topfreegames/pitaya)
+- [Upstream libpitaya client SDK](https://github.com/topfreegames/libpitaya)
+- [Upstream libpitaya-cluster](https://github.com/topfreegames/libpitaya-cluster)
+- [nano](https://github.com/lonnng/nano)
+- [Pomelo](https://github.com/NetEase/pomelo)
+
+## License
+
+[MIT License](LICENSE)

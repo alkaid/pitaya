@@ -14,7 +14,7 @@ To ensure the effective utilization of these validators, they should be added to
 Once the handshake process is initiated, the validators will be invoked to execute their validation routines.
 
 ```go
-cfg := config.NewDefaultBuilderConfig()
+cfg := config.NewDefaultPitayaConfig()
 builder := pitaya.NewDefaultBuilder(isFrontEnd, "my-server-type", pitaya.Cluster, map[string]string{}, *cfg)
 builder.SessionPool.AddHandshakeValidator("MyCustomValidator", func (data *session.HandshakeData) error {
 	if data.Sys.Version != "1.0.0" {

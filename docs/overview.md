@@ -1,34 +1,85 @@
-Overview
-========
+# Overview
 
-Pitaya is an easy to use, fast and lightweight game server framework inspired by [starx](https://github.com/lonnng/starx) and [pomelo](https://github.com/NetEase/pomelo) and built on top of [nano](https://github.com/lonnng/nano)'s networking library.
+Alkaid Pitaya is a maintained v2 fork of the Pitaya distributed game-server
+framework. The fork's module identity is `github.com/alkaid/pitaya/v2`, its
+toolchain baseline is Go 1.26.5, and its runtime contracts differ materially
+from the upstream project.
 
-The goal of pitaya is to provide a basic, robust development framework for distributed multiplayer games and server-side applications.
+The framework separates public client traffic from internal cluster traffic.
+Frontend servers own client connections and sessions. Backend servers receive
+forwarded handler calls and application RPC. Standalone mode keeps those pieces
+inside one process; cluster mode uses service discovery and NATS.
 
-## Features
+## Fork architecture
 
-* **User sessions** - Pitaya has support for user sessions, allowing binding sessions to user ids, setting custom data and retrieving it in other places while the session is active
-* **Cluster support** - Pitaya comes with support to default service discovery and RPC modules, allowing communication between different types of servers with ease
-* **WS and TCP listeners** - Pitaya has support for TCP and Websocket acceptors, which are abstracted from the application receiving the requests
-* **Handlers and remotes** - Pitaya allows the application to specify its handlers, which receive and process client messages, and its remotes, which receive and process RPC server messages. They can both specify custom init, afterinit and shutdown methods
-* **Message forwarding** - When a server receives a handler message it forwards the message to the server of the correct type
-* **Client library SDK** - [libpitaya](https://github.com/topfreegames/libpitaya) is the official client library SDK for Pitaya
-* **Monitoring** - Pitaya has support for Prometheus and statsd by default and accepts other custom reporters that implement the Reporter interface
-* **OpenTelemetry tracing** - Pitaya propagates trace context and baggage and can export spans to an OTLP/gRPC collector.
-* **Custom modules** - Pitaya already has some default modules and supports custom modules as well
-* **Custom serializers** - Pitaya natively supports JSON and Protobuf messages and it is possible to add other custom serializers as needed
-* **Write compatible servers in other languages** - Using [libpitaya-cluster](https://github.com/topfreegames/libpitaya-cluster) its possible to write pitaya-compatible servers in other languages that are able to register in the cluster and handle RPCs, there's already a csharp library that's compatible with unity and a WIP of a python library in the repo.
-* **REPL Client for development/debugging** - [Pitaya-cli](https://github.com/topfreegames/pitaya-cli) is a REPL client that can be used for making development and debugging of pitaya servers easier.
-* **Bots for integration/stress tests** - [Pitaya-bot](https://github.com/topfreegames/pitaya-bot) is a server test framework that can easily copy users behaviour to test corner case scenarios, which can validate the responses received, or make massive accesses into pitaya servers. 
+### Explicit application instance
 
-## Architecture
+An application is constructed through `Builder` and returned as an `App`
+instance. Code should retain and use that instance rather than expecting a
+mutable package-global default app. Process-level scheduler, ticker, and logger
+state still exist, and builder setup can mutate process-global state. Construct,
+build, and run only one `App` lifecycle per process; use separate processes for
+multiple servers.
 
-Pitaya was developed considering modularity and extendability at its core, while providing solid basic functionalities to abstract client interactions to well defined interfaces. The full API documentation is available in Godoc format at [godoc](https://godoc.org/github.com/topfreegames/pitaya).
+`NewDefaultBuilder` receives `config.PitayaConfig` by value but nested maps and
+slices are not deep-copied. Finalize the builder and its nested configuration
+before `Build`. `NewBuilderWithConfigs` is the separate entry point for reloadable
+configuration. Security boundaries such as trusted proxy CIDRs are materialized
+during `Build` and require a restart to change.
 
-## Who's Using it
+### Sessions and keyed work
 
-Well, right now, only us at TFG Co, are using it, but it would be great to get a community around the project. Hope to hear from you guys soon!
+Every client connection has a frontend session. A bound UID lets the framework
+route pushes and stateful work consistently. Session identity and pool lookup
+are optimized for request reads; lifecycle and backend binding mutations are
+serialized by framework-owned state transitions.
 
-## How To Contribute?
+Stateful pools execute work by integer key. Admission can fail and callers must
+handle the returned error. Custom pools allow bounded running-task escape by
+default for compatibility; the module-owned `persist` pool is strict. Escape is
+a liveness mechanism, not a substitute for fencing or idempotency. See
+{doc}`actor-keyed-executor` for the complete ordering model.
 
-Just the usual: Fork, Hack, Pull Request. Rinse and Repeat. Also don't forget to include tests and docs (we are very fond of both).
+### Handlers, remotes, and subscribers
+
+Handlers receive client requests and notifications. Remotes receive internal
+RPC calls. Both can install a `TaskExecutor` through component options when work
+must be dispatched to an application-owned queue.
+
+Publish subscribers are registered separately from ordinary remotes. Fork
+options are calculated per method, and request fanout uses a bounded worker set
+with stable partial-response aggregation. The NATS transport is the supported
+cluster path.
+
+## Supported boundaries
+
+| Surface | Current contract |
+| --- | --- |
+| Client listeners | TCP and WebSocket |
+| Cluster RPC | NATS with credentials and subject ACLs |
+| Service discovery | etcd through the default cluster builder |
+| Session cache | Redis through the default builder |
+| Metrics | Prometheus and StatsD reporters |
+| Tracing | OpenTelemetry context propagation and optional OTLP export |
+| gRPC cluster RPC | Retained compatibility code; disabled or network-isolated only |
+
+Client libraries and cluster implementations from the upstream ecosystem may
+remain protocol-compatible, but they have an independent release and security
+posture. Treat them as upstream projects and verify the exact version before
+deployment.
+
+## Release status
+
+The `main` branch is a source candidate and can contain unreleased breaking API
+changes. Consumers should pin an explicit verified `-ak-` tag. The release
+process does not treat a green unit suite as sufficient: module identity,
+consumer, dependency, documentation, and NATS E2E evidence are separate gates.
+See {doc}`testing` and {doc}`migration-v2-ak`.
+
+## Project lineage
+
+Pitaya was originally developed by TFG Co on top of nano and ideas from Pomelo.
+The [upstream Pitaya project](https://github.com/topfreegames/pitaya) is retained
+as historical upstream lineage, not as the installation or security-reporting
+destination for this fork. Missing upstream commits are tracked individually in
+{doc}`upstream-ledger`.

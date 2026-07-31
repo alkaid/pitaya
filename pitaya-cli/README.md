@@ -3,6 +3,10 @@ pitaya-cli
 
 A Go REPL client for Pitaya.
 
+Its module path is `github.com/alkaid/pitaya/pitaya-cli/v2`. It requires Go
+1.26.5 and is maintained with the Alkaid Pitaya fork. Build it from the
+repository workspace so the CLI and root framework use the same source revision.
+
 ## Building from source
 
 The repository root `go.work` includes both Pitaya and this CLI module, so the
@@ -18,7 +22,7 @@ go build -o ./out/pitaya-cli .
 
 A public `go install ...@latest` path is not supported yet. A versioned install
 command will be documented only after a CLI module tag has been published and
-verified.
+verified without a local `replace` directive.
 
 ## Usage
 

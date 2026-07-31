@@ -420,11 +420,14 @@ cfg.GoPools[co.UserGoPoolName] = config.GoPool{
 3. 明确一致性策略。严格顺序的 pool 禁止 running escape；允许 escape 的业务写入必须校验 fencing token 或状态版本。
 4. backend owner 交接包含 drain、epoch 和 fencing。新 owner 生效后，存储拒绝旧 owner 的迟到写入。
 5. command 携带 request ID；需要跨生产者顺序时再携带 sequence，并在状态层去重和校验版本。
-6. 提交 API 返回明确的 `error`，拒绝任务时返回 nil 完成信号；成功任务的完成信号通过 `defer` 保证 panic 路径也能结束。
-7. session 从 SID key 切换到 UID key 时执行队列迁移或 drain/activate 屏障。
-8. 根据 UID 基数选择 64 位/string key 或固定 hash shard，避免 CRC32 碰撞和 owner 数无界增长。
+6. session 从 SID key 切换到 UID key 时执行队列迁移或 drain/activate 屏障。
+7. 根据 UID 基数选择 64 位/string key 或固定 hash shard，避免 CRC32 碰撞和 owner 数无界增长。
 
-## 验证清单
+提交 API 已返回明确的 admission `error`：拒绝任务时完成信号为 nil，成功任务的完成信号通过 `defer` 保证 panic 路径也能结束。这是当前契约，不再是未来改造项。
+
+## 后续 source-complete 验证目标
+
+下列项目是完整一致性声明所需的目标矩阵，不代表当前分支已经全部通过。当前批次的实际测试证据记录在 {doc}`testing` 及对应提交说明中；尤其 gRPC parity、跨节点 owner epoch 和持久 command 恢复仍未实现。
 
 ### 单元测试
 

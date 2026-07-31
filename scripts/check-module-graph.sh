@@ -17,6 +17,7 @@ required_modules=(
 )
 
 forbidden_modules=(
+	github.com/topfreegames/pitaya
 	github.com/topfreegames/pitaya/v2
 	github.com/panjf2000/ants/v2
 	github.com/spf13/viper
@@ -52,14 +53,19 @@ check_graph() {
 
 self_test() {
 	local tmpdir=$1
+	local index=0
+	local module
 	printf '%s\n' "${required_modules[@]}" >"$tmpdir/positive"
 	check_graph "$tmpdir/positive"
-	cp "$tmpdir/positive" "$tmpdir/negative"
-	printf '%s\n' "${forbidden_modules[0]}" >>"$tmpdir/negative"
-	if check_graph "$tmpdir/negative" >/dev/null 2>&1; then
-		echo "module graph negative self-test unexpectedly passed" >&2
-		return 1
-	fi
+	for module in "${forbidden_modules[@]}"; do
+		cp "$tmpdir/positive" "$tmpdir/negative-$index"
+		printf '%s\n' "$module" >>"$tmpdir/negative-$index"
+		if check_graph "$tmpdir/negative-$index" >/dev/null 2>&1; then
+			echo "module graph negative self-test unexpectedly passed: $module" >&2
+			return 1
+		fi
+		((index += 1))
+	done
 	if $reject_replacements; then
 		cp "$tmpdir/positive" "$tmpdir/replacement"
 		printf '%s => %s\n' "${required_modules[0]}" ../ >>"$tmpdir/replacement"

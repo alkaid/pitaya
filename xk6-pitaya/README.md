@@ -2,6 +2,12 @@
 
 `xk6-pitaya` is a [k6](https://go.k6.io/k6) extension that provides a [Pitaya](https://github.com/alkaid/pitaya) client implementation.
 
+Its module path is `github.com/alkaid/pitaya/xk6-pitaya`. The module requires Go
+1.26.5 and is versioned separately from the root framework. Building the host
+binary needs the pinned xk6/k6 versions below; building the image also needs
+Docker. No public `@latest` installation is documented until a submodule tag has
+been published and verified without local replacements.
+
 # Usage
 
 ## Building the k6 binary

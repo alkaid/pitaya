@@ -1,0 +1,5 @@
+# file|exact URL|expected count|reason
+README.md|https://github.com/topfreegames/pitaya|1|upstream project lineage
+README.md|https://github.com/topfreegames/libpitaya|1|upstream client SDK lineage
+README.md|https://github.com/topfreegames/libpitaya-cluster|1|upstream cluster SDK lineage
+docs/overview.md|https://github.com/topfreegames/pitaya|1|upstream project lineage

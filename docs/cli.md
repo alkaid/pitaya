@@ -3,6 +3,10 @@ Pitaya CLI
 
 A Go REPL client for Pitaya.
 
+The CLI module is `github.com/alkaid/pitaya/pitaya-cli/v2`. Its source requires
+Go 1.26.5 and imports the Alkaid fork module. Build it from the root workspace so
+it cannot silently select an upstream Pitaya module.
+
 ## Building from source
 
 The repository root `go.work` includes both Pitaya and this CLI module, so the
