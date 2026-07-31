@@ -120,18 +120,55 @@ plugins. Generated files are valid only when a subsequent `git diff --exit-code`
 is empty. Mock targets use the pinned `mockgen`; regenerate the complete affected
 interface surface and verify that a second generation is identical.
 
-## Legacy benchmark targets
+## Network benchmark harness
 
-`benchmark-test-nats` and `benchmark-test-grpc` are manual legacy tools. They
-still use fixed ports, PID files, a fixed five-second sleep, and broad default
-Compose cleanup. They are not CI, release, readiness, cleanup, or performance
-regression evidence. Phase 5 must replace them with a unique project, dynamic
-ports, real readiness, one cleanup owner, bounded TERM/KILL plus `Wait`, and
-failure diagnostics.
+`make benchmark-test-nats` runs one report sample. `make benchmark-regression`
+runs ten samples by default and writes raw, benchstat-compatible output to
+`build/benchmarks/nats-pitaya-benchmark-<run>.txt`. Override the workload without
+editing the harness:
 
-Microbenchmarks should compare a base SHA and candidate SHA on the same fixed
-runner with identical arguments. Report time, bytes, and allocations; do not
-substitute a microbenchmark for a production profile.
+```sh
+BENCH_PATTERN='BackHandler' BENCH_TIME=2s BENCH_COUNT=10 \
+  BENCH_OUT=build/benchmarks/candidate.txt make benchmark-regression
+```
+
+`BENCH_COUNT` accepts 1 through 100. Iteration-form `BENCH_TIME` is limited to
+`1x` through `1000000x`; duration-form values remain bounded by the positive,
+non-zero `BENCH_TIMEOUT` (20 minutes by default). Timeout values use one or more
+integer Go duration components such as `90s` or `1m30s`; the minimum is `1ns`.
+`BENCH_OUT` must name a regular file, not a directory or device. Concurrent runs
+must use distinct outputs; an adjacent lock directory rejects accidental reuse,
+and a lock left by `SIGKILL` must be removed after confirming that no matching
+run is alive.
+
+The harness creates a unique Compose project, leaves all dependency host ports
+dynamic, waits for container health, and starts the backend and frontend as
+managed process trees. Readiness requires successful connector and backend
+requests, not a fixed sleep or a listening socket alone. The benchmark test
+supervisor owns bounded TERM/KILL plus `Wait` for both servers and fails if
+either exits unexpectedly; the shell script owns that supervisor, its benchmark
+process, and only its Compose project. It publishes the requested output
+atomically after successful cleanup and at least one benchmark sample. Failures,
+including a pattern that matches no benchmark, leave the formal output unchanged
+and preserve partial output as `<BENCH_OUT>.failed-<project>`. Diagnostics include
+the last 200 dependency/server log lines. The harness never uses PID files or the
+default Compose project. Managed servers also discard inherited `PITAYA_*`
+configuration so a developer's production endpoints, listeners, or pool settings
+cannot silently change the benchmark topology.
+
+The multi-client benchmarks now select a client for every operation. The legacy
+code used the constant final `b.N` as its index and usually sent every operation
+through one client, so results produced by that implementation are not directly
+comparable to results from this harness.
+
+Run a base SHA and candidate SHA in separate worktrees on the same fixed runner
+with identical `BENCH_PATTERN`, `BENCH_TIME`, and `BENCH_COUNT`, then compare the
+two raw files. Report time, bytes, and allocations; shared-runner results remain
+informational, and a network benchmark does not replace a production profile.
+
+Runtime gRPC benchmarking is unsupported because this fork supports NATS as its
+business transport. `benchmark-test-grpc` now exits with a migration message;
+gRPC remains compile-only and must be disabled or isolated in deployments.
 
 ## Failure artifacts
 
@@ -140,6 +177,7 @@ substitute a microbenchmark for a production profile.
 - unit coverage: `coverprofile.out`;
 - NATS E2E diagnostics: emitted directly by `scripts/test-e2e-nats.sh` before
   project cleanup;
+- failed NATS benchmark output: `<BENCH_OUT>.failed-<project>`;
 - distribution scratch data: temporary and removed by the owning script.
 
 Do not rerun a failed lane until it turns green without first preserving its

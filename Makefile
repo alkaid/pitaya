@@ -179,18 +179,6 @@ rm-test-temp-files:
 	@rm -f cluster/127.0.0.1* 127.0.0.1*
 	@rm -f cluster/localhost* localhost*
 
-ensure-testing-bin:
-	@[ -f ./examples/testing/server ] || go build -o ./examples/testing/server ./examples/testing/main.go
-
-ensure-testing-deps:
-	@cd ./examples/testing && PITAYA_NATS_HOST_PORT=4222 PITAYA_ETCD_HOST_PORT=2379 PITAYA_REDIS_HOST_PORT=6379 docker compose up --detach --wait
-
-ensure-e2e-deps-grpc:
-	@cd ./examples/testing && PITAYA_ETCD_HOST_PORT=2379 docker compose up --detach --wait etcd
-
-kill-testing-deps:
-	@cd ./examples/testing && docker compose down; true
-
 kill-jaeger:
 	@docker compose -f ./examples/testing/docker-compose-jaeger.yml down; true
 
@@ -199,35 +187,15 @@ test-e2e-nats e2e-test-nats:
 
 e2e-test: test-e2e-nats
 
-bench-nats-sv:
-	@PITAYA_METRICS_PROMETHEUS_PORT=9098 ./examples/testing/server -type game -frontend=false > /dev/null 2>&1 & echo $$! > back.PID
-	@PITAYA_METRICS_PROMETHEUS_PORT=9099 ./examples/testing/server -type connector -frontend=true > /dev/null 2>&1 & echo $$! > front.PID
+benchmark-test-nats:
+	@BENCH_COUNT=$${BENCH_COUNT:-1} ./scripts/test-benchmark-nats.sh
 
-bench-grpc-sv:
-	@PITAYA_METRICS_PROMETHEUS_PORT=9098 ./examples/testing/server -grpc -grpcport=3435 -type game -frontend=false > /dev/null 2>&1 & echo $$! > back.PID
-	@PITAYA_METRICS_PROMETHEUS_PORT=9099 ./examples/testing/server -grpc -grpcport=3436 -type connector -frontend=true > /dev/null 2>&1 & echo $$! > front.PID
+benchmark-regression:
+	@BENCH_COUNT=$${BENCH_COUNT:-10} ./scripts/test-benchmark-nats.sh
 
-benchmark-test-nats: ensure-testing-deps ensure-testing-bin
-	@echo "===============RUNNING BENCHMARK TESTS WITH NATS==============="
-	@echo "--- starting testing servers"
-	@echo "--- sleeping for 5 seconds"
-	@make bench-nats-sv
-	@sleep 5
-	@go test ./benchmark/benchmark_test.go -bench=.
-	@echo "--- killing testing servers"
-	@kill `cat back.PID` && rm back.PID
-	@kill `cat front.PID` && rm front.PID
-
-benchmark-test-grpc: ensure-e2e-deps-grpc ensure-testing-bin
-	@echo "===============RUNNING BENCHMARK TESTS WITH GRPC==============="
-	@echo "--- starting testing servers"
-	@echo "--- sleeping for 5 seconds"
-	@make bench-grpc-sv
-	@sleep 5
-	@go test ./benchmark/benchmark_test.go -bench=.
-	@echo "--- killing testing servers"
-	@kill `cat back.PID` && rm back.PID
-	@kill `cat front.PID` && rm front.PID
+benchmark-test-grpc:
+	@echo "gRPC runtime benchmarks are unsupported; use benchmark-test-nats" >&2
+	@exit 2
 
 unit-test-coverage:
 	@echo "===============RUNNING UNIT TESTS==============="
@@ -250,7 +218,7 @@ test-coverage-func coverage-func: test-coverage
 	@echo "\033[1;34m=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\033[0m"
 	@go tool cover -func=coverprofile.out | grep -Ev "100[.]0%"
 
-.PHONY: compile-core compile-root compile-cli compile-xk6 compile test-unit vet verify-root module-verify tools-verify logrus-verify test-consumer test-distribution docs docs-lint verify-fast scan-deps test-e2e-nats e2e-test-nats e2e-test test coverage init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
+.PHONY: compile-core compile-root compile-cli compile-xk6 compile test-unit vet verify-root module-verify tools-verify logrus-verify test-consumer test-distribution docs docs-lint verify-fast scan-deps test-e2e-nats e2e-test-nats e2e-test benchmark-test-nats benchmark-regression benchmark-test-grpc test coverage init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 
 mocks: agent-mock session-mock networkentity-mock pitaya-mock serializer-mock metrics-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 

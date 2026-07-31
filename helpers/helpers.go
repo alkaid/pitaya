@@ -1,6 +1,7 @@
 package helpers
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -24,17 +25,25 @@ import (
 // GetFreePort returns a free port
 func GetFreePort(t testing.TB) int {
 	t.Helper()
-	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	port, err := getFreePort()
 	if err != nil {
 		t.Fatal(err)
+	}
+	return port
+}
+
+func getFreePort() (int, error) {
+	addr, err := net.ResolveTCPAddr("tcp", "localhost:0")
+	if err != nil {
+		return 0, err
 	}
 
 	l, err := net.ListenTCP("tcp", addr)
 	if err != nil {
-		t.Fatal(err)
+		return 0, err
 	}
 	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
+	return l.Addr().(*net.TCPAddr).Port, nil
 }
 
 // GetMapKeys returns a string slice with the map keys
@@ -176,7 +185,81 @@ type managedProcess struct {
 	stopErr  error
 }
 
+// TestServerConfig configures an examples/testing server process.
+type TestServerConfig struct {
+	Frontend       bool
+	Debug          bool
+	ServerType     string
+	Port           int
+	SDPrefix       string
+	GRPC           bool
+	LazyConnection bool
+	CleanPitayaEnv bool
+	ReadyTimeout   time.Duration
+}
+
+// TestServerProcess owns a started examples/testing server process.
+type TestServerProcess struct {
+	process     *managedProcess
+	port        int
+	readyDir    string
+	cleanupOnce sync.Once
+	cleanupErr  error
+}
+
+// Port returns the frontend TCP port selected for the server.
+func (p *TestServerProcess) Port() int {
+	if p == nil {
+		return 0
+	}
+	return p.port
+}
+
+// Tail returns the bounded server output retained for diagnostics.
+func (p *TestServerProcess) Tail() string {
+	if p == nil || p.process == nil {
+		return ""
+	}
+	return p.process.output.tail()
+}
+
+// Done is closed when the server process has exited.
+func (p *TestServerProcess) Done() <-chan struct{} {
+	if p == nil || p.process == nil {
+		return nil
+	}
+	return p.process.done
+}
+
+// Wait waits for the server process and returns its raw exit error.
+func (p *TestServerProcess) Wait() error {
+	if p == nil || p.process == nil {
+		return nil
+	}
+	<-p.process.done
+	return p.process.waitErr
+}
+
+// Stop terminates the server process tree and waits for it to exit.
+func (p *TestServerProcess) Stop() error {
+	if p == nil || p.process == nil {
+		return nil
+	}
+	stopErr := p.process.Stop()
+	p.cleanupOnce.Do(func() {
+		p.cleanupErr = removeTestServerReadyDir(p.readyDir)
+	})
+	return errors.Join(stopErr, p.cleanupErr)
+}
+
 func startReadyProcess(cmd *exec.Cmd, marker string, readyTimeout time.Duration) (*managedProcess, error) {
+	return startReadyProcessContext(context.Background(), cmd, marker, readyTimeout)
+}
+
+func startReadyProcessContext(ctx context.Context, cmd *exec.Cmd, marker string, readyTimeout time.Duration) (*managedProcess, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	output := newProcessOutput(marker, 200)
 	cmd.Stdout = output
 	cmd.Stderr = output
@@ -206,11 +289,27 @@ func startReadyProcess(cmd *exec.Cmd, marker string, readyTimeout time.Duration)
 	case <-output.ready:
 		return process, nil
 	case <-process.done:
-		return nil, fmt.Errorf("process exited before readiness: %w\nlast output:\n%s", process.waitErr, output.tail())
+		return nil, fmt.Errorf("%w\nlast output:\n%s", processExitedBeforeReadiness(process.waitErr), output.tail())
+	case <-ctx.Done():
+		return nil, fmt.Errorf("%w\nlast output:\n%s", withCleanupError(ctx.Err(), process.Stop()), output.tail())
 	case <-timer.C:
-		_ = process.Stop()
-		return nil, fmt.Errorf("process readiness timed out after %s\nlast output:\n%s", readyTimeout, output.tail())
+		timeoutErr := fmt.Errorf("process readiness timed out after %s", readyTimeout)
+		return nil, fmt.Errorf("%w\nlast output:\n%s", withCleanupError(timeoutErr, process.Stop()), output.tail())
 	}
+}
+
+func processExitedBeforeReadiness(waitErr error) error {
+	if waitErr == nil {
+		return errors.New("process exited before readiness")
+	}
+	return fmt.Errorf("process exited before readiness: %w", waitErr)
+}
+
+func withCleanupError(primary, cleanup error) error {
+	if cleanup == nil {
+		return primary
+	}
+	return errors.Join(primary, fmt.Errorf("cleanup failed: %w", cleanup))
 }
 
 func (p *managedProcess) Stop() error {
@@ -298,47 +397,78 @@ func (p *managedProcess) recordWaitError(stopRequested, hardKill bool) {
 	p.stopErr = p.waitErr
 }
 
-// StartServer starts a server
-func StartServer(
-	t testing.TB,
-	frontend, debug bool,
-	svType string,
-	port int,
-	sdPrefix string,
-	grpc, lazyConnection bool,
-) func() {
-	grpcPort := GetFreePort(t)
-	promPort := GetFreePort(t)
-	var useGRPC string
-	if grpc {
-		useGRPC = "true"
-	} else {
-		useGRPC = "false"
+// StartTestServer starts an examples/testing server with managed process-tree
+// shutdown and bounded output capture. A zero frontend Port selects an
+// available port.
+func StartTestServer(config TestServerConfig) (*TestServerProcess, error) {
+	return startTestServerContext(context.Background(), config, true)
+}
+
+// StartTestServerContext is StartTestServer with cancelable startup.
+func StartTestServerContext(ctx context.Context, config TestServerConfig) (*TestServerProcess, error) {
+	return startTestServerContext(ctx, config, true)
+}
+
+func startTestServerContext(ctx context.Context, config TestServerConfig, discoverFrontendPort bool) (*TestServerProcess, error) {
+	if ctx == nil {
+		return nil, errors.New("test server context is required")
 	}
-	t.Helper()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if config.ServerType == "" {
+		return nil, errors.New("test server type is required")
+	}
+	if config.Port < 0 || config.Port > 65535 {
+		return nil, fmt.Errorf("invalid test server port: %d", config.Port)
+	}
+
+	grpcPort := 0
+	var err error
+	if config.GRPC {
+		grpcPort, err = getFreePort()
+		if err != nil {
+			return nil, fmt.Errorf("select test server gRPC port: %w", err)
+		}
+	}
+	readyTimeout := config.ReadyTimeout
+	if readyTimeout <= 0 {
+		readyTimeout = 30 * time.Second
+	}
+	needsReadyAddress := discoverFrontendPort && config.Frontend && config.Port == 0
+	readyDir := ""
+	readyFile := ""
+	if needsReadyAddress {
+		readyDir, err = os.MkdirTemp("", "pitaya-test-server-")
+		if err != nil {
+			return nil, fmt.Errorf("create test server readiness directory: %w", err)
+		}
+		readyFile = filepath.Join(readyDir, "ready")
+	}
+	readyDeadline := time.Now().Add(readyTimeout)
+
 	args := []string{
 		"-type",
-		svType,
+		config.ServerType,
 		"-port",
-		strconv.Itoa(port),
-		fmt.Sprintf("-frontend=%s", strconv.FormatBool(frontend)),
-		"-sdprefix", sdPrefix,
+		strconv.Itoa(config.Port),
+		fmt.Sprintf("-frontend=%s", strconv.FormatBool(config.Frontend)),
+		"-sdprefix", config.SDPrefix,
 		"-grpcport", fmt.Sprintf("%d", grpcPort),
-		fmt.Sprintf("-grpc=%s", useGRPC),
+		fmt.Sprintf("-grpc=%s", strconv.FormatBool(config.GRPC)),
 	}
-	if debug {
+	if needsReadyAddress {
+		args = append(args, "-readyfile", readyFile)
+	}
+	if config.Debug {
 		args = append(args, "-debug")
 	}
-	cmd := StartProcess(
-		t,
-		serverBinary(),
-		args...,
-	)
+	cmd := exec.Command(serverBinary(), args...)
 
-	// always use a random port for prometheus, to avoid e2e conflicts
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("PITAYA_METRICS_PROMETHEUS_PORT=%d", promPort),
-		fmt.Sprintf("PITAYA_CLUSTER_RPC_CLIENT_GRPC_LAZYCONNECTION=%v", lazyConnection),
+	// Port zero lets an enabled Prometheus listener select an isolated port.
+	cmd.Env = append(testServerEnvironment(config.CleanPitayaEnv),
+		"PITAYA_METRICS_PROMETHEUS_PORT=0",
+		fmt.Sprintf("PITAYA_CLUSTER_RPC_CLIENT_GRPC_LAZYCONNECTION=%v", config.LazyConnection),
 	)
 	if value := os.Getenv("PITAYA_TEST_NATS_URL"); value != "" {
 		cmd.Args = append(cmd.Args, "-natsurl", value)
@@ -350,18 +480,141 @@ func StartServer(
 		cmd.Args = append(cmd.Args, "-redisurl", value)
 	}
 
-	process, err := startReadyProcess(cmd, serverReadyMarker, 30*time.Second)
+	process, err := startReadyProcessContext(ctx, cmd, serverReadyMarker, readyTimeout)
+	if err != nil {
+		return nil, withCleanupError(err, removeTestServerReadyDir(readyDir))
+	}
+	selectedPort := config.Port
+	if needsReadyAddress {
+		remaining := time.Until(readyDeadline)
+		if remaining <= 0 {
+			remaining = time.Millisecond
+		}
+		readyAddress, readyErr := waitForTestServerReadyContext(ctx, process, readyFile, remaining)
+		if readyErr != nil {
+			cleanupErr := cleanupStartedTestServer(process, readyDir)
+			return nil, fmt.Errorf("wait for test server readiness: %w\nlast output:\n%s", withCleanupError(readyErr, cleanupErr), process.output.tail())
+		}
+		selectedPort, err = parseTestServerPort(readyAddress)
+		if err != nil {
+			cleanupErr := cleanupStartedTestServer(process, readyDir)
+			return nil, fmt.Errorf("%w", withCleanupError(err, cleanupErr))
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, withCleanupError(err, cleanupStartedTestServer(process, readyDir))
+	}
+	return &TestServerProcess{process: process, port: selectedPort, readyDir: readyDir}, nil
+}
+
+func parseTestServerPort(address string) (int, error) {
+	_, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		return 0, fmt.Errorf("parse test server address %q: %w", address, err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port <= 0 || port > 65535 {
+		return 0, fmt.Errorf("invalid bound test server port in %q", address)
+	}
+	return port, nil
+}
+
+func cleanupStartedTestServer(process *managedProcess, readyDir string) error {
+	var stopErr error
+	if process != nil {
+		stopErr = process.Stop()
+	}
+	return errors.Join(stopErr, removeTestServerReadyDir(readyDir))
+}
+
+func removeTestServerReadyDir(readyDir string) error {
+	if readyDir == "" {
+		return nil
+	}
+	return os.RemoveAll(readyDir)
+}
+
+func testServerEnvironment(cleanPitayaEnv bool) []string {
+	environment := os.Environ()
+	if !cleanPitayaEnv {
+		return environment
+	}
+	clean := make([]string, 0, len(environment))
+	for _, value := range environment {
+		if strings.HasPrefix(value, "PITAYA_") {
+			continue
+		}
+		clean = append(clean, value)
+	}
+	return clean
+}
+
+func waitForTestServerReady(process *managedProcess, readyFile string, timeout time.Duration) (string, error) {
+	return waitForTestServerReadyContext(context.Background(), process, readyFile, timeout)
+}
+
+func waitForTestServerReadyContext(ctx context.Context, process *managedProcess, readyFile string, timeout time.Duration) (string, error) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-process.done:
+			return "", processExitedBeforeReadiness(process.waitErr)
+		case <-timer.C:
+			return "", fmt.Errorf("readiness file timed out after %s", timeout)
+		case <-ticker.C:
+			contents, err := os.ReadFile(readyFile)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return "", err
+			}
+			address := strings.TrimSpace(string(contents))
+			if address == "" {
+				continue
+			}
+			return address, nil
+		}
+	}
+}
+
+// StartServer starts a server and reports lifecycle failures through t.
+func StartServer(
+	t testing.TB,
+	frontend, debug bool,
+	svType string,
+	port int,
+	sdPrefix string,
+	grpc, lazyConnection bool,
+) func() {
+	t.Helper()
+	process, err := startTestServerContext(context.Background(), TestServerConfig{
+		Frontend:       frontend,
+		Debug:          debug,
+		ServerType:     svType,
+		Port:           port,
+		SDPrefix:       sdPrefix,
+		GRPC:           grpc,
+		LazyConnection: lazyConnection,
+	}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return func() {
 		if err := process.Stop(); err != nil {
-			t.Errorf("stop test server: %v\nlast output:\n%s", err, process.output.tail())
+			t.Errorf("stop test server: %v\nlast output:\n%s", err, process.Tail())
 		}
 	}
 }
 
 func serverBinary() string {
+	// This override is reserved for repository harnesses and must implement the
+	// examples/testing command contract.
 	if binary := os.Getenv("PITAYA_TEST_SERVER_BINARY"); binary != "" {
 		return binary
 	}

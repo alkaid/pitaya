@@ -25,6 +25,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/alkaid/goerrors/apierrors"
@@ -263,6 +265,7 @@ func main() {
 	natsurl := flag.String("natsurl", "nats://localhost:4222", "the nats server addr")
 	etcdurl := flag.String("etcdurl", "localhost:2379", "the etcd server addr")
 	redisurl := flag.String("redisurl", "localhost:6379", "the redis server addr")
+	readyFile := flag.String("readyfile", "", "write the bound frontend address after startup")
 
 	flag.Parse()
 
@@ -285,7 +288,7 @@ func main() {
 	cfg.Set("pitaya.log.development", *debug)
 	cfg.Set("pitaya.log.level", logLevel)
 
-	app, bs, sessionPool := createApp(*serializer, *port, *grpc, *isFrontend, *svType, pitaya.Cluster, map[string]string{
+	app, bs, sessionPool, tcpAcceptor := createApp(*serializer, *port, *grpc, *isFrontend, *svType, pitaya.Cluster, map[string]string{
 		constants.GRPCHostKey: "127.0.0.1",
 		constants.GRPCPortKey: fmt.Sprintf("%d", *grpcPort),
 	}, cfg)
@@ -308,17 +311,30 @@ func main() {
 		component.WithName("testremotesvc"),
 		component.WithNameFunc(strings.ToLower),
 	)
+	if *readyFile != "" {
+		app.OnStarted(func() {
+			address := "ready"
+			if tcpAcceptor != nil {
+				address = tcpAcceptor.GetAddr()
+			}
+			if err := writeReadyFile(*readyFile, address); err != nil {
+				fmt.Fprintf(os.Stderr, "write readiness file: %v\n", err)
+				os.Exit(1)
+			}
+		})
+	}
 
 	app.Start()
 }
 
-func createApp(serializer string, port int, grpc bool, isFrontend bool, svType string, serverMode pitaya.ServerMode, metadata map[string]string, cfg ...*viper.Viper) (pitaya.Pitaya, *modules.ETCDBindingStorage, session.SessionPool) {
+func createApp(serializer string, port int, grpc bool, isFrontend bool, svType string, serverMode pitaya.ServerMode, metadata map[string]string, cfg ...*viper.Viper) (pitaya.Pitaya, *modules.ETCDBindingStorage, session.SessionPool, *acceptor.TCPAcceptor) {
 	conf := config.NewConfig(cfg...)
 	builder := pitaya.NewBuilderWithConfigs(isFrontend, svType, serverMode, metadata, conf)
 
+	var tcpAcceptor *acceptor.TCPAcceptor
 	if isFrontend {
-		tcp := acceptor.NewTCPAcceptor(fmt.Sprintf(":%d", port))
-		builder.AddAcceptor(tcp)
+		tcpAcceptor = acceptor.NewTCPAcceptor(fmt.Sprintf(":%d", port))
+		builder.AddAcceptor(tcpAcceptor)
 	}
 
 	builder.Groups = groups.NewMemoryGroupService(builder.Config.Groups.Memory)
@@ -356,5 +372,22 @@ func createApp(serializer string, port int, grpc bool, isFrontend bool, svType s
 		builder.RPCClient = gc
 	}
 
-	return builder.Build(), bs, builder.SessionPool
+	return builder.Build(), bs, builder.SessionPool, tcpAcceptor
+}
+
+func writeReadyFile(path, address string) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".pitaya-ready-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := fmt.Fprintln(tmp, address); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }

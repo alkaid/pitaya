@@ -78,17 +78,18 @@ make build-cli
 Use the narrowest gate that matches a change:
 
 ```sh
-make verify-fast       # source, docs policy, unit, vet, and consumer checks
-make docs-lint         # fork identity, link policy, and ledger checks
-make docs              # warning-free Sphinx build
-make test-e2e-nats     # isolated Docker-backed NATS/etcd/Redis path
-make test-distribution # versioned CLI/xk6/module/Docker smoke
-make scan-deps         # reachable dependency report
+make verify-fast          # source, docs policy, unit, vet, and consumer checks
+make docs-lint            # fork identity, link policy, and ledger checks
+make docs                 # warning-free Sphinx build
+make test-e2e-nats        # isolated Docker-backed NATS/etcd/Redis path
+make test-distribution    # versioned CLI/xk6/module/Docker smoke
+make benchmark-regression # isolated NATS network benchmark report
+make scan-deps            # reachable dependency report
 ```
 
 The dependency scan intentionally returns a non-zero status for an unaccepted
 reachable vulnerability. See [Testing the fork](docs/testing.md) for lane
-dependencies, timeouts, artifacts, and the legacy benchmark limitations.
+dependencies, timeouts, artifacts, and the network benchmark workflow.
 
 ## Documentation
 

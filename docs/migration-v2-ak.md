@@ -23,6 +23,36 @@ Generated gRPC stubs now require grpc-go 1.64 or newer and support package v9.
 Servers embedding `protos.UnimplementedPitayaServer` must embed its value, not a
 nil pointer. This is a compile-time migration even when gRPC stays disabled.
 
+## Benchmark tooling
+
+`benchmark-test-nats` now owns an isolated NATS/etcd/Redis Compose project,
+managed testing servers, and their verified cleanup; it no longer depends on a
+separate PID-file or Compose cleanup target. Use `BENCH_PATTERN`, `BENCH_TIME`,
+`BENCH_COUNT`, `BENCH_TIMEOUT`, and `BENCH_OUT` instead of starting
+`bench-nats-sv` or `ensure-testing-deps` manually. `benchmark-regression`
+produces ten benchstat-compatible samples by default. A failed or zero-match run
+no longer publishes `BENCH_OUT`; partial raw output is retained as
+`<BENCH_OUT>.failed-<project>` for diagnosis. Cleanup failure also fails the run
+and prints bounded diagnostics.
+
+The old `ensure-testing-bin`, `ensure-testing-deps`, `bench-nats-sv`,
+`bench-grpc-sv`, `ensure-e2e-deps-grpc`, and `kill-testing-deps` targets were
+removed. The compatibility `benchmark-test-grpc` target exits with a NATS-only
+migration message. Keep gRPC compile coverage, but migrate performance jobs to
+`benchmark-test-nats`.
+
+Managed benchmark servers deliberately discard inherited `PITAYA_*`
+configuration and receive only the harness-owned dependency endpoints. Pass
+workload controls through the documented `BENCH_*` variables rather than a
+production Pitaya environment. The multi-client benchmarks now rotate clients
+per operation and validate each response; the old implementation indexed every
+operation with the constant `b.N` and normally exercised one client, so old and
+new multi-client results are not equivalent baselines. `BENCH_COUNT` is limited
+to 1..100, iteration-form `BENCH_TIME` to 1x..1000000x, `BENCH_TIMEOUT` must be a
+positive duration, and `BENCH_OUT` must name a regular file. Concurrent runs must
+use distinct output paths; an adjacent lock directory rejects reuse. Timeout
+values use integer Go duration components and must resolve to at least `1ns`.
+
 ## Stateful pool admission errors
 
 `StatefulPool.Go` and the keyed `co.Go*` wrappers now return a completion channel
