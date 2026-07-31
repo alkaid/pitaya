@@ -120,7 +120,7 @@ func (h *HandlerPool) ProcessHandlerMessage(
 	}
 	// 无拦截器情况下走常规handle
 	handler, err := h.getHandler(rt)
-	if err1 != nil && err != nil {
+	if err != nil {
 		return nil, apierrors.NotFound("", "process handle message error", "").WithCause(err)
 	}
 
@@ -164,9 +164,13 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		args = append(args, reflect.ValueOf(arg))
 	}
 	var resp any
+	// Handler 的业务返回值继续写入 resp/err；executionErr 只描述 TaskExecutor 的调度与完成协议。
+	// executeTask 保证闭包完成后才返回，因此后续读取这些共享变量不会与后台 task 竞态。
 	executionErr := executeTask(ctx, handler.Options.TaskExecutor, func(taskCtx context.Context) error {
+		// 自定义执行器可以为任务派生 context，反射调用必须使用实际执行时的 taskCtx。
 		args[1] = reflect.ValueOf(taskCtx)
 		resp, err = util.Pcall(handler.Method, args)
+		// Handler 业务错误保存在外层 err，由既有 dispatcher 流程序列化；这里的错误只属于执行协议。
 		return nil
 	})
 	if executionErr != nil {

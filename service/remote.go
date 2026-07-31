@@ -1141,9 +1141,13 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 	if remote.HasArgs {
 		params = append(params, reflect.ValueOf(arg))
 	}
+	// Remote Handler 的 ret/err 仍由原有 RPC 流程处理；executionErr 只表示执行器调度或完成协议失败。
+	// executeTask 会等待已开始的闭包收敛，返回后读取 ret/err 不会和后台 task 发生数据竞争。
 	executionErr := executeTask(ctx, remote.Options.TaskExecutor, func(taskCtx context.Context) error {
+		// 执行器可能为队列任务派生新的 context，反射参数需要同步替换。
 		params[1] = reflect.ValueOf(taskCtx)
 		ret, err = util.Pcall(remote.Method, params)
+		// 业务错误通过外层 err 进入 AfterHandler 和 RPC status；这里不把它混入执行器错误。
 		return nil
 	})
 	if executionErr != nil {

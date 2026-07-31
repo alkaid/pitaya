@@ -30,7 +30,7 @@ type (
 		ForkMethods      []string                            // 每个服务副本都能消费的methods,优先级高于ForkAll
 		ForkAll          bool                                // 是否所有方法都能每个服务副本都消费，当ForkMethods为空时生效
 		ReceiverProvider func(ctx context.Context) Component // 延迟绑定的receiver实例
-		TaskExecutor     TaskExecutor                        // 自定义任务执行器，返回前必须完成或明确拒绝任务
+		TaskExecutor     TaskExecutor                        // 可选的自定义任务执行器；nil 时由框架在当前 goroutine 直接执行
 	}
 
 	// Option used to customize handler
@@ -102,7 +102,10 @@ func WithReceiverProvider(receiverProvider func(ctx context.Context) Component) 
 	}
 }
 
-// WithTaskExecutor registers a custom component task executor.
+// WithTaskExecutor 为组件注册自定义任务执行器。
+//
+// 执行器可以把 Handler 派发到用户队列、房间队列等串行执行环境，但必须遵守
+// TaskExecutor 的完成协议：返回前完成 task，或者在未调用 task 时明确返回错误。
 //
 //	@param taskExecutor
 //	@return Option
