@@ -14,6 +14,11 @@ on:
     branches:
     - main
   workflow_dispatch:
+    inputs:
+      coverage_base_sha:
+        description: Full 40-character commit SHA used as the coverage diff base
+        required: true
+        type: string
 
 jobs:
   docs-lint:
@@ -257,12 +262,18 @@ jobs:
       run: make test-distribution
 
   coverage:
-    name: Full Package Coverage
+    name: Linux amd64 Full Package Coverage
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      GOARCH: amd64
+      GOOS: linux
     steps:
     - name: Checkout
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        fetch-depth: 0
+        persist-credentials: false
     - name: Set up Go
       uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
       with:
@@ -279,8 +290,60 @@ jobs:
         GOWORK=off go mod download -modfile=tools/go.mod
         GOWORK=off go mod verify -modfile=tools/go.mod
     - name: Run full-package coverage
-      run: GOWORK=off make coverage
+      run: GOWORK=off make coverage-stamped
+    - name: Resolve coverage diff base
+      id: coverage-base
+      shell: bash
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        PUSH_BEFORE: ${{ github.event.before }}
+        PUSH_DELETED: ${{ github.event.deleted }}
+        DISPATCH_BASE: ${{ inputs.coverage_base_sha }}
+      run: |
+        set -euo pipefail
+
+        head="$(git rev-parse HEAD)"
+        test "$head" = "$GITHUB_SHA"
+
+        case "$EVENT_NAME" in
+          pull_request)
+            git rev-parse --verify "${head}^{commit}^2" >/dev/null
+            base="$(git rev-parse "${head}^{commit}^1")"
+            ;;
+          push)
+            test "$PUSH_DELETED" != "true"
+            base="$PUSH_BEFORE"
+            ;;
+          workflow_dispatch)
+            base="$DISPATCH_BASE"
+            ;;
+          *)
+            echo "unsupported event: $EVENT_NAME" >&2
+            exit 1
+            ;;
+        esac
+
+        [[ "$base" =~ ^[0-9a-fA-F]{40}$ ]]
+        test "$base" != 0000000000000000000000000000000000000000
+
+        if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+          git fetch --no-tags --depth=1 origin "$base"
+        fi
+        base="$(git rev-parse "${base}^{commit}")"
+
+        if test "$EVENT_NAME" = workflow_dispatch; then
+          test "$base" != "$head"
+          git merge-base --is-ancestor "$base" "$head"
+        fi
+
+        printf 'sha=%s\n' "$base" >> "$GITHUB_OUTPUT"
+    - name: Enforce coverage policy
+      env:
+        COVERAGE_DIFF_BASE: ${{ steps.coverage-base.outputs.sha }}
+        COVERAGE_DIFF_HEAD: ${{ github.sha }}
+      run: GOWORK=off make coverage-gate
     - name: Send coverage
+      if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
       env:
         COVERALLS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: GOWORK=off go tool -modfile=tools/go.mod goveralls -coverprofile=coverprofile.out -service=github

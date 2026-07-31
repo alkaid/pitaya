@@ -53,6 +53,37 @@ positive duration, and `BENCH_OUT` must name a regular file. Concurrent runs mus
 use distinct output paths; an adjacent lock directory rejects reuse. Timeout
 values use integer Go duration components and must resolve to at least `1ns`.
 
+## Coverage workflow
+
+Manual runs of the Tests workflow now require a full `coverage_base_sha` input.
+Update API or CLI automation that previously dispatched the workflow without
+inputs, for example:
+
+```sh
+gh workflow run tests.yaml -f coverage_base_sha="$(git rev-parse HEAD^)"
+```
+
+The coverage job compares that exact commit with the selected head and rejects
+a non-ancestor manual base. Pull requests use the tested merge commit's first
+parent, while pushes use the event's exact before commit. Pull-request runs no
+longer upload to Coveralls; they still enforce the local baseline and 90% diff
+coverage gate. Generated code, mocks, examples, and test-only helpers are
+excluded only through the literal paths in `scripts/coverage-baseline.json`.
+
+Coverage scripts that invoke the regression gate must generate the profile with
+`make coverage-stamped`, not a standalone `go test -coverprofile` command. The
+new sidecar binds the profile hash to a full commit object ID and the
+Linux/amd64 policy; `check` and `coverage-baseline` reject missing, modified, or
+mixed-commit sidecars. Stamped generation requires committed root sources and
+committed `tools/cmd/coveragegate` module inputs. `make coverage`,
+`test-coverage-html`, and `coverage-func` retain their previous
+WIP reporting behavior and do not require provenance.
+
+Repositories derived from this fork must also register a verification lane
+before adding another nested Go module. The root coverage gate recognizes only
+`pitaya-cli`, `tools`, and `xk6-pitaya`; an unregistered nested `go.mod` now
+fails closed instead of being silently skipped by `go test ./...`.
+
 ## Stateful pool admission errors
 
 `StatefulPool.Go` and the keyed `co.Go*` wrappers now return a completion channel

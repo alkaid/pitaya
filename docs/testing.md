@@ -80,13 +80,59 @@ proxy.
 
 ```sh
 make coverage
-go tool cover -func=coverprofile.out
+make coverage-stamped
+make coverage-gate \
+  COVERAGE_DIFF_BASE="$(git rev-parse HEAD^)" \
+  COVERAGE_DIFF_HEAD="$(git rev-parse HEAD)"
 ```
 
-Coverage is currently reporting evidence, not proof that the planned Phase 5
-package thresholds have been met. Generated code, mocks, examples, CLI glue, and
-other exclusions must eventually be represented by a fixed baseline file rather
-than a dynamic package-name filter.
+`make coverage` keeps the reporting workflow available on an uncommitted
+working tree. The regression gate requires `make coverage-stamped`, which runs
+the same root tests with committed root and coverage-verifier sources, then
+atomically writes `<profile>.meta.json`. The sidecar binds the exact profile bytes to the checked
+out commit and the policy platform; failed generation removes the prior
+sidecar. `check` rejects a changed profile, a different checkout, symbolic or
+equal diff endpoints, and a policy baseline that is not an ancestor of the
+tested head.
+
+The root-module gate reads `scripts/coverage-baseline.json`. Its literal file
+list excludes generated code, mocks, examples, and test-only process or
+benchmark helpers. It fails when the aggregate or any included package drops
+below its exact baseline ratio, when the included package set changes, or when
+changed executable production lines are below 90% coverage. Base and head must
+be full commit object IDs. The policy and CI lane cover the Linux/amd64 build
+graph. A changed platform-specific production file that has no Linux profile
+entry fails closed rather than being silently omitted.
+
+The root gate skips only the separately verified `pitaya-cli`, `tools`, and
+`xk6-pitaya` modules. Adding or removing a nested `go.mod` fails the gate until
+the module has an explicit compile/test lane and is registered in the tool.
+
+The current conservative baseline is 4184/7308 statements (57.25%), generated
+from three independently green runs so timing-dependent cluster coverage does
+not become a flaky floor. The Phase 5 targets remain 70% overall and 80% for
+`cluster`, `co`, `service`, and `session`; they are recorded in the policy but
+remain non-blocking until behavior tests raise every package to those targets.
+The gate therefore prevents regressions without claiming that Phase 5 coverage
+is complete.
+
+Refresh the baseline only after an intentional coverage-policy review. Supply a
+full commit SHA and one or more independently green profiles; the update command
+uses the lowest complete-run package counts and rejects incompatible runs,
+mixed commits, modified profiles, or a commit other than the current checkout.
+
+```sh
+make coverage-stamped COVERAGE_PROFILE=/tmp/coverage-1.out
+make coverage-stamped COVERAGE_PROFILE=/tmp/coverage-2.out
+make coverage-baseline \
+  COVERAGE_BASE_SHA="$(git rev-parse HEAD)" \
+  COVERAGE_PROFILES="/tmp/coverage-1.out /tmp/coverage-2.out"
+```
+
+The manually dispatched Tests workflow requires `coverage_base_sha`, a full
+commit SHA that is an ancestor of the selected head. Pull requests compare the
+tested merge commit with its first parent; pushes compare the event's exact
+before and after commits.
 
 ## Dependency scan
 
@@ -175,6 +221,7 @@ gRPC remains compile-only and must be disabled or isolated in deployments.
 - dependency JSON: `build/govulncheck/*.json`;
 - default documentation output: `build/docs`;
 - unit coverage: `coverprofile.out`;
+- stamped coverage provenance: `coverprofile.out.meta.json`;
 - NATS E2E diagnostics: emitted directly by `scripts/test-e2e-nats.sh` before
   project cleanup;
 - failed NATS benchmark output: `<BENCH_OUT>.failed-<project>`;

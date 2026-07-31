@@ -11,6 +11,7 @@ build
 
 # Output of the go coverage tool, specifically when used with LiteIDE
 *.out
+*.out.meta.json
 .DS_Store
 
 # Project-local glide cache, RE: https://github.com/Masterminds/glide/issues/736

@@ -28,6 +28,9 @@ WORKSPACE := $(abspath go.work)
 DOCS_BUILDDIR ?= $(abspath build/docs)
 SPHINXBUILD ?= sphinx-build
 SPHINXOPTS ?= -W --keep-going
+COVERAGE_PROFILE ?= $(CURDIR)/coverprofile.out
+COVERAGE_POLICY ?= $(CURDIR)/scripts/coverage-baseline.json
+COVERAGE_PROFILES ?= $(COVERAGE_PROFILE)
 
 TESTABLE_PACKAGES = `go list ./... | $(GREP_CMD) examples | $(GREP_CMD) constants | $(GREP_CMD) mocks | $(GREP_CMD) helpers | $(GREP_CMD) interfaces | $(GREP_CMD) protos | $(GREP_CMD) e2e | $(GREP_CMD) benchmark`
 
@@ -199,7 +202,14 @@ benchmark-test-grpc:
 
 unit-test-coverage:
 	@echo "===============RUNNING UNIT TESTS==============="
-	@GOWORK=off go test ./... -count=1 -coverprofile coverprofile.out
+	@GOWORK=off go test ./... -count=1 -coverprofile="$(COVERAGE_PROFILE)"
+
+coverage-stamped:
+	@echo "===============RUNNING STAMPED UNIT TESTS==============="
+	@$(GOWORK_OFF) go -C tools run ./cmd/coveragegate generate \
+		-repo "$(CURDIR)" \
+		-policy "$(abspath $(COVERAGE_POLICY))" \
+		-profile "$(abspath $(COVERAGE_PROFILE))"
 
 test: verify-fast
 
@@ -208,17 +218,35 @@ test-coverage: unit-test-coverage
 
 coverage: unit-test-coverage
 
+coverage-gate:
+	@test -n "$(COVERAGE_DIFF_BASE)" || { echo "COVERAGE_DIFF_BASE is required" >&2; exit 2; }
+	@test -n "$(COVERAGE_DIFF_HEAD)" || { echo "COVERAGE_DIFF_HEAD is required" >&2; exit 2; }
+	@$(GOWORK_OFF) go -C tools run ./cmd/coveragegate check \
+		-repo "$(CURDIR)" \
+		-policy "$(abspath $(COVERAGE_POLICY))" \
+		-profile "$(abspath $(COVERAGE_PROFILE))" \
+		-base "$(COVERAGE_DIFF_BASE)" \
+		-head "$(COVERAGE_DIFF_HEAD)"
+
+coverage-baseline:
+	@test -n "$(COVERAGE_BASE_SHA)" || { echo "COVERAGE_BASE_SHA is required" >&2; exit 2; }
+	@$(GOWORK_OFF) go -C tools run ./cmd/coveragegate update \
+		-repo "$(CURDIR)" \
+		-policy "$(abspath $(COVERAGE_POLICY))" \
+		$(foreach profile,$(COVERAGE_PROFILES),-profile "$(abspath $(profile))") \
+		-base-sha "$(COVERAGE_BASE_SHA)"
+
 test-coverage-html: test-coverage
-	@go tool cover -html=coverprofile.out
+	@go tool cover -html="$(COVERAGE_PROFILE)"
 
 test-coverage-func coverage-func: test-coverage
 	@echo
 	@echo "\033[1;34m=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\033[0m"
 	@echo "\033[1;34mFunctions NOT COVERED by Tests\033[0m"
 	@echo "\033[1;34m=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\033[0m"
-	@go tool cover -func=coverprofile.out | grep -Ev "100[.]0%"
+	@go tool cover -func="$(COVERAGE_PROFILE)" | grep -Ev "100[.]0%"
 
-.PHONY: compile-core compile-root compile-cli compile-xk6 compile test-unit vet verify-root module-verify tools-verify logrus-verify test-consumer test-distribution docs docs-lint verify-fast scan-deps test-e2e-nats e2e-test-nats e2e-test benchmark-test-nats benchmark-regression benchmark-test-grpc test coverage init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
+.PHONY: compile-core compile-root compile-cli compile-xk6 compile test-unit vet verify-root module-verify tools-verify logrus-verify test-consumer test-distribution docs docs-lint verify-fast scan-deps test-e2e-nats e2e-test-nats e2e-test benchmark-test-nats benchmark-regression benchmark-test-grpc test coverage coverage-stamped coverage-gate coverage-baseline init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 
 mocks: agent-mock session-mock networkentity-mock pitaya-mock serializer-mock metrics-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 

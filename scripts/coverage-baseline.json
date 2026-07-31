@@ -1,0 +1,241 @@
+{
+  "schema_version": 1,
+  "base_sha": "4a2ccf1644ac67ca997123cd0ea5bcd42146d1df",
+  "coverage_platform": {
+    "goos": "linux",
+    "goarch": "amd64"
+  },
+  "excluded_files": [
+    "agent/mocks/agent.go",
+    "benchmark/harness/main.go",
+    "benchmark/testdata/test.pb.go",
+    "cluster/mocks/cluster.go",
+    "cluster/mocks/service_discovery.go",
+    "conn/codec/mocks/packet_decoder.go",
+    "conn/codec/mocks/packet_encoder.go",
+    "conn/message/mocks/message_encoder.go",
+    "examples/demo/chat/main.go",
+    "examples/demo/cluster/main.go",
+    "examples/demo/cluster/services/connector.go",
+    "examples/demo/cluster/services/room.go",
+    "examples/demo/cluster_ak/main.go",
+    "examples/demo/cluster_ak/protos/cluster.pb.go",
+    "examples/demo/cluster_ak/services/connector.go",
+    "examples/demo/cluster_ak/services/room.go",
+    "examples/demo/cluster_grpc/main.go",
+    "examples/demo/cluster_grpc/services/connector.go",
+    "examples/demo/cluster_grpc/services/room.go",
+    "examples/demo/cluster_protobuf/protos/cluster.pb.go",
+    "examples/demo/cluster_protobuf/services/room.go",
+    "examples/demo/custom_metrics/main.go",
+    "examples/demo/custom_metrics/messages/args.go",
+    "examples/demo/custom_metrics/messages/responses.go",
+    "examples/demo/custom_metrics/services/room.go",
+    "examples/demo/pipeline/main.go",
+    "examples/demo/protos/cluster.pb.go",
+    "examples/demo/rate_limiting/main.go",
+    "examples/demo/rate_limiting/services/room.go",
+    "examples/demo/worker/main.go",
+    "examples/demo/worker/protos/arg.pb.go",
+    "examples/demo/worker/protos/response.pb.go",
+    "examples/demo/worker/services/metagame.go",
+    "examples/demo/worker/services/room.go",
+    "examples/demo/worker/services/worker.go",
+    "examples/testing/main.go",
+    "examples/testing/protos/cluster.pb.go",
+    "helpers/helpers.go",
+    "helpers/process_parent_linux.go",
+    "helpers/process_parent_other.go",
+    "helpers/process_parent_unix.go",
+    "helpers/process_signal_other.go",
+    "helpers/process_signal_unix.go",
+    "helpers/process_signal_windows.go",
+    "helpers/type_support.go",
+    "interfaces/mocks/interfaces.go",
+    "metrics/mocks/reporter.go",
+    "metrics/mocks/statsd_reporter.go",
+    "mocks/acceptor.go",
+    "mocks/app.go",
+    "networkentity/mocks/networkentity.go",
+    "protos/bind.pb.go",
+    "protos/doc.pb.go",
+    "protos/docmsg.pb.go",
+    "protos/error.pb.go",
+    "protos/error_errors.pb.go",
+    "protos/kick.pb.go",
+    "protos/mocks/pitaya.go",
+    "protos/msg.pb.go",
+    "protos/pitaya.pb.go",
+    "protos/pitaya_grpc.pb.go",
+    "protos/protodescriptor.pb.go",
+    "protos/push.pb.go",
+    "protos/request.pb.go",
+    "protos/response.pb.go",
+    "protos/session.pb.go",
+    "protos/test/somestruct.pb.go",
+    "protos/test/testrequest.pb.go",
+    "protos/test/testresponse.pb.go",
+    "serialize/mocks/serializer.go",
+    "session/mocks/session.go",
+    "worker/mocks/rpc_job.go"
+  ],
+  "targets": {
+    "overall_percent": 70,
+    "package_percent": {
+      "cluster": 80,
+      "co": 80,
+      "service": 80,
+      "session": 80
+    },
+    "diff_percent": 90,
+    "enforce_absolute": false
+  },
+  "baseline": {
+    "overall": {
+      "covered": 4184,
+      "total": 7308
+    },
+    "packages": {
+      ".": {
+        "covered": 359,
+        "total": 612
+      },
+      "acceptor": {
+        "covered": 141,
+        "total": 189
+      },
+      "acceptorwrapper": {
+        "covered": 35,
+        "total": 40
+      },
+      "agent": {
+        "covered": 282,
+        "total": 370
+      },
+      "client": {
+        "covered": 46,
+        "total": 436
+      },
+      "cluster": {
+        "covered": 692,
+        "total": 1212
+      },
+      "co": {
+        "covered": 227,
+        "total": 273
+      },
+      "component": {
+        "covered": 99,
+        "total": 126
+      },
+      "config": {
+        "covered": 45,
+        "total": 129
+      },
+      "conn/codec": {
+        "covered": 46,
+        "total": 49
+      },
+      "conn/message": {
+        "covered": 103,
+        "total": 115
+      },
+      "conn/packet": {
+        "covered": 2,
+        "total": 2
+      },
+      "context": {
+        "covered": 33,
+        "total": 45
+      },
+      "defaultpipelines": {
+        "covered": 8,
+        "total": 8
+      },
+      "docgenerator": {
+        "covered": 66,
+        "total": 119
+      },
+      "groups": {
+        "covered": 178,
+        "total": 216
+      },
+      "logger": {
+        "covered": 31,
+        "total": 75
+      },
+      "metrics": {
+        "covered": 128,
+        "total": 206
+      },
+      "modules": {
+        "covered": 33,
+        "total": 135
+      },
+      "pipeline": {
+        "covered": 6,
+        "total": 30
+      },
+      "remote": {
+        "covered": 112,
+        "total": 291
+      },
+      "route": {
+        "covered": 14,
+        "total": 14
+      },
+      "router": {
+        "covered": 23,
+        "total": 48
+      },
+      "serialize": {
+        "covered": 0,
+        "total": 4
+      },
+      "serialize/json": {
+        "covered": 3,
+        "total": 4
+      },
+      "serialize/protobuf": {
+        "covered": 9,
+        "total": 10
+      },
+      "service": {
+        "covered": 633,
+        "total": 961
+      },
+      "session": {
+        "covered": 567,
+        "total": 792
+      },
+      "timer": {
+        "covered": 41,
+        "total": 45
+      },
+      "tracing": {
+        "covered": 36,
+        "total": 138
+      },
+      "util": {
+        "covered": 39,
+        "total": 126
+      },
+      "util/compression": {
+        "covered": 11,
+        "total": 13
+      },
+      "util/net": {
+        "covered": 86,
+        "total": 357
+      },
+      "util/viperx": {
+        "covered": 0,
+        "total": 32
+      },
+      "worker": {
+        "covered": 50,
+        "total": 86
+      }
+    }
+  }
+}
