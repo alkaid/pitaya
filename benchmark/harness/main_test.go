@@ -22,6 +22,46 @@ func TestWriteAtomic(t *testing.T) {
 	}
 }
 
+func TestBenchmarkOutputMarkersIncludeDeclaredNATSBuffer(t *testing.T) {
+	markers := benchmarkOutputMarkers(16384)
+	want := effectiveNATSBufferMarker + "16384"
+	for _, marker := range markers {
+		if marker == want {
+			return
+		}
+	}
+	t.Fatalf("benchmarkOutputMarkers() = %q, want %q", markers, want)
+}
+
+func TestConfiguredNATSMessagesBuffer(t *testing.T) {
+	t.Setenv("PITAYA_TEST_NATS_MESSAGES_BUFFER", "16384")
+	buffer, err := configuredNATSMessagesBuffer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if buffer != 16384 {
+		t.Fatalf("buffer = %d, want 16384", buffer)
+	}
+
+	t.Setenv("PITAYA_TEST_NATS_MESSAGES_BUFFER", "invalid")
+	if _, err := configuredNATSMessagesBuffer(); err == nil {
+		t.Fatal("invalid buffer was accepted")
+	}
+}
+
+func TestValidateStressServerOutput(t *testing.T) {
+	effective := effectiveNATSBufferMarker + "16384"
+	if err := validateStressServerOutput("frontend.log", effective, 16384); err != nil {
+		t.Fatalf("valid output: %v", err)
+	}
+	if err := validateStressServerOutput("frontend.log", "", 16384); err == nil {
+		t.Fatal("missing effective marker was accepted")
+	}
+	if err := validateStressServerOutput("frontend.log", effective+"\n"+natsDroppedMessageMarker, 16384); err == nil {
+		t.Fatal("dropped-message marker was accepted")
+	}
+}
+
 func TestWriteAtomicFailsWithoutParent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing", "ready")
 	if err := writeAtomic(path, "127.0.0.1:43210"); err == nil {

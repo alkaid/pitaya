@@ -1,0 +1,63 @@
+name: Nightly NATS Stress
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+on:
+  schedule:
+  - cron: '47 18 * * *' # 02:47 Asia/Shanghai
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-stress-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  stress:
+    # This capacity gate is intentionally separate from PR and release lanes.
+    name: 10k Clients and Reconnect
+    runs-on: ubuntu-24.04
+    # Leave enough job-level budget for the always-run artifact upload after a
+    # stress step reaches its own timeout.
+    timeout-minutes: 45
+    steps:
+    - name: Checkout
+      timeout-minutes: 2
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Set up Go
+      timeout-minutes: 4
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: go.sum
+    - name: Download and verify root module
+      timeout-minutes: 4
+      run: |
+        GOWORK=off go mod download
+        GOWORK=off go mod verify
+    - name: Hold 10k clients and verify reconnect ownership
+      id: stress
+      timeout-minutes: 25
+      # This stress-only profile covers the 10k SessionClosed cleanup burst; it
+      # is not a production recommendation and the framework default remains
+      # 75. Changing it or the workload creates different capacity evidence,
+      # and any NATS drop still fails that evidence.
+      env:
+        STRESS_NATS_MESSAGES_BUFFER: 16384
+      run: |
+        mkdir -p build/stress
+        set -o pipefail
+        make test-stress-nats 2>&1 | tee build/stress/gate.log
+    - name: Upload stress evidence
+      if: ${{ always() }}
+      timeout-minutes: 5
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: nats-stress-${{ github.sha }}-${{ github.run_attempt }}
+        path: build/stress/**
+        if-no-files-found: error
+        include-hidden-files: true
+        retention-days: 14

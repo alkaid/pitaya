@@ -5,7 +5,29 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/alkaid/pitaya/v2/session"
 )
+
+func TestNotifyStressCloseConsumesTracker(t *testing.T) {
+	service := &TestSvc{}
+	closeEvent := make(chan session.CloseReason, 1)
+	service.stressCloseEvents.Store(int64(42), closeEvent)
+
+	service.notifyStressClose(42, session.CloseReasonKickRebind)
+
+	select {
+	case got := <-closeEvent:
+		if got != session.CloseReasonKickRebind {
+			t.Fatalf("close reason = %v, want %v", got, session.CloseReasonKickRebind)
+		}
+	default:
+		t.Fatal("close reason was not delivered")
+	}
+	if _, tracked := service.stressCloseEvents.Load(int64(42)); tracked {
+		t.Fatal("close tracker remains after delivery")
+	}
+}
 
 func TestWriteReadyFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ready")

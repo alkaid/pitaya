@@ -120,6 +120,7 @@ func TestStartTestServerRejectsInvalidConfig(t *testing.T) {
 		{name: "missing type", config: TestServerConfig{}, want: "type is required"},
 		{name: "negative port", config: TestServerConfig{ServerType: "game", Port: -1}, want: "invalid test server port"},
 		{name: "large port", config: TestServerConfig{ServerType: "game", Port: 65536}, want: "invalid test server port"},
+		{name: "negative NATS buffer", config: TestServerConfig{ServerType: "game", NATSMessagesBuffer: -1}, want: "invalid test server NATS messages buffer"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -320,6 +321,32 @@ func TestProcessOutputKeepsLastLines(t *testing.T) {
 	_, _ = output.Write([]byte("one\ntwo\nthree\nfour\n"))
 	if got, want := output.tail(), "two\nthree\nfour"; got != want {
 		t.Fatalf("tail() = %q, want %q", got, want)
+	}
+}
+
+func TestProcessOutputRetainsMatchedMarkerOutsideTail(t *testing.T) {
+	const marker = "persistent diagnostic marker"
+	output := newProcessOutput("ready", 3, marker)
+	_, _ = output.Write([]byte(marker + "\none\ntwo\nthree\nfour\n"))
+
+	if got, want := output.tail(), marker+"\ntwo\nthree\nfour"; got != want {
+		t.Fatalf("tail() = %q, want %q", got, want)
+	}
+}
+
+func TestProcessOutputRetainsOnlyMatchedConfiguredMarkers(t *testing.T) {
+	output := newProcessOutput("ready", 2, "first warning", "second warning", "first warning", "")
+	_, _ = output.Write([]byte("ready\nfirst warning with context\none\ntwo\nthree\n"))
+
+	got := output.tail()
+	if !strings.Contains(got, "first warning") {
+		t.Fatalf("tail() = %q, want matched configured marker", got)
+	}
+	if strings.Contains(got, "second warning") {
+		t.Fatalf("tail() = %q, did not want unmatched configured marker", got)
+	}
+	if got, want := strings.Count(got, "first warning"), 1; got != want {
+		t.Fatalf("matched marker count = %d, want %d in %q", got, want, output.tail())
 	}
 }
 

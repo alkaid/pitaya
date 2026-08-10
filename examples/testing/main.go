@@ -27,7 +27,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/alkaid/goerrors/apierrors"
 	"github.com/alkaid/pitaya/v2"
@@ -50,8 +53,9 @@ import (
 // TestSvc service for e2e tests
 type TestSvc struct {
 	component.Base
-	app         pitaya.Pitaya
-	sessionPool session.SessionPool
+	app               pitaya.Pitaya
+	sessionPool       session.SessionPool
+	stressCloseEvents sync.Map
 }
 
 // TestRemoteSvc remote service for e2e tests
@@ -108,6 +112,24 @@ func (t *TestSvc) Init() {
 	err := t.app.GroupCreate(context.Background(), "g1")
 	if err != nil {
 		panic(err)
+	}
+	t.app.OnSessionClose(func(s session.Session, _ map[string]string, reason session.CloseReason) {
+		t.notifyStressClose(s.ID(), reason)
+	})
+}
+
+func (t *TestSvc) notifyStressClose(sessionID int64, reason session.CloseReason) {
+	event, tracked := t.stressCloseEvents.LoadAndDelete(sessionID)
+	if !tracked {
+		return
+	}
+	closeEvent, ok := event.(chan session.CloseReason)
+	if !ok {
+		return
+	}
+	select {
+	case closeEvent <- reason:
+	default:
 	}
 }
 
@@ -214,6 +236,89 @@ func (t *TestSvc) TestBindID(ctx context.Context, byteUID []byte) ([]byte, error
 		return nil, apierrors.InternalServer("PIT-441", err.Error(), "").WithCause(err)
 	}
 	return []byte("ack"), nil
+}
+
+// TestStressBindID binds without group side effects so same-UID replacement is isolated.
+func (t *TestSvc) TestStressBindID(ctx context.Context, byteUID []byte) ([]byte, error) {
+	s := t.app.GetSessionFromCtx(ctx)
+	closeEvent := make(chan session.CloseReason, 1)
+	if _, loaded := t.stressCloseEvents.LoadOrStore(s.ID(), closeEvent); loaded {
+		err := fmt.Errorf("session %d already has a stress close tracker", s.ID())
+		return nil, apierrors.InternalServer("PIT-448", err.Error(), "").WithCause(err)
+	}
+	bound := false
+	defer func() {
+		if !bound {
+			t.stressCloseEvents.Delete(s.ID())
+		}
+	}()
+	if err := s.Bind(ctx, string(byteUID), nil, nil); err != nil {
+		return nil, apierrors.InternalServer("PIT-444", err.Error(), "").WithCause(err)
+	}
+	bound = true
+	return []byte("ack"), nil
+}
+
+// TestStressRebindID requires and replaces a distinct current owner.
+func (t *TestSvc) TestStressRebindID(ctx context.Context, byteUID []byte) ([]byte, error) {
+	s := t.app.GetSessionFromCtx(ctx)
+	uid := string(byteUID)
+	previous := t.sessionPool.GetSessionByUID(uid)
+	if previous == nil || previous.ID() == s.ID() {
+		err := fmt.Errorf("uid %q has no distinct owner to replace", uid)
+		return nil, apierrors.InternalServer("PIT-446", err.Error(), "").WithCause(err)
+	}
+	previousID := previous.ID()
+	closeEventValue, tracked := t.stressCloseEvents.Load(previousID)
+	closeEvent, eventOK := closeEventValue.(chan session.CloseReason)
+	if !tracked || !eventOK {
+		err := fmt.Errorf("uid %q previous session %d has no close tracker", uid, previousID)
+		return nil, apierrors.InternalServer("PIT-448", err.Error(), "").WithCause(err)
+	}
+	if err := s.Bind(ctx, uid, nil, nil); err != nil {
+		return nil, apierrors.InternalServer("PIT-444", err.Error(), "").WithCause(err)
+	}
+	// The sys bind callback writes the kick before committing Close. The peer's
+	// EOF can therefore win and record Normal; both outcomes must still be
+	// observed before this rebind handler returns its response.
+	closeTimer := time.NewTimer(2 * time.Second)
+	defer closeTimer.Stop()
+	var closeReason session.CloseReason
+	select {
+	case closeReason = <-closeEvent:
+	case <-ctx.Done():
+		err := fmt.Errorf("uid %q previous session %d close callback: %w", uid, previousID, ctx.Err())
+		return nil, apierrors.InternalServer("PIT-447", err.Error(), "").WithCause(err)
+	case <-closeTimer.C:
+		err := fmt.Errorf("uid %q previous session %d close callback timed out", uid, previousID)
+		return nil, apierrors.InternalServer("PIT-447", err.Error(), "").WithCause(err)
+	}
+	if closeReason != session.CloseReasonNormal && closeReason != session.CloseReasonKickRebind {
+		err := fmt.Errorf("uid %q previous session %d close reason = %v, want normal or rebind", uid, previousID, closeReason)
+		return nil, apierrors.InternalServer("PIT-447", err.Error(), "").WithCause(err)
+	}
+	return []byte(fmt.Sprintf("%d|%d|%d", previousID, s.ID(), closeReason)), nil
+}
+
+// TestAssertSessionOwnership verifies that the caller is the pool owner for uid.
+func (t *TestSvc) TestAssertSessionOwnership(ctx context.Context, byteUID []byte) ([]byte, error) {
+	s := t.app.GetSessionFromCtx(ctx)
+	if s == nil {
+		return nil, apierrors.NotFound("PIT-404", constants.ErrSessionNotFound.Error(), "").
+			WithCause(constants.ErrSessionNotFound)
+	}
+	uid := string(byteUID)
+	owner := t.sessionPool.GetSessionByUID(uid)
+	if s.UID() != uid || owner == nil || owner.ID() != s.ID() {
+		err := fmt.Errorf("session %d does not own uid %q", s.ID(), uid)
+		return nil, apierrors.InternalServer("PIT-445", err.Error(), "").WithCause(err)
+	}
+	return []byte(fmt.Sprintf("%s|%d", uid, s.ID())), nil
+}
+
+// TestSessionStats returns authoritative pool counts for stress barriers.
+func (t *TestSvc) TestSessionStats(ctx context.Context) ([]byte, error) {
+	return []byte(fmt.Sprintf("%d|%d", t.sessionPool.GetSessionCount(), t.sessionPool.GetUserCount())), nil
 }
 
 // TestSendGroupMsg handler for e2e tests
@@ -348,6 +453,7 @@ func createApp(serializer string, port int, grpc bool, isFrontend bool, svType s
 	}
 
 	pitayaConfig := config.NewPitayaConfig(conf)
+	verifyTestNATSMessagesBuffer(pitayaConfig)
 
 	var bs *modules.ETCDBindingStorage
 	if grpc {
@@ -373,6 +479,22 @@ func createApp(serializer string, port int, grpc bool, isFrontend bool, svType s
 	}
 
 	return builder.Build(), bs, builder.SessionPool, tcpAcceptor
+}
+
+func verifyTestNATSMessagesBuffer(pitayaConfig *config.PitayaConfig) {
+	value := os.Getenv("PITAYA_CLUSTER_RPC_SERVER_NATS_BUFFER_MESSAGES")
+	if value == "" {
+		return
+	}
+	expected, err := strconv.Atoi(value)
+	if err != nil || expected <= 0 {
+		panic(fmt.Sprintf("invalid test NATS messages buffer %q", value))
+	}
+	actual := pitayaConfig.Cluster.RPC.Server.Nats.Buffer.Messages
+	if actual != expected {
+		panic(fmt.Sprintf("effective test NATS messages buffer = %d, want %d", actual, expected))
+	}
+	fmt.Fprintf(os.Stderr, "pitaya test effective NATS messages buffer: %d\n", actual)
 }
 
 func writeReadyFile(path, address string) error {

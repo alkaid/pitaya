@@ -43,6 +43,9 @@ const (
 	connectorPtrRoute     = "connector.testsvc.testrequestreturnsptr"
 	connectorSessionRoute = "connector.testsvc.testrequestonlysessionreturnsptr"
 	gameSessionRoute      = "game.testsvc.testrequestonlysessionreturnsptr"
+	benchmarkRequestWait  = 10 * time.Second
+	// client.New currently admits at most 30 requests before SendRequest blocks.
+	benchmarkMaxInflight = 30
 )
 
 var (
@@ -51,6 +54,260 @@ var (
 	readinessProbe = flag.Bool("readiness-probe", false, "run the server readiness probe")
 	addr           string
 )
+
+type benchmarkRequestResult struct {
+	response *pitayamessage.Message
+	err      error
+}
+
+type benchmarkPendingRequest struct {
+	result chan benchmarkRequestResult
+}
+
+type benchmarkClient struct {
+	*client.Client
+
+	stateMu     sync.Mutex
+	pending     map[uint]*benchmarkPendingRequest
+	early       map[uint]*pitayamessage.Message
+	registering int
+	failure     error
+
+	inflight    chan struct{}
+	done        chan struct{}
+	failed      chan struct{}
+	closeOnce   sync.Once
+	requestWait time.Duration
+	sendRequest func(string, []byte) (uint, error)
+}
+
+func newBenchmarkClient() *benchmarkClient {
+	base := client.New()
+	c := &benchmarkClient{
+		Client:      base,
+		pending:     make(map[uint]*benchmarkPendingRequest),
+		early:       make(map[uint]*pitayamessage.Message),
+		inflight:    make(chan struct{}, benchmarkMaxInflight),
+		done:        make(chan struct{}),
+		failed:      make(chan struct{}),
+		requestWait: benchmarkRequestWait,
+		sendRequest: base.SendRequest,
+	}
+	base.OnDisconnected(c.handleDisconnect)
+	return c
+}
+
+func (c *benchmarkClient) connect(address string) error {
+	if err := c.ConnectTo(address); err != nil {
+		return err
+	}
+	go c.dispatchResponses()
+	return nil
+}
+
+func (c *benchmarkClient) dispatchResponses() {
+	for {
+		select {
+		case <-c.done:
+			return
+		case <-c.failed:
+			return
+		case response, ok := <-c.IncomingMsgChan:
+			if !ok {
+				c.fail(errors.New("incoming message channel closed"))
+				return
+			}
+			if response == nil {
+				c.fail(errors.New("received nil response"))
+				return
+			}
+			if !c.handleResponse(response) {
+				return
+			}
+		}
+	}
+}
+
+func (c *benchmarkClient) handleResponse(response *pitayamessage.Message) bool {
+	if response == nil {
+		c.fail(errors.New("received nil response"))
+		return false
+	}
+
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if c.failure != nil {
+		return false
+	}
+	if pending, found := c.pending[response.ID]; found {
+		delete(c.pending, response.ID)
+		pending.result <- benchmarkRequestResult{response: response}
+		return true
+	}
+	if c.registering > 0 {
+		if _, duplicate := c.early[response.ID]; duplicate {
+			c.failLocked(fmt.Errorf("received duplicate response for request id %d", response.ID))
+			return false
+		}
+		// SendRequest returns the MID after writing, so a fast response can arrive
+		// while the sender is still between the write and local registration.
+		c.early[response.ID] = response
+		return true
+	}
+	c.failLocked(fmt.Errorf("received response for unknown or completed request id %d", response.ID))
+	return false
+}
+
+func (c *benchmarkClient) fail(err error) {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	c.failLocked(err)
+}
+
+func (c *benchmarkClient) failLocked(err error) {
+	if c.failure != nil {
+		return
+	}
+	if err == nil {
+		err = errors.New("benchmark client failed")
+	}
+	c.failure = err
+	for id, pending := range c.pending {
+		delete(c.pending, id)
+		pending.result <- benchmarkRequestResult{err: err}
+	}
+	clear(c.early)
+	close(c.failed)
+}
+
+func (c *benchmarkClient) failureError() error {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	return c.failure
+}
+
+func (c *benchmarkClient) request(route string, payload []byte) error {
+	timer := time.NewTimer(c.requestWait)
+	defer timer.Stop()
+
+	select {
+	case c.inflight <- struct{}{}:
+		defer func() { <-c.inflight }()
+	case <-c.failed:
+		return c.failureError()
+	case <-timer.C:
+		err := fmt.Errorf("request to %s timed out waiting for an inflight slot", route)
+		c.fail(err)
+		return err
+	}
+
+	pending := &benchmarkPendingRequest{result: make(chan benchmarkRequestResult, 1)}
+	c.stateMu.Lock()
+	if c.failure != nil {
+		err := c.failure
+		c.stateMu.Unlock()
+		return err
+	}
+	c.registering++
+	c.stateMu.Unlock()
+
+	// Do not hold stateMu here. SendRequest can block on the client's inflight
+	// limiter; benchmarkMaxInflight keeps this call below that blocking edge.
+	id, sendErr := c.sendRequest(route, payload)
+	if err := c.finishSend(id, route, pending, sendErr); err != nil {
+		return err
+	}
+
+	for {
+		select {
+		case result := <-pending.result:
+			if result.err != nil {
+				return result.err
+			}
+			if err := c.failureError(); err != nil {
+				return err
+			}
+			response := result.response
+			if response.ID != id {
+				err := fmt.Errorf("response id = %d, want %d", response.ID, id)
+				c.fail(err)
+				return err
+			}
+			if response.Type != pitayamessage.Response || response.Err {
+				err := fmt.Errorf("request returned %s", response)
+				c.fail(err)
+				return err
+			}
+			return nil
+		case <-c.failed:
+			return c.failureError()
+		case <-timer.C:
+			err := fmt.Errorf("request %d to %s timed out", id, route)
+			if c.timeout(id, pending, err) {
+				return err
+			}
+			// A response or another terminal failure won while the timer fired.
+		}
+	}
+}
+
+func (c *benchmarkClient) finishSend(id uint, route string, pending *benchmarkPendingRequest, sendErr error) error {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	c.registering--
+
+	if c.failure != nil {
+		return c.failure
+	}
+	if sendErr != nil {
+		c.failLocked(fmt.Errorf("send request %d to %s: %w", id, route, sendErr))
+		return c.failure
+	}
+	if response, found := c.early[id]; found {
+		delete(c.early, id)
+		pending.result <- benchmarkRequestResult{response: response}
+	} else {
+		c.pending[id] = pending
+	}
+
+	if c.registering == 0 && len(c.early) > 0 {
+		var unknownID uint
+		for unknownID = range c.early {
+			break
+		}
+		c.failLocked(fmt.Errorf("received response for unknown request id %d", unknownID))
+		return c.failure
+	}
+	return nil
+}
+
+func (c *benchmarkClient) timeout(id uint, pending *benchmarkPendingRequest, err error) bool {
+	c.stateMu.Lock()
+	defer c.stateMu.Unlock()
+	if registered := c.pending[id]; registered != pending {
+		return false
+	}
+	delete(c.pending, id)
+	c.failLocked(err)
+	return true
+}
+
+func (c *benchmarkClient) handleDisconnect(reason client.CloseReason) {
+	select {
+	case <-c.done:
+		return
+	default:
+		c.fail(fmt.Errorf("benchmark client disconnected with reason %d", reason))
+	}
+}
+
+func (c *benchmarkClient) close() {
+	c.closeOnce.Do(func() {
+		c.fail(errors.New("benchmark client closed"))
+		close(c.done)
+		c.Disconnect(client.CloseReasonManual)
+	})
+}
 
 func TestMain(m *testing.M) {
 	flag.Parse()
@@ -96,43 +353,30 @@ func assertRequestReady(t *testing.T, c *client.Client, route string, payload []
 	}
 }
 
-func getClients(b *testing.B, n int) []*client.Client {
+func getClients(b *testing.B, n int) []*benchmarkClient {
 	b.Helper()
-	clients := make([]*client.Client, n)
+	clients := make([]*benchmarkClient, n)
 	b.Cleanup(func() {
 		for _, c := range clients {
 			if c != nil {
-				c.Disconnect(client.CloseReasonManual)
+				c.close()
 			}
 		}
 	})
 	for i := range clients {
-		clients[i] = client.New()
-		if err := clients[i].ConnectTo(addr); err != nil {
+		clients[i] = newBenchmarkClient()
+		if err := clients[i].connect(addr); err != nil {
 			b.Fatalf("connect benchmark client %d to %s: %v", i, addr, err)
 		}
 	}
 	return clients
 }
 
-func sendBenchmarkRequest(c *client.Client, route string, payload []byte) error {
-	if _, err := c.SendRequest(route, payload); err != nil {
-		return err
-	}
-	response, ok := <-c.IncomingMsgChan
-	if !ok {
-		return errors.New("incoming message channel closed")
-	}
-	if response == nil {
-		return errors.New("received nil response")
-	}
-	if response.Type != pitayamessage.Response || response.Err {
-		return fmt.Errorf("request returned %s", response)
-	}
-	return nil
+func sendBenchmarkRequest(c *benchmarkClient, route string, payload []byte) error {
+	return c.request(route, payload)
 }
 
-func runSequentialRequests(b *testing.B, c *client.Client, route string, payload []byte) {
+func runSequentialRequests(b *testing.B, c *benchmarkClient, route string, payload []byte) {
 	b.Helper()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -140,9 +384,12 @@ func runSequentialRequests(b *testing.B, c *client.Client, route string, payload
 			b.Fatalf("request to %s failed at iteration %d: %v", route, i, err)
 		}
 	}
+	if err := c.failureError(); err != nil {
+		b.Fatalf("request to %s left the benchmark client failed: %v", route, err)
+	}
 }
 
-func runParallelRequests(b *testing.B, clients []*client.Client, route string, payload []byte, distribute bool) {
+func runParallelRequests(b *testing.B, clients []*benchmarkClient, route string, payload []byte, distribute bool) {
 	b.Helper()
 	var nextClient atomic.Uint64
 	var firstErr error
@@ -164,21 +411,26 @@ func runParallelRequests(b *testing.B, clients []*client.Client, route string, p
 	if firstErr != nil {
 		b.Fatalf("parallel request to %s failed: %v", route, firstErr)
 	}
+	for i, c := range clients {
+		if err := c.failureError(); err != nil {
+			b.Fatalf("parallel request to %s left client %d failed: %v", route, i, err)
+		}
+	}
 }
 
 func BenchmarkCreateManyClients(b *testing.B) {
-	clients := make([]*client.Client, b.N)
+	clients := make([]*benchmarkClient, b.N)
 	b.Cleanup(func() {
 		for _, c := range clients {
 			if c != nil {
-				c.Disconnect(client.CloseReasonManual)
+				c.close()
 			}
 		}
 	})
 	b.ResetTimer()
 	for i := range clients {
-		clients[i] = client.New()
-		if err := clients[i].ConnectTo(addr); err != nil {
+		clients[i] = newBenchmarkClient()
+		if err := clients[i].connect(addr); err != nil {
 			b.Fatalf("connect benchmark client %d to %s: %v", i, addr, err)
 		}
 	}

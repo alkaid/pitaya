@@ -113,17 +113,37 @@ const (
 )
 
 type processOutput struct {
-	mu        sync.Mutex
-	pending   string
-	lines     []string
-	limit     int
-	marker    string
-	ready     chan struct{}
-	readyOnce sync.Once
+	mu             sync.Mutex
+	pending        string
+	lines          []string
+	limit          int
+	marker         string
+	trackedMarkers []string
+	matchedMarkers map[string]struct{}
+	ready          chan struct{}
+	readyOnce      sync.Once
 }
 
-func newProcessOutput(marker string, limit int) *processOutput {
-	return &processOutput{marker: marker, limit: limit, ready: make(chan struct{})}
+func newProcessOutput(marker string, limit int, additionalMarkers ...string) *processOutput {
+	markers := make([]string, 0, len(additionalMarkers))
+	seen := make(map[string]struct{}, len(additionalMarkers))
+	for _, candidate := range additionalMarkers {
+		if candidate == "" {
+			continue
+		}
+		if _, ok := seen[candidate]; ok {
+			continue
+		}
+		seen[candidate] = struct{}{}
+		markers = append(markers, candidate)
+	}
+	return &processOutput{
+		limit:          limit,
+		marker:         marker,
+		trackedMarkers: markers,
+		matchedMarkers: make(map[string]struct{}, len(markers)),
+		ready:          make(chan struct{}),
+	}
 }
 
 func (o *processOutput) Write(data []byte) (int, error) {
@@ -139,9 +159,7 @@ func (o *processOutput) Write(data []byte) (int, error) {
 		o.appendLine(strings.TrimSuffix(o.pending[:newline], "\r"))
 		o.pending = o.pending[newline+1:]
 	}
-	if strings.Contains(o.pending, o.marker) {
-		o.readyOnce.Do(func() { close(o.ready) })
-	}
+	o.recordMarkers(o.pending)
 	if len(o.pending) > processOutputPendingLimit {
 		o.pending = o.pending[len(o.pending)-processOutputPendingLimit:]
 	}
@@ -149,15 +167,27 @@ func (o *processOutput) Write(data []byte) (int, error) {
 }
 
 func (o *processOutput) appendLine(line string) {
-	if strings.Contains(line, o.marker) {
-		o.readyOnce.Do(func() { close(o.ready) })
-	}
+	o.recordMarkers(line)
 	if len(line) > processOutputPendingLimit {
 		line = line[len(line)-processOutputPendingLimit:]
 	}
 	o.lines = append(o.lines, line)
 	if len(o.lines) > o.limit {
 		o.lines = append([]string(nil), o.lines[len(o.lines)-o.limit:]...)
+	}
+}
+
+func (o *processOutput) recordMarkers(output string) {
+	if strings.Contains(output, o.marker) {
+		o.readyOnce.Do(func() { close(o.ready) })
+	}
+	for _, marker := range o.trackedMarkers {
+		if _, matched := o.matchedMarkers[marker]; matched {
+			continue
+		}
+		if strings.Contains(output, marker) {
+			o.matchedMarkers[marker] = struct{}{}
+		}
 	}
 }
 
@@ -172,7 +202,20 @@ func (o *processOutput) tail() string {
 	if len(lines) > o.limit {
 		lines = lines[len(lines)-o.limit:]
 	}
-	return strings.Join(lines, "\n")
+	tail := strings.Join(lines, "\n")
+	preserved := make([]string, 0, len(o.matchedMarkers))
+	for _, marker := range o.trackedMarkers {
+		if _, matched := o.matchedMarkers[marker]; matched && !strings.Contains(tail, marker) {
+			preserved = append(preserved, marker)
+		}
+	}
+	if len(preserved) == 0 {
+		return tail
+	}
+	if tail != "" {
+		preserved = append(preserved, tail)
+	}
+	return strings.Join(preserved, "\n")
 }
 
 type managedProcess struct {
@@ -196,6 +239,10 @@ type TestServerConfig struct {
 	LazyConnection bool
 	CleanPitayaEnv bool
 	ReadyTimeout   time.Duration
+	// NATSMessagesBuffer overrides the examples/testing server only when positive.
+	NATSMessagesBuffer int
+	// OutputMarkers remain visible in Tail after the rolling window advances.
+	OutputMarkers []string
 }
 
 // TestServerProcess owns a started examples/testing server process.
@@ -215,7 +262,8 @@ func (p *TestServerProcess) Port() int {
 	return p.port
 }
 
-// Tail returns the bounded server output retained for diagnostics.
+// Tail returns the bounded server output plus any configured markers that
+// matched before rolling out of the output window.
 func (p *TestServerProcess) Tail() string {
 	if p == nil || p.process == nil {
 		return ""
@@ -252,15 +300,15 @@ func (p *TestServerProcess) Stop() error {
 	return errors.Join(stopErr, p.cleanupErr)
 }
 
-func startReadyProcess(cmd *exec.Cmd, marker string, readyTimeout time.Duration) (*managedProcess, error) {
-	return startReadyProcessContext(context.Background(), cmd, marker, readyTimeout)
+func startReadyProcess(cmd *exec.Cmd, marker string, readyTimeout time.Duration, outputMarkers ...string) (*managedProcess, error) {
+	return startReadyProcessContext(context.Background(), cmd, marker, readyTimeout, outputMarkers...)
 }
 
-func startReadyProcessContext(ctx context.Context, cmd *exec.Cmd, marker string, readyTimeout time.Duration) (*managedProcess, error) {
+func startReadyProcessContext(ctx context.Context, cmd *exec.Cmd, marker string, readyTimeout time.Duration, outputMarkers ...string) (*managedProcess, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	output := newProcessOutput(marker, 200)
+	output := newProcessOutput(marker, 200, outputMarkers...)
 	cmd.Stdout = output
 	cmd.Stderr = output
 	cmd.WaitDelay = processWaitDelay
@@ -422,6 +470,9 @@ func startTestServerContext(ctx context.Context, config TestServerConfig, discov
 	if config.Port < 0 || config.Port > 65535 {
 		return nil, fmt.Errorf("invalid test server port: %d", config.Port)
 	}
+	if config.NATSMessagesBuffer < 0 {
+		return nil, fmt.Errorf("invalid test server NATS messages buffer: %d", config.NATSMessagesBuffer)
+	}
 
 	grpcPort := 0
 	var err error
@@ -479,8 +530,11 @@ func startTestServerContext(ctx context.Context, config TestServerConfig, discov
 	if value := os.Getenv("PITAYA_TEST_REDIS_URL"); value != "" {
 		cmd.Args = append(cmd.Args, "-redisurl", value)
 	}
+	if config.NATSMessagesBuffer > 0 {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("PITAYA_CLUSTER_RPC_SERVER_NATS_BUFFER_MESSAGES=%d", config.NATSMessagesBuffer))
+	}
 
-	process, err := startReadyProcessContext(ctx, cmd, serverReadyMarker, readyTimeout)
+	process, err := startReadyProcessContext(ctx, cmd, serverReadyMarker, readyTimeout, config.OutputMarkers...)
 	if err != nil {
 		return nil, withCleanupError(err, removeTestServerReadyDir(readyDir))
 	}

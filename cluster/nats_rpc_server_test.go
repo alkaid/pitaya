@@ -254,8 +254,14 @@ func TestNatsRPCServerConfigure(t *testing.T) {
 			cfg.Connect = table.natsConnect
 			cfg.Buffer.Messages = table.messagesBufferSize
 			cfg.Buffer.Push = table.pushBufferSize
-			_, err := NewNatsRPCServer(cfg, getServer(), nil, nil, nil)
+			rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, nil, nil)
 			assert.Equal(t, table.err, err)
+			if table.err == nil {
+				assert.Equal(t, table.messagesBufferSize, rpcServer.messagesBufferSize)
+				assert.Equal(t, table.messagesBufferSize, cap(rpcServer.subChan))
+				assert.Equal(t, table.messagesBufferSize, cap(rpcServer.bindingsChan))
+				assert.Equal(t, table.messagesBufferSize, cap(rpcServer.userKickCh))
+			}
 		})
 	}
 }

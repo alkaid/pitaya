@@ -86,6 +86,13 @@ func TestNewConfig(t *testing.T) {
 	}
 }
 
+func TestNATSMessagesBufferEnvironmentOverride(t *testing.T) {
+	t.Setenv("PITAYA_CLUSTER_RPC_SERVER_NATS_BUFFER_MESSAGES", "16384")
+
+	got := NewPitayaConfig(NewConfig()).Cluster.RPC.Server.Nats.Buffer.Messages
+	require.Equal(t, 16384, got)
+}
+
 func TestGetDuration(t *testing.T) {
 	t.Parallel()
 

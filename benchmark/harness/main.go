@@ -9,14 +9,46 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/alkaid/pitaya/v2/helpers"
 )
 
 type benchmarkServers struct {
-	frontend *helpers.TestServerProcess
-	backend  *helpers.TestServerProcess
+	frontend           *helpers.TestServerProcess
+	backend            *helpers.TestServerProcess
+	natsMessagesBuffer int
+}
+
+const (
+	effectiveNATSBufferMarker = "pitaya test effective NATS messages buffer: "
+	natsSlowConsumerMarker    = "nats slow consumer"
+	natsDroppedMessageMarker  = "some messages were dropped"
+)
+
+// The helper retains a matched marker even after the bounded output tail rolls.
+func benchmarkOutputMarkers(natsMessagesBuffer int) []string {
+	markers := []string{
+		natsSlowConsumerMarker,
+		natsDroppedMessageMarker,
+	}
+	if natsMessagesBuffer > 0 {
+		markers = append(markers, effectiveNATSBufferMarker+strconv.Itoa(natsMessagesBuffer))
+	}
+	return markers
+}
+
+func configuredNATSMessagesBuffer() (int, error) {
+	value := os.Getenv("PITAYA_TEST_NATS_MESSAGES_BUFFER")
+	if value == "" {
+		return 0, nil
+	}
+	buffer, err := strconv.Atoi(value)
+	if err != nil || buffer <= 0 {
+		return 0, fmt.Errorf("invalid PITAYA_TEST_NATS_MESSAGES_BUFFER %q", value)
+	}
+	return buffer, nil
 }
 
 func main() {
@@ -63,11 +95,18 @@ func run(ctx context.Context, readyFile, diagnosticsDir, sdPrefix string) (err e
 }
 
 func startServers(ctx context.Context, sdPrefix string) (*benchmarkServers, error) {
-	servers := &benchmarkServers{}
+	natsMessagesBuffer, err := configuredNATSMessagesBuffer()
+	servers := &benchmarkServers{natsMessagesBuffer: natsMessagesBuffer}
+	if err != nil {
+		return servers, err
+	}
+	outputMarkers := benchmarkOutputMarkers(natsMessagesBuffer)
 	backend, err := helpers.StartTestServerContext(ctx, helpers.TestServerConfig{
-		ServerType:     "game",
-		SDPrefix:       sdPrefix,
-		CleanPitayaEnv: true,
+		ServerType:         "game",
+		SDPrefix:           sdPrefix,
+		CleanPitayaEnv:     true,
+		NATSMessagesBuffer: natsMessagesBuffer,
+		OutputMarkers:      outputMarkers,
 	})
 	if err != nil {
 		return servers, fmt.Errorf("backend: %w", err)
@@ -75,10 +114,12 @@ func startServers(ctx context.Context, sdPrefix string) (*benchmarkServers, erro
 	servers.backend = backend
 
 	frontend, err := helpers.StartTestServerContext(ctx, helpers.TestServerConfig{
-		Frontend:       true,
-		ServerType:     "connector",
-		SDPrefix:       sdPrefix,
-		CleanPitayaEnv: true,
+		Frontend:           true,
+		ServerType:         "connector",
+		SDPrefix:           sdPrefix,
+		CleanPitayaEnv:     true,
+		NATSMessagesBuffer: natsMessagesBuffer,
+		OutputMarkers:      outputMarkers,
 	})
 	if err != nil {
 		return servers, fmt.Errorf("frontend: %w\nbackend output:\n%s", err, backend.Tail())
@@ -136,8 +177,27 @@ func (s *benchmarkServers) writeDiagnostics(dir string) error {
 		if err := os.WriteFile(filepath.Join(dir, name), contents, 0o600); err != nil {
 			errs = append(errs, fmt.Errorf("write %s: %w", name, err))
 		}
+		if err := validateStressServerOutput(name, output, s.natsMessagesBuffer); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	return errors.Join(errs...)
+}
+
+func validateStressServerOutput(name, output string, natsMessagesBuffer int) error {
+	if natsMessagesBuffer == 0 {
+		return nil
+	}
+	effectiveMarker := effectiveNATSBufferMarker + strconv.Itoa(natsMessagesBuffer)
+	if !strings.Contains(output, effectiveMarker) {
+		return fmt.Errorf("%s did not confirm %s", name, effectiveMarker)
+	}
+	for _, marker := range []string{natsSlowConsumerMarker, natsDroppedMessageMarker} {
+		if strings.Contains(output, marker) {
+			return fmt.Errorf("%s reported dropped NATS messages: %s", name, marker)
+		}
+	}
+	return nil
 }
 
 func writeAtomic(path, value string) error {

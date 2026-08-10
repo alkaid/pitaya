@@ -67,6 +67,8 @@ type pendingRequest struct {
 	sentAt time.Time
 }
 
+var clientActivityEpoch = time.Now()
+
 // Client struct
 type Client struct {
 	conn                net.Conn
@@ -85,7 +87,7 @@ type Client struct {
 	clientHandshakeData *session.HandshakeData
 	onDisconnected      func(reason CloseReason)
 	writeMutex          sync.Mutex
-	lastAt              time.Time
+	lastActivityTick    atomic.Int64
 	connMutex           sync.Mutex
 }
 
@@ -152,29 +154,38 @@ func (c *Client) sendHandshakeRequest() error {
 }
 
 func (c *Client) handleHandshakeResponse() error {
-	c.lastAt = time.Now()
+	heartbeat, err := c.receiveHandshakeResponse()
+	if err != nil {
+		return err
+	}
+	c.startConnectionLoops(heartbeat)
+	return nil
+}
+
+func (c *Client) receiveHandshakeResponse() (int, error) {
+	c.recordServerActivity(time.Now())
 	buf := bytes.NewBuffer(nil)
 	packets, err := c.readPackets(buf)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	handshakePacket := packets[0]
 	if handshakePacket.Type != packet.Handshake {
-		return fmt.Errorf("got first packet from server that is not a handshake, aborting")
+		return 0, fmt.Errorf("got first packet from server that is not a handshake, aborting")
 	}
 
 	handshake := &HandshakeData{}
 	if compression.IsCompressed(handshakePacket.Data) {
 		handshakePacket.Data, err = compression.InflateDataLimit(handshakePacket.Data, codec.MaxPacketSize)
 		if err != nil {
-			return err
+			return 0, err
 		}
 	}
 
 	err = json.Unmarshal(handshakePacket.Data, handshake)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	Log.Debug("got handshake from sv", zap.Any("data", handshake))
@@ -184,21 +195,22 @@ func (c *Client) handleHandshakeResponse() error {
 	}
 	p, err := c.packetEncoder.Encode(packet.HandshakeAck, []byte{})
 	if err != nil {
-		return err
+		return 0, err
 	}
 	_, err = c.connWriteWithDeadline(p)
 	if err != nil {
-		return err
+		return 0, err
 	}
+	return handshake.Sys.Heartbeat, nil
+}
 
+func (c *Client) startConnectionLoops(heartbeat int) {
 	c.Connected = true
 
-	go c.sendHeartbeats(handshake.Sys.Heartbeat)
+	go c.sendHeartbeats(heartbeat)
 	go c.handleServerMessages()
 	go c.handlePackets()
 	go c.pendingRequestsReaper()
-
-	return nil
 }
 func (c *Client) connWriteWithDeadline(b []byte) (int, error) {
 	err := c.conn.SetWriteDeadline(time.Now().Add(time.Second * 5))
@@ -311,13 +323,18 @@ func (c *Client) readPackets(buf *bytes.Buffer) ([]*packet.Packet, error) {
 func (c *Client) handleServerMessages() {
 	buf := bytes.NewBuffer(nil)
 	defer c.Disconnect(CloseReasonError)
-	for c.Connected {
+	for {
 		packets, err := c.readPackets(buf)
-		if err != nil && c.Connected {
-			Log.Error("", zap.Error(err))
-			break
+		if err != nil {
+			select {
+			case <-c.closeChan:
+				return
+			default:
+				Log.Error("", zap.Error(err))
+				return
+			}
 		}
-		c.lastAt = time.Now()
+		c.recordServerActivity(time.Now())
 
 		for _, p := range packets {
 			c.packetChan <- p
@@ -336,8 +353,9 @@ func (c *Client) sendHeartbeats(interval int) {
 		select {
 		case <-t.C:
 			deadline := time.Now().Add(-heartbeatTimeout)
-			if c.lastAt.Before(deadline) {
-				logger.Zap.Debug("Session heartbeat timeout", zap.Time("LastTime", c.lastAt), zap.Time("Deadline", deadline))
+			lastAt := c.lastServerActivity()
+			if lastAt.Before(deadline) {
+				logger.Zap.Debug("Session heartbeat timeout", zap.Time("LastTime", lastAt), zap.Time("Deadline", deadline))
 				return
 			}
 
@@ -351,6 +369,14 @@ func (c *Client) sendHeartbeats(interval int) {
 			return
 		}
 	}
+}
+
+func (c *Client) recordServerActivity(at time.Time) {
+	c.lastActivityTick.Store(at.Sub(clientActivityEpoch).Nanoseconds())
+}
+
+func (c *Client) lastServerActivity() time.Time {
+	return clientActivityEpoch.Add(time.Duration(c.lastActivityTick.Load()))
 }
 
 // Disconnect disconnects the client
@@ -417,12 +443,11 @@ func (c *Client) ConnectTo(uri string, tlsConfig ...*tls.Config) error {
 		return err
 	}
 	c.IncomingMsgChan = make(chan *message.Message, 10)
+	c.closeChan = make(chan struct{})
 
 	if err = c.handleHandshake(); err != nil {
 		return err
 	}
-
-	c.closeChan = make(chan struct{})
 
 	return nil
 }

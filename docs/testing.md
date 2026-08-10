@@ -272,6 +272,12 @@ code used the constant final `b.N` as its index and usually sent every operation
 through one client, so results produced by that implementation are not directly
 comparable to results from this harness.
 
+Concurrent benchmark responses are dispatched back to the caller waiting for
+that message ID. A timeout or server error fails the sample; success no longer
+means merely receiving an arbitrary known response from the shared client
+channel. The production client still filters late or unknown response IDs before
+the benchmark dispatcher sees them.
+
 Run a base SHA and candidate SHA in separate worktrees on the same fixed runner
 with identical `BENCH_PATTERN`, `BENCH_TIME`, and `BENCH_COUNT`, then compare the
 two raw files. Report time, bytes, and allocations; shared-runner results remain
@@ -280,6 +286,57 @@ informational, and a network benchmark does not replace a production profile.
 Runtime gRPC benchmarking is unsupported because this fork supports NATS as its
 business transport. `benchmark-test-grpc` now exits with a migration message;
 gRPC remains compile-only and must be disabled or isolated in deployments.
+
+## NATS connection stress
+
+Run the Linux-only capacity lane with:
+
+```sh
+make test-stress-nats
+```
+
+The default workload holds 10,000 clients at once and validates one strict-MID
+echo from every connection. It then performs 1,000 same-UID replacements with
+fresh client instances at bounded concurrency. Each replacement requires the
+server to observe the old owner close before bind completes, then immediately
+pipelines session-ownership and unique echo checks on the stable bound identity.
+It observes the old client close exactly once and checks that the replacement
+still owns the UID afterward. A kick packet and peer EOF can race, so the server
+may record either normal or rebind closure; all surrounding identity and count
+checks remain mandatory. The gate requires all configured counts and the run
+identity to match a fresh atomic JSON report; a skipped/zero-match test or stale
+report cannot pass.
+
+This lane records the soft file limit and Linux ephemeral port range. It fails
+as an environment error when they cannot cover the configured resident and
+replacement sockets; it never changes host limits or sysctls. Override
+`STRESS_CLIENTS`, `STRESS_CONNECT_CONCURRENCY`, `STRESS_REQUEST_CONCURRENCY`,
+`STRESS_RECONNECTS`, `STRESS_RECONNECT_CONCURRENCY`, `STRESS_REQUEST_TIMEOUT`,
+`STRESS_INTERNAL_TIMEOUT`, `STRESS_CLEANUP_TIMEOUT`, `STRESS_TIMEOUT`,
+`STRESS_NATS_MESSAGES_BUFFER`, or `STRESS_OUT` for local diagnosis. Reduced
+settings are smoke evidence only, not a substitute for the default gate.
+
+The formal gate declares a stress-only NATS message buffer of 16,384 and records
+the value in its JSON report. This covers the burst of 10,000 `SessionClosed`
+notifications produced while the resident clients are cleaned up. The
+supervisor passes it only to the isolated test servers; the framework's
+production default of 75 and its configuration semantics remain unchanged.
+Raising or lowering the buffer or workload defines a different capacity profile
+and must not be reported as passing the default gate. A slow-consumer or
+dropped-message diagnostic remains a hard failure even when all client-side
+count and ownership assertions pass.
+
+`.github/workflows/nightly-stress.yaml` runs the defaults nightly and by manual
+dispatch. The lane is deliberately absent from `verify-fast` and ordinary
+release checks. The existing benchmark script remains the single owner of its
+unique Compose project, server supervisor, workload process, cleanup, and
+diagnostics. A successful run publishes the JSON report and adjacent `.log`
+only after the supervisor honors TERM, its retained frontend/backend logs contain
+no NATS slow-consumer or dropped-message warning, and the Compose project stops
+cleanly. Needing KILL is a gate failure. Failures preserve available JSON and log
+data as `<STRESS_OUT>.failed-<project>` and
+`<STRESS_OUT>.failed-<project>.log`; available supervisor and server tails use
+the same prefix with `.supervisor.log`, `.frontend.log`, or `.backend.log`.
 
 ## Failure artifacts
 
@@ -292,6 +349,8 @@ gRPC remains compile-only and must be disabled or isolated in deployments.
 - NATS E2E diagnostics: emitted directly by `scripts/test-e2e-nats.sh` before
   project cleanup;
 - failed NATS benchmark output: `<BENCH_OUT>.failed-<project>`;
+- NATS stress JSON/log evidence: `build/stress`, including failed outputs named
+  from `<STRESS_OUT>.failed-<project>`;
 - distribution scratch data: temporary and removed by the owning script.
 
 Do not rerun a failed lane until it turns green without first preserving its
