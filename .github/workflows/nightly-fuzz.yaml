@@ -1,0 +1,61 @@
+name: Nightly Fuzz
+
+permissions:
+  contents: read
+
+env:
+  GOTOOLCHAIN: local
+
+on:
+  schedule:
+  - cron: '17 18 * * *' # 02:17 Asia/Shanghai
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-fuzz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: Registered Fuzz Targets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+    - name: Checkout
+      timeout-minutes: 2
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Set up Go
+      timeout-minutes: 4
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: |
+          go.sum
+          tools/go.sum
+    - name: Download and verify root and tool modules
+      timeout-minutes: 4
+      run: |
+        GOWORK=off go mod download
+        GOWORK=off go mod verify
+        GOWORK=off go mod download -modfile=tools/go.mod
+        GOWORK=off go mod verify -modfile=tools/go.mod
+    - name: Run each registered fuzz target
+      id: fuzz
+      timeout-minutes: 40
+      env:
+        GOMEMLIMIT: 2GiB
+      run: |
+        mkdir -p build/fuzz
+        set -o pipefail
+        make test-fuzz-nightly 2>&1 | tee build/fuzz/gate.log
+    - name: Upload fuzz failure evidence
+      if: ${{ always() && steps.fuzz.outcome == 'failure' }}
+      timeout-minutes: 5
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: fuzz-${{ github.sha }}-${{ github.run_attempt }}
+        path: |
+          build/fuzz/**
+          **/testdata/fuzz/**
+        if-no-files-found: error
+        retention-days: 14

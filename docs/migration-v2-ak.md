@@ -84,6 +84,26 @@ before adding another nested Go module. The root coverage gate recognizes only
 `pitaya-cli`, `tools`, and `xk6-pitaya`; an unregistered nested `go.mod` now
 fails closed instead of being silently skipped by `go test ./...`.
 
+## Message and error payload decoding
+
+Compressed Pitaya message payloads and compressed client handshake responses
+are now rejected when decompression would produce more than 16 MiB, matching
+the packet envelope. Both compressed paths were previously unbounded. Raw,
+uncompressed payload handling is unchanged.
+Applications that intentionally send highly compressible payloads above this
+limit must split or reduce them; callers of `message.Decode` should treat the
+new limit error like any other invalid inbound frame. Clients also abort the
+handshake before becoming connected when a compressed response exceeds the
+limit. A truncated routable message that ends before its route-length byte now
+returns `ErrInvalidMessage` instead of panicking.
+
+Malformed JSON or protobuf error payloads now decode to the canonical HTTP 500
+status with reason and message `unknown`. Previously, decode errors were
+ignored, which could expose a partially decoded JSON status or a zero-value
+protobuf status. Valid payloads keep accepting unknown fields, so forward
+compatible producers do not need to strip newer fields. Fix any producer that
+sends malformed error bytes; do not depend on partial status recovery.
+
 ## Stateful pool admission errors
 
 `StatefulPool.Go` and the keyed `co.Go*` wrappers now return a completion channel

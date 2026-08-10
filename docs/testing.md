@@ -31,11 +31,12 @@ This target contains:
 | `compile` | Root, CLI, and xk6 packages compile |
 | `test-unit` | Root package unit tests run once |
 | `vet` | Root production and test packages pass `go vet` |
+| `test-fuzz-seeds` | Every registered fuzz target and committed corpus entry runs and passes |
 | `test-consumer` | Independent temporary consumer compiles current public contracts |
 | `docs-lint` | Fork identity, upstream-link policy, README invariants, and ledger shape |
 
 The fast gate does not prove NATS/etcd/Redis behavior, race safety, coverage,
-published tags, or dependency safety.
+long-running fuzz mutation, published tags, or dependency safety.
 
 There is intentionally no root `make verify` aggregate yet. Phase 5 must define
 that command only after its integration, race, fuzz, coverage, and benchmark
@@ -134,6 +135,63 @@ commit SHA that is an ancestor of the selected head. Pull requests compare the
 tested merge commit with its first parent; pushes compare the event's exact
 before and after commits.
 
+## Fuzzing
+
+`scripts/fuzz-targets.json` is the canonical inventory for root-module fuzz
+targets. The gate parses the active Go test files from `go list` and requires an
+exact, non-empty match between source and manifest, so adding or removing a
+target without updating the manifest fails before any test starts.
+Build-constrained fuzz targets are rejected when they are inactive in the
+Linux CI build graph. Keep root targets portable, or add a separate manifest
+and execution lane for the constrained platform before adding one.
+
+Run the committed seed corpus with the same command used by the fast gate:
+
+```sh
+make test-fuzz-seeds
+```
+
+Run all registered targets with the nightly defaults, or select one registered
+target while developing:
+
+```sh
+make test-fuzz-nightly
+make test-fuzz-one \
+  FUZZ_PACKAGE=./conn/message \
+  FUZZ_TARGET=FuzzMessageDecode \
+  FUZZ_TIME=30s
+```
+
+The all-target command runs targets sequentially for two minutes each by
+default. Override `FUZZ_SEED_TIMEOUT`, `FUZZ_TIME`, `FUZZ_MINIMIZE_TIME`,
+`FUZZ_TIMEOUT`, `FUZZ_PARALLEL`, or `FUZZ_ARTIFACT_DIR` without editing the
+manifest. A single-target request must match a manifest entry; an unknown target
+fails even on Go versions that return success for an empty `-run` or `-fuzz`
+match.
+
+The verifier reads `go test -json`, rather than trusting only the process exit
+code. A seed pass requires the target and every `f.Add` or committed
+`testdata/fuzz` child to run and pass. A mutation pass additionally requires a
+target-scoped Go fuzz progress event whose total executions exceed the completed
+baseline corpus count. Package logs, baseline-only runs, skipped corpus entries,
+missing targets, and zero-mutation runs therefore cannot produce a green gate.
+The all-target nightly command clears Go's fuzz cache first; only
+source-controlled corpus files are accepted as durable nightly inputs. The
+single-target developer command preserves the local cache.
+
+Pull requests, pushes to `main`, and manual Tests runs execute the seed gate.
+`.github/workflows/nightly-fuzz.yaml` runs the mutation gate daily and on manual
+dispatch. Failures preserve per-target JSON event streams and stderr under
+package SHA-256 and target SHA-256 directory levels in `build/fuzz`. Each target
+directory includes `target.json`, which records the original package and target
+behind those hashes. The upload also includes any generated `testdata/fuzz`
+input. The workflow writes `build/fuzz/gate.log` before invoking the verifier,
+so setup, compilation, and manifest failures retain their command output too.
+The fuzz step has its own timeout so the job retains a separate upload window
+after a hang. Reproduce a generated input with
+`test-fuzz-one`, keep it only when it deterministically fails the old behavior
+and passes the fix, and commit the minimized corpus file with the regression.
+
 ## Dependency scan
 
 ```sh
@@ -222,6 +280,8 @@ gRPC remains compile-only and must be disabled or isolated in deployments.
 - default documentation output: `build/docs`;
 - unit coverage: `coverprofile.out`;
 - stamped coverage provenance: `coverprofile.out.meta.json`;
+- fuzz JSON/stderr and the gate marker: `build/fuzz`;
+- minimized fuzz failures: `<package>/testdata/fuzz/<target>/<hash>`;
 - NATS E2E diagnostics: emitted directly by `scripts/test-e2e-nats.sh` before
   project cleanup;
 - failed NATS benchmark output: `<BENCH_OUT>.failed-<project>`;

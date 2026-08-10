@@ -31,6 +31,13 @@ SPHINXOPTS ?= -W --keep-going
 COVERAGE_PROFILE ?= $(CURDIR)/coverprofile.out
 COVERAGE_POLICY ?= $(CURDIR)/scripts/coverage-baseline.json
 COVERAGE_PROFILES ?= $(COVERAGE_PROFILE)
+FUZZ_MANIFEST ?= $(CURDIR)/scripts/fuzz-targets.json
+FUZZ_SEED_TIMEOUT ?= 30s
+FUZZ_TIME ?= 2m
+FUZZ_MINIMIZE_TIME ?= 30s
+FUZZ_TIMEOUT ?= 4m
+FUZZ_PARALLEL ?= 2
+FUZZ_ARTIFACT_DIR ?= $(CURDIR)/build/fuzz
 
 TESTABLE_PACKAGES = `go list ./... | $(GREP_CMD) examples | $(GREP_CMD) constants | $(GREP_CMD) mocks | $(GREP_CMD) helpers | $(GREP_CMD) interfaces | $(GREP_CMD) protos | $(GREP_CMD) e2e | $(GREP_CMD) benchmark`
 
@@ -80,7 +87,7 @@ docs:
 test-distribution:
 	@./scripts/test-distribution.sh
 
-verify-fast: tools-verify module-verify logrus-verify docs-lint compile test-unit vet test-consumer
+verify-fast: tools-verify module-verify logrus-verify docs-lint compile test-unit vet test-fuzz-seeds test-consumer
 
 scan-deps: init-toolchain
 	@./scripts/scan-deps.sh
@@ -200,6 +207,39 @@ benchmark-test-grpc:
 	@echo "gRPC runtime benchmarks are unsupported; use benchmark-test-nats" >&2
 	@exit 2
 
+test-fuzz-seeds:
+	@$(GOWORK_OFF) go -C tools run ./cmd/fuzzgate seeds \
+		-repo "$(CURDIR)" \
+		-manifest "$(abspath $(FUZZ_MANIFEST))" \
+		-timeout "$(FUZZ_SEED_TIMEOUT)"
+
+test-fuzz-nightly:
+	@$(GOWORK_OFF) go -C tools run ./cmd/fuzzgate fuzz \
+		-repo "$(CURDIR)" \
+		-manifest "$(abspath $(FUZZ_MANIFEST))" \
+		-artifacts "$(abspath $(FUZZ_ARTIFACT_DIR))" \
+		-clean-cache \
+		-seedtimeout "$(FUZZ_SEED_TIMEOUT)" \
+		-fuzztime "$(FUZZ_TIME)" \
+		-minimizetime "$(FUZZ_MINIMIZE_TIME)" \
+		-timeout "$(FUZZ_TIMEOUT)" \
+		-parallel "$(FUZZ_PARALLEL)"
+
+test-fuzz-one:
+	@test -n "$(FUZZ_PACKAGE)" || { echo "FUZZ_PACKAGE is required" >&2; exit 2; }
+	@test -n "$(FUZZ_TARGET)" || { echo "FUZZ_TARGET is required" >&2; exit 2; }
+	@$(GOWORK_OFF) go -C tools run ./cmd/fuzzgate fuzz \
+		-repo "$(CURDIR)" \
+		-manifest "$(abspath $(FUZZ_MANIFEST))" \
+		-artifacts "$(abspath $(FUZZ_ARTIFACT_DIR))" \
+		-package "$(FUZZ_PACKAGE)" \
+		-target "$(FUZZ_TARGET)" \
+		-seedtimeout "$(FUZZ_SEED_TIMEOUT)" \
+		-fuzztime "$(FUZZ_TIME)" \
+		-minimizetime "$(FUZZ_MINIMIZE_TIME)" \
+		-timeout "$(FUZZ_TIMEOUT)" \
+		-parallel "$(FUZZ_PARALLEL)"
+
 unit-test-coverage:
 	@echo "===============RUNNING UNIT TESTS==============="
 	@GOWORK=off go test ./... -count=1 -coverprofile="$(COVERAGE_PROFILE)"
@@ -246,7 +286,7 @@ test-coverage-func coverage-func: test-coverage
 	@echo "\033[1;34m=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\033[0m"
 	@go tool cover -func="$(COVERAGE_PROFILE)" | grep -Ev "100[.]0%"
 
-.PHONY: compile-core compile-root compile-cli compile-xk6 compile test-unit vet verify-root module-verify tools-verify logrus-verify test-consumer test-distribution docs docs-lint verify-fast scan-deps test-e2e-nats e2e-test-nats e2e-test benchmark-test-nats benchmark-regression benchmark-test-grpc test coverage coverage-stamped coverage-gate coverage-baseline init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
+.PHONY: compile-core compile-root compile-cli compile-xk6 compile test-unit vet verify-root module-verify tools-verify logrus-verify test-consumer test-distribution docs docs-lint verify-fast scan-deps test-e2e-nats e2e-test-nats e2e-test benchmark-test-nats benchmark-regression benchmark-test-grpc test-fuzz-seeds test-fuzz-nightly test-fuzz-one test coverage coverage-stamped coverage-gate coverage-baseline init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 
 mocks: agent-mock session-mock networkentity-mock pitaya-mock serializer-mock metrics-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 

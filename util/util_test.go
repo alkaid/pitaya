@@ -28,11 +28,16 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/alkaid/goerrors/apierrors"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/protos"
+	"github.com/alkaid/pitaya/v2/serialize"
+	jsonserializer "github.com/alkaid/pitaya/v2/serialize/json"
 	"github.com/alkaid/pitaya/v2/serialize/mocks"
+	protobufserializer "github.com/alkaid/pitaya/v2/serialize/protobuf"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 )
 
@@ -193,6 +198,120 @@ func TestGetErrorPayload(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Equal(t, table.out, b)
 		})
+	}
+}
+
+func TestGetErrorFromMalformedPayload(t *testing.T) {
+	t.Parallel()
+
+	for name, test := range map[string]struct {
+		serializer serialize.Serializer
+		payload    []byte
+	}{
+		"json": {
+			serializer: jsonserializer.NewSerializer(),
+			payload:    []byte(`{"code":418,"reason":{},"message":"partial"}`),
+		},
+		"protobuf": {
+			serializer: protobufserializer.NewSerializer(),
+			payload:    []byte{0xff},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assertUnknownErrorPayload(t, test.serializer, test.payload)
+		})
+	}
+}
+
+func TestGetErrorFromPayloadAcceptsUnknownFields(t *testing.T) {
+	t.Run("json", func(t *testing.T) {
+		serializer := jsonserializer.NewSerializer()
+		payload := []byte(`{"code":418,"reason":"teapot","message":"short","unknown":true}`)
+		got := apierrors.FromError(GetErrorFromPayload(serializer, payload))
+		assert.Equal(t, int32(418), got.Status.Code)
+		assert.Equal(t, "teapot", got.Status.Reason)
+		assert.Equal(t, "short", got.Status.Message)
+	})
+
+	t.Run("protobuf", func(t *testing.T) {
+		serializer := protobufserializer.NewSerializer()
+		payload, err := serializer.Marshal(&apierrors.Status{
+			Code:    503,
+			Reason:  "unavailable",
+			Message: "retry later",
+		})
+		require.NoError(t, err)
+		payload = append(payload, 0x98, 0x06, 0x01)
+
+		got := apierrors.FromError(GetErrorFromPayload(serializer, payload))
+		assert.Equal(t, int32(503), got.Status.Code)
+		assert.Equal(t, "unavailable", got.Status.Reason)
+		assert.Equal(t, "retry later", got.Status.Message)
+	})
+}
+
+func FuzzGetErrorFromJSONPayload(f *testing.F) {
+	serializer := jsonserializer.NewSerializer()
+	seed := apierrors.InternalServer("seed.reason", "seed message", "").WithMetadata(map[string]string{"key": "value"})
+	encoded, err := serializer.Marshal(seed)
+	require.NoError(f, err)
+
+	f.Add(encoded)
+	f.Add([]byte(`{"code":418,"reason":"teapot","message":"short","unknown":true}`))
+	f.Add([]byte(`{"code":418,"reason":{},"message":"partial"}`))
+	f.Add([]byte{})
+
+	f.Fuzz(func(t *testing.T, payload []byte) {
+		assertStableErrorPayload(t, serializer, payload)
+		probe := apierrors.InternalServer("probe", "probe", "")
+		if err := serializer.Unmarshal(payload, probe); err != nil {
+			assertUnknownErrorPayload(t, serializer, payload)
+		}
+	})
+}
+
+func FuzzGetErrorFromProtobufPayload(f *testing.F) {
+	serializer := protobufserializer.NewSerializer()
+	seed := &apierrors.Status{
+		Code:     503,
+		Reason:   "seed.reason",
+		Message:  "seed message",
+		Metadata: map[string]string{"key": "value"},
+	}
+	encoded, err := serializer.Marshal(seed)
+	require.NoError(f, err)
+
+	f.Add(encoded)
+	f.Add(append(append([]byte{}, encoded...), 0x98, 0x06, 0x01))
+	f.Add([]byte{0x0a, 0xff})
+	f.Add([]byte{})
+
+	f.Fuzz(func(t *testing.T, payload []byte) {
+		assertStableErrorPayload(t, serializer, payload)
+		if err := serializer.Unmarshal(payload, &apierrors.Status{}); err != nil {
+			assertUnknownErrorPayload(t, serializer, payload)
+		}
+	})
+}
+
+func assertUnknownErrorPayload(t *testing.T, serializer serialize.Serializer, payload []byte) {
+	t.Helper()
+	got := apierrors.FromError(GetErrorFromPayload(serializer, payload))
+	assert.Equal(t, int32(500), got.Status.Code)
+	assert.Equal(t, "unknown", got.Status.Reason)
+	assert.Equal(t, "unknown", got.Status.Message)
+}
+
+func assertStableErrorPayload(t *testing.T, serializer serialize.Serializer, payload []byte) {
+	t.Helper()
+	if len(payload) > 64<<10 {
+		t.Skip()
+	}
+
+	first := apierrors.FromError(GetErrorFromPayload(serializer, payload))
+	second := apierrors.FromError(GetErrorFromPayload(serializer, payload))
+	if !reflect.DeepEqual(&first.Status, &second.Status) {
+		t.Fatalf("error payload decode is not deterministic: first=%#v second=%#v", &first.Status, &second.Status)
 	}
 }
 

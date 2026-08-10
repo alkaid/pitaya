@@ -1,13 +1,15 @@
 package compression
 
 import (
+	"bytes"
+	"errors"
 	"flag"
 	"path/filepath"
 	"testing"
 
+	"github.com/alkaid/pitaya/v2/helpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/alkaid/pitaya/v2/helpers"
 )
 
 var update = flag.Bool("update", false, "update .golden files")
@@ -60,4 +62,22 @@ func TestCompressionInflateIncorrectData(t *testing.T) {
 		require.Error(t, err)
 		assert.Nil(t, result)
 	})
+}
+
+func TestInflateDataLimit(t *testing.T) {
+	input := bytes.Repeat([]byte("bounded"), 32)
+	compressed, err := DeflateData(input)
+	require.NoError(t, err)
+
+	result, err := InflateDataLimit(compressed, len(input))
+	require.NoError(t, err)
+	assert.Equal(t, input, result)
+
+	result, err = InflateDataLimit(compressed, len(input)-1)
+	assert.Nil(t, result)
+	assert.True(t, errors.Is(err, ErrInflatedDataTooLarge))
+
+	result, err = InflateDataLimit(compressed, -1)
+	assert.Nil(t, result)
+	assert.ErrorContains(t, err, "invalid inflated data limit")
 }

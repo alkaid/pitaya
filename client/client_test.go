@@ -1,15 +1,55 @@
 package client
 
 import (
+	"bytes"
+	"net"
 	"testing"
 	"time"
 
+	"github.com/alkaid/pitaya/v2/conn/codec"
 	"github.com/alkaid/pitaya/v2/conn/message"
+	"github.com/alkaid/pitaya/v2/conn/packet"
 	"github.com/alkaid/pitaya/v2/helpers"
 	"github.com/alkaid/pitaya/v2/mocks"
+	"github.com/alkaid/pitaya/v2/util/compression"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 )
+
+func TestHandleHandshakeResponseRejectsOversizedInflatedPayload(t *testing.T) {
+	payload := bytes.Repeat([]byte{0}, codec.MaxPacketSize+1)
+	compressed, err := compression.DeflateData(payload)
+	require.NoError(t, err)
+
+	encoder := codec.NewPomeloPacketEncoder()
+	frame, err := encoder.Encode(packet.Handshake, compressed)
+	require.NoError(t, err)
+	if len(frame)%1024 == 0 {
+		heartbeat, encodeErr := encoder.Encode(packet.Heartbeat, nil)
+		require.NoError(t, encodeErr)
+		frame = append(frame, heartbeat...)
+	}
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		_ = clientConn.Close()
+		_ = serverConn.Close()
+	})
+	client := New()
+	client.conn = clientConn
+
+	writeResult := make(chan error, 1)
+	go func() {
+		_, writeErr := serverConn.Write(frame)
+		writeResult <- writeErr
+	}()
+
+	err = client.handleHandshakeResponse()
+	require.ErrorIs(t, err, compression.ErrInflatedDataTooLarge)
+	assert.False(t, client.Connected)
+	require.NoError(t, <-writeResult)
+}
 
 func TestSendRequestShouldTimeout(t *testing.T) {
 	c := New(100 * time.Millisecond)

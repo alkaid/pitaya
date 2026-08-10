@@ -6,6 +6,7 @@ import (
 
 	"github.com/alkaid/pitaya/v2/conn/packet"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var forwardTables = map[string]struct {
@@ -76,4 +77,45 @@ func TestDecode(t *testing.T) {
 			assert.ElementsMatch(t, table.packet, packet)
 		})
 	}
+}
+
+func FuzzPomeloPacketDecode(f *testing.F) {
+	encoder := NewPomeloPacketEncoder()
+	handshake, err := encoder.Encode(packet.Handshake, []byte("hello"))
+	require.NoError(f, err)
+	heartbeat, err := encoder.Encode(packet.Heartbeat, nil)
+	require.NoError(f, err)
+
+	f.Add([]byte{})
+	f.Add([]byte{byte(packet.Handshake)})
+	f.Add(handshake)
+	f.Add(append(append([]byte{}, handshake...), heartbeat...))
+	f.Add(append(append([]byte{}, handshake...), byte(packet.Data), 0, 0, 2, 1))
+	f.Add([]byte{0xff, 0, 0, 0})
+
+	f.Fuzz(func(t *testing.T, input []byte) {
+		if len(input) > 64<<10 {
+			t.Skip()
+		}
+
+		packets, err := NewPomeloPacketDecoder().Decode(input)
+		if err != nil {
+			return
+		}
+
+		var prefix []byte
+		for i, decoded := range packets {
+			if decoded.Length != len(decoded.Data) {
+				t.Fatalf("packet %d length mismatch: header=%d data=%d", i, decoded.Length, len(decoded.Data))
+			}
+			encoded, err := encoder.Encode(decoded.Type, decoded.Data)
+			if err != nil {
+				t.Fatalf("packet %d could not be re-encoded: %v", i, err)
+			}
+			prefix = append(prefix, encoded...)
+		}
+		if len(prefix) > len(input) || !bytes.Equal(prefix, input[:len(prefix)]) {
+			t.Fatalf("decoded packets are not an exact input prefix")
+		}
+	})
 }

@@ -193,6 +193,30 @@ jobs:
     - name: Vet root packages
       run: make vet
 
+  fuzz-seeds:
+    name: Fuzz Seed Corpus
+    needs: compile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: |
+          go.sum
+          tools/go.sum
+    - name: Download and verify root and tool modules
+      run: |
+        GOWORK=off go mod download
+        GOWORK=off go mod verify
+        GOWORK=off go mod download -modfile=tools/go.mod
+        GOWORK=off go mod verify -modfile=tools/go.mod
+    - name: Run registered fuzz seed corpus
+      run: make test-fuzz-seeds
+
   consumer:
     name: Consumer
     needs:
@@ -222,14 +246,19 @@ jobs:
   verify-fast:
     name: Verify Fast
     if: ${{ always() }}
-    needs: consumer
+    needs:
+    - consumer
+    - fuzz-seeds
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
     - name: Aggregate fast-gate result
       env:
         CONSUMER_RESULT: ${{ needs.consumer.result }}
-      run: test "$CONSUMER_RESULT" = success
+        FUZZ_SEEDS_RESULT: ${{ needs.fuzz-seeds.result }}
+      run: |
+        test "$CONSUMER_RESULT" = success
+        test "$FUZZ_SEEDS_RESULT" = success
 
   distribution:
     name: Distribution

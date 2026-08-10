@@ -23,6 +23,7 @@ package message
 import (
 	"encoding/binary"
 
+	"github.com/alkaid/pitaya/v2/conn/codec"
 	"github.com/alkaid/pitaya/v2/util/compression"
 )
 
@@ -180,6 +181,9 @@ func Decode(data []byte) (*Message, error) {
 			offset += 2
 		} else {
 			m.compressed = false
+			if offset >= size {
+				return nil, ErrInvalidMessage
+			}
 			rl := data[offset]
 			offset++
 
@@ -198,7 +202,7 @@ func Decode(data []byte) (*Message, error) {
 	m.Data = data[offset:]
 	var err error
 	if flag&gzipMask == gzipMask {
-		m.Data, err = compression.InflateData(m.Data)
+		m.Data, err = compression.InflateDataLimit(m.Data, codec.MaxPacketSize)
 		if err != nil {
 			return nil, err
 		}

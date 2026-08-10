@@ -1,14 +1,18 @@
 package message
 
 import (
+	"bytes"
 	"errors"
 	"flag"
 	"fmt"
 	"path/filepath"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/alkaid/pitaya/v2/conn/codec"
 	"github.com/alkaid/pitaya/v2/helpers"
+	"github.com/alkaid/pitaya/v2/util/compression"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var update = flag.Bool("update", false, "update .golden files")
@@ -143,6 +147,23 @@ func TestDecode(t *testing.T) {
 	}
 }
 
+func TestDecodeRejectsTruncatedRouteLength(t *testing.T) {
+	message, err := Decode([]byte("00"))
+	assert.Nil(t, message)
+	assert.ErrorIs(t, err, ErrInvalidMessage)
+}
+
+func TestDecodeRejectsOversizedInflatedPayload(t *testing.T) {
+	payload := bytes.Repeat([]byte{0}, codec.MaxPacketSize+1)
+	compressed, err := compression.DeflateData(payload)
+	require.NoError(t, err)
+	frame := append([]byte{byte(Response)<<1 | gzipMask, 0}, compressed...)
+
+	message, err := Decode(frame)
+	assert.Nil(t, message)
+	assert.ErrorIs(t, err, compression.ErrInflatedDataTooLarge)
+}
+
 var dictTables = map[string]struct {
 	dicts  []map[string]uint16
 	routes map[string]uint16
@@ -208,4 +229,64 @@ func TestGetDictionary(t *testing.T) {
 
 	// make sure we're copying the routes maps
 	assert.NotEqual(t, fmt.Sprintf("%p", routes), fmt.Sprintf("%p", dict))
+}
+
+func FuzzMessageDecode(f *testing.F) {
+	reset := func() {
+		routesCodesMutex.Lock()
+		defer routesCodesMutex.Unlock()
+		routes = make(map[string]uint16)
+		codes = make(map[uint16]string)
+	}
+	reset()
+	f.Cleanup(reset)
+	require.NoError(f, SetDictionary(map[string]uint16{"fuzz.route": 1}))
+
+	seed, err := NewMessagesEncoder(true).Encode(&Message{
+		Type:  Request,
+		ID:    129,
+		Route: "fuzz.route",
+		Data:  []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+	})
+	require.NoError(f, err)
+
+	f.Add([]byte{})
+	f.Add([]byte{byte(Request) << 1})
+	f.Add([]byte{byte(Notify) << 1, 1, 'a'})
+	f.Add(seed)
+	f.Add([]byte{0xff, 0})
+
+	f.Fuzz(func(t *testing.T, input []byte) {
+		if len(input) > 64<<10 {
+			t.Skip()
+		}
+
+		decoded, err := Decode(input)
+		if err != nil {
+			return
+		}
+		if len(decoded.Data) > codec.MaxPacketSize {
+			t.Fatalf("decoded payload exceeds limit: %d", len(decoded.Data))
+		}
+
+		encoded, err := NewMessagesEncoder(false).Encode(&Message{
+			Type:  decoded.Type,
+			ID:    decoded.ID,
+			Route: decoded.Route,
+			Data:  append([]byte(nil), decoded.Data...),
+			Err:   decoded.Err,
+		})
+		if err != nil {
+			t.Fatalf("decoded message could not be re-encoded: %v", err)
+		}
+		roundTrip, err := Decode(encoded)
+		if err != nil {
+			t.Fatalf("round-trip decode failed: %v", err)
+		}
+		assert.Equal(t, decoded.Type, roundTrip.Type)
+		assert.Equal(t, decoded.ID, roundTrip.ID)
+		assert.Equal(t, decoded.Route, roundTrip.Route)
+		assert.Equal(t, decoded.Data, roundTrip.Data)
+		assert.Equal(t, decoded.Err, roundTrip.Err)
+	})
 }

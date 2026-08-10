@@ -41,12 +41,12 @@ import (
 
 	"github.com/alkaid/pitaya/v2/acceptor"
 
-	"github.com/gorilla/websocket"
 	"github.com/alkaid/pitaya/v2/conn/codec"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/conn/packet"
 	"github.com/alkaid/pitaya/v2/session"
 	"github.com/alkaid/pitaya/v2/util/compression"
+	"github.com/gorilla/websocket"
 )
 
 // HandshakeSys struct
@@ -166,7 +166,7 @@ func (c *Client) handleHandshakeResponse() error {
 
 	handshake := &HandshakeData{}
 	if compression.IsCompressed(handshakePacket.Data) {
-		handshakePacket.Data, err = compression.InflateData(handshakePacket.Data)
+		handshakePacket.Data, err = compression.InflateDataLimit(handshakePacket.Data, codec.MaxPacketSize)
 		if err != nil {
 			return err
 		}

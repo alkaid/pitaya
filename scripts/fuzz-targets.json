@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "targets": [
+    {
+      "package": "./conn/codec",
+      "target": "FuzzPomeloPacketDecode"
+    },
+    {
+      "package": "./conn/message",
+      "target": "FuzzMessageDecode"
+    },
+    {
+      "package": "./route",
+      "target": "FuzzRouteDecode"
+    },
+    {
+      "package": "./util",
+      "target": "FuzzGetErrorFromJSONPayload"
+    },
+    {
+      "package": "./util",
+      "target": "FuzzGetErrorFromProtobufPayload"
+    },
+    {
+      "package": "./util/net",
+      "target": "FuzzGetClientIPWithTrustedProxies"
+    },
+    {
+      "package": "./util/viperx",
+      "target": "FuzzDefaultDecodeHooks"
+    }
+  ]
+}

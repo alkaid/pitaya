@@ -156,16 +156,22 @@ func FileExists(filename string) bool {
 
 // GetErrorFromPayload gets the error from payload
 func GetErrorFromPayload(serializer serialize.Serializer, payload []byte) error {
-	err := apierrors.InternalServer("unknown", "unknown", "")
+	fallback := apierrors.InternalServer("unknown", "unknown", "")
 	switch serializer.(type) {
 	case *json.Serializer:
-		_ = serializer.Unmarshal(payload, err)
+		decoded := apierrors.InternalServer("unknown", "unknown", "")
+		if err := serializer.Unmarshal(payload, decoded); err != nil {
+			return fallback
+		}
+		return decoded
 	case *protobuf.Serializer:
 		pErr := &apierrors.Status{}
-		_ = serializer.Unmarshal(payload, pErr)
-		err = apierrors.FromStatusWithoutStack(pErr)
+		if err := serializer.Unmarshal(payload, pErr); err != nil {
+			return fallback
+		}
+		return apierrors.FromStatusWithoutStack(pErr)
 	}
-	return err
+	return fallback
 }
 
 var customErrorToProto ErrorToProto                      // 自定义error转proto

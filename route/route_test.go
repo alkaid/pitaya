@@ -21,9 +21,12 @@
 package route
 
 import (
+	"errors"
 	"testing"
 
+	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
 )
 
 var tables = []struct {
@@ -97,4 +100,41 @@ func TestDecode(t *testing.T) {
 			}
 		})
 	}
+}
+
+func FuzzRouteDecode(f *testing.F) {
+	previousLogger := logger.Log
+	logger.Log = zap.NewNop().Sugar()
+	f.Cleanup(func() { logger.Log = previousLogger })
+
+	f.Add("server.service.method")
+	f.Add("service.method")
+	f.Add("service..method")
+	f.Add("")
+	f.Add(" service . method ")
+
+	f.Fuzz(func(t *testing.T, input string) {
+		if len(input) > 64<<10 {
+			t.Skip()
+		}
+
+		decoded, err := Decode(input)
+		if err != nil {
+			if !errors.Is(err, ErrInvalidRoute) && !errors.Is(err, ErrRouteFieldCantEmpty) {
+				t.Fatalf("unexpected route error: %v", err)
+			}
+			return
+		}
+
+		if got := decoded.String(); got != input {
+			t.Fatalf("successful decode changed route: got %q, want %q", got, input)
+		}
+		roundTrip, err := Decode(decoded.String())
+		if err != nil {
+			t.Fatalf("round-trip decode failed: %v", err)
+		}
+		if *roundTrip != *decoded {
+			t.Fatalf("round-trip route mismatch: got %#v, want %#v", roundTrip, decoded)
+		}
+	})
 }
