@@ -74,3 +74,11 @@ place both directions behind explicit network ACLs.
 A reachable advisory fails the gate unless a time-bounded exception records the
 finding, affected modules, rationale, owner, mitigation, and expiry. Scanner or
 database errors also fail; they are not interpreted as an empty report.
+
+`GO-2026-5932` has no fixed version and is accepted through 2027-08-05 (an
+inclusive UTC date) for all three modules. The deployment mitigation is to use
+only ordinary etcd remote configuration; OpenPGP-encrypted remote configuration
+is outside the accepted production boundary. This is a temporary accepted risk,
+not a fix: dependency scans continue to print the reachable finding, and the
+gate fails if the exception expires, is unused, or does not cover its actual
+module scope.

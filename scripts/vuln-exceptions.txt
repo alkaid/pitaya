@@ -1,0 +1,7 @@
+# Time-bounded accepted risks only. Findings remain visible and are not fixed.
+# Expiry is an inclusive UTC date; the gate fails starting the following day.
+# advisory|modules|owner|reason|mitigation|expiry
+# GO-2026-5932: 360-day exception approved 2026-08-10; 2027-08-05 is the
+# final accepted UTC date. It applies only while production uses ordinary etcd
+# remote configuration; review it before enabling OpenPGP configuration.
+GO-2026-5932|root,pitaya-cli,xk6-pitaya|@alkaid|No fixed version is available for this advisory.|Production uses only ordinary etcd remote configuration and does not use OpenPGP-encrypted remote configuration.|2027-08-05

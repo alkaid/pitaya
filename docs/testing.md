@@ -199,10 +199,17 @@ make scan-deps
 ```
 
 The scanner writes per-module JSON under `build/govulncheck`. Exit status `0`
-means no reachable unaccepted finding, `3` means at least one reachable finding,
-and `1` means the scanner, database, or report parser failed. Both `1` and `3`
-block release. The current OpenPGP advisory has no fixed version and remains a
-known release blocker; the command is expected to report it rather than hide it.
+means no reachable unaccepted finding, `3` means at least one reachable
+unaccepted finding, and `1` means the scanner, database, report parser, or
+exception policy failed. Both `1` and `3` block release.
+`scripts/vuln-exceptions.txt` contains reviewed, module-scoped exceptions; an
+expired, malformed, out-of-scope, or unused entry returns `1`. Expiry dates are
+inclusive UTC dates.
+
+`GO-2026-5932` is accepted through 2027-08-05 for the root, CLI, and xk6
+modules because no fixed version is available and production uses only ordinary
+etcd remote configuration, not OpenPGP-encrypted remote configuration. The gate
+continues to print the finding as `ACCEPTED RISK ... (not fixed)` on every scan.
 
 ## Race and focused verification
 

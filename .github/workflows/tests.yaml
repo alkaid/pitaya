@@ -454,6 +454,8 @@ jobs:
         done
         GOWORK=off go mod download -modfile=tools/go.mod
         GOWORK=off go mod verify -modfile=tools/go.mod
+    # GO-2026-5932 remains reachable and is not fixed. Its temporary exception
+    # is bounded by scripts/vuln-exceptions.txt: ordinary-etcd scope and UTC expiry.
     - name: Scan reachable dependencies
       run: make scan-deps
     - name: Upload dependency reports
