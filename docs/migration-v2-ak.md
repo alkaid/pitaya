@@ -53,6 +53,60 @@ positive duration, and `BENCH_OUT` must name a regular file. Concurrent runs mus
 use distinct output paths; an adjacent lock directory rejects reuse. Timeout
 values use integer Go duration components and must resolve to at least `1ns`.
 
+`benchmark-regression` keeps that local, configurable raw-output contract. A new
+`benchmark-gate-nats` target performs the stricter fixed-policy comparison and
+does not reuse `BENCH_PATTERN`, `BENCH_TIME`, `BENCH_COUNT`, or `BENCH_OUT`.
+Automation that adopts it must invoke the target from a separately reviewed,
+clean gate checkout and provide its full `BENCH_GATE_SOURCE_SHA`, a stable
+`BENCH_RUNNER_ID`, an absolute host-wide `BENCH_RUNNER_LOCK`, a
+`BENCH_POLICY_SHA256` pinned in reviewed Linux/amd64 runner or protected workflow
+configuration, `BENCH_REPO_ROOT` for the clean measured checkout, and explicit
+`BENCH_BASE_REF` / `BENCH_CANDIDATE_REF` values. Do not derive the gate or policy
+pin from the candidate inside the deciding run. The candidate `HEAD` must equal
+the candidate SHA and the base must be a distinct ancestor; neither measured
+revision needs to contain the verifier or policy. The same trusted policy is
+applied to both source trees, so the base may predate the policy file. Gate or
+policy changes require separate review and pin rotation; the first bootstrap run
+of a new gate commit is informational until that pin is independently trusted.
+The candidate must be maintainer-reviewed and trusted: the same-UID harness is not
+an isolation boundary for hostile pull-request code. The gate exports tools and
+policy from the pinned commit, verifies the tools module cache, and fixes all
+trusted/measured builds to module mode with automatic PGO disabled. It also
+clears inherited Git repository/object/config routing, disables replacement
+objects, and rejects legacy graft or private-attribute metadata before resolving
+any pinned commit. Every detached worktree's raw tracked blobs and executable
+modes must then match its pinned tree; clean/smudge, sparse, LFS, or other
+transformed checkouts fail closed. Existing
+automation that relies on vendor mode or `default.pgo` must not use this formal
+target without defining and reviewing a different apparatus policy.
+Each harness run is bracketed by runner-state probes, and publication verifies
+that the structured report agrees with the comparator exit status and pinned
+identities. The apparatus fingerprint includes files selected by the actual
+Linux/amd64 build graph inside policy-protected harness packages; selected
+ignored or untracked files fail closed. `gate.json` preserves all ten metric
+samples so the verifier can recompute the median, inclusive threshold (with one
+normalized-float ULP of representation margin), and zero-allocation decision.
+`compare` validates the sealed result and metadata contents and records their
+digests. Final verification independently checks the reviewed policy's
+configuration and benchmark inventory, then rehashes all four artifacts to bind
+their exact bytes plus the externally supplied policy and apparatus identities
+to the report. Exit status `3` means a complete regression decision whose artifact
+bundle was still published; it must not be treated as an infrastructure failure
+or discarded. Hosted CI remains unchanged until a fixed runner is provisioned.
+The blocking runner must also be a bare-host process in Linux's initial cgroup
+namespace. Relevant hierarchies must be mounted from `/` with complete ancestry,
+no nested mount or overmount, and at least one readable CPU/cpuset control. The
+kernel must expose nsfs namespace identity/type and `statx` mount IDs. Docker or
+Kubernetes runners and older kernels without those proofs fail closed and are
+supported only for informational runs. Cgroup v1 `noprefix` hierarchies are also
+unsupported.
+
+Formal output parents cannot contain symlinks, and relative paths remain below the
+candidate checkout. The runner-lock descriptor is closed before starting measured
+code. Base still runs before candidate, so operators must stabilize the runner and
+investigate borderline changes with counterbalanced runs or production profiles;
+the no-overlap rule removes concurrent contention, not thermal/cache order effects.
+
 ## Coverage workflow
 
 Manual runs of the Tests workflow now require a full `coverage_base_sha` input.

@@ -278,10 +278,123 @@ means merely receiving an arbitrary known response from the shared client
 channel. The production client still filters late or unknown response IDs before
 the benchmark dispatcher sees them.
 
-Run a base SHA and candidate SHA in separate worktrees on the same fixed runner
-with identical `BENCH_PATTERN`, `BENCH_TIME`, and `BENCH_COUNT`, then compare the
-two raw files. Report time, bytes, and allocations; shared-runner results remain
-informational, and a network benchmark does not replace a production profile.
+`make benchmark-regression` remains the configurable local raw-result producer;
+it does not make a blocking performance decision. To produce a source-verified
+base/candidate decision on a dedicated fixed runner, use:
+
+```sh
+BENCH_RUNNER_ID=linux-amd64-perf-01 \
+  BENCH_RUNNER_LOCK=/var/lock/pitaya-benchmark.lock \
+  BENCH_GATE_SOURCE_SHA=<reviewed-gate-commit-sha> \
+  BENCH_POLICY_SHA256=<reviewed-policy-sha256> \
+  BENCH_REPO_ROOT=/path/to/clean/candidate-checkout \
+  BENCH_BASE_REF=<full-base-sha> \
+  BENCH_CANDIDATE_REF=<full-candidate-sha> \
+  make benchmark-gate-nats
+```
+
+Invoke the target from a clean, separately reviewed gate checkout whose current
+commit exactly matches `BENCH_GATE_SOURCE_SHA`. `BENCH_REPO_ROOT` names the clean
+trusted, maintainer-authored candidate checkout; its current `HEAD` must equal
+`BENCH_CANDIDATE_REF`, and the
+distinct base must be its ancestor. The candidate does not need to contain the
+gate implementation or policy. Both source SHA and `BENCH_POLICY_SHA256` must
+come from protected runner/workflow configuration; do not calculate either from
+the candidate during the deciding run. The trusted gate exports `tools` and the
+policy directly from the pinned commit, verifies the tools module cache, and
+builds with `-mod=readonly -pgo=off`; ignored files or an automatic vendor/PGO
+selection in the long-lived gate checkout therefore cannot alter the deciding
+binary. Before any Git operation it clears inherited repository/object routing
+and config/attribute injection, disables replacement objects, and rejects legacy
+grafts or repository-private attributes. Every pinned SHA therefore resolves to
+its original object graph and ancestry. After checkout, the trusted verifier
+compares every tracked blob's raw object hash and executable mode with the pinned
+tree before any build. Filtered, sparse, or otherwise transformed worktrees fail
+closed. The gate applies the exported policy bytes to both detached measured worktrees,
+which permits a base that predates the policy file. The measured builds use the
+same module/PGO flags. The gate verifies the
+policy-selected measurement apparatus is byte-identical before it runs base
+followed by candidate under one host-wide lock. The apparatus digest includes
+the explicit policy paths and every source or embedded file selected by the
+actual Linux/amd64 Go build graph inside those protected harness packages;
+selected ignored or untracked files fail closed. Ordinary production dependencies
+remain the measured input rather than being frozen as apparatus. A gate or policy
+change needs separate review and pin rotation; it cannot self-authorize a
+performance decision. The first run used to establish a newly introduced gate commit is
+bootstrap evidence and remains informational until that commit and policy digest
+have been independently reviewed and installed in protected configuration. The
+fixed `nats-network-v1` policy
+selects the exact network benchmark set, `1s` benchtime, ten samples,
+`benchmem`, and a 20-minute per-run timeout. `time/op` and `allocs/op` block when
+their medians exceed the base by more than 10%; exactly 10% passes. One normalized
+float ULP is allowed at that inclusive boundary so benchfmt unit conversion cannot
+turn decimal `100 ns/op` -> `110 ns/op` into a false regression. An all-zero
+allocation baseline blocks any positive candidate sample. `B/op` is required
+evidence but is currently informational.
+
+Exit `0` is a passing decision, `3` is a completed regression decision, `2` is
+invalid input, and `1` is an infrastructure, provenance, or comparability
+failure. Both exit `0` and exit `3` atomically publish a complete directory under
+`build/benchmarks/nats-gate-<run-id>` by default. It contains raw and sealed base
+and candidate benchfmt files, JSON provenance sidecars, deterministic runner
+snapshots from before and after each harness invocation, `benchstat` output, and
+`gate.json` plus human-readable comparator output. Before publication, the
+trusted verifier reconciles the comparator exit status with the structured
+report and the externally supplied commit, run, runner, gate, policy, and
+apparatus identities. The report carries all ten samples for each metric, so
+verification recomputes medians, the inclusive 10% boundary, and the all-zero
+allocation invariant instead of trusting summary booleans. `compare` validates
+the sealed result and metadata contents and records their SHA-256 digests in the
+report. The final verification independently reads the reviewed policy, checks
+its configuration and benchmark inventory, and rehashes all four artifacts to
+bind the exact bytes to the report before publication.
+Infrastructure failures retain
+available evidence under the corresponding `.failed-<run-id>` path; stale formal
+output is never replaced. A post-rename rollback collision retains the adjacent
+output lock as a quarantine marker rather than exposing an unlocked formal
+result.
+
+`BENCH_RUNNER_ID` is a label, not proof of dedicated hardware. Blocking use also
+requires an otherwise idle runner with stable CPU allocation, toolchain, Docker
+daemon, and Compose version; `BENCH_RUNNER_LOCK` must be an absolute host-wide
+regular-file path. The protected runner/workflow, reviewed policy digest, and
+reviewed clean gate source form the trust boundary; a self-selected runner ID is
+not sufficient. The result records machine, boot, kernel, CPU/cgroup, Go, and
+container-tool provenance. Deterministic probes bracket each harness run, and
+`stamp` resamples the runner before sealing the after-probe, so observed drift
+fails closed. No hosted GitHub Actions job currently claims this fixed-runner
+result. Shared-runner and same-checkout runs remain informational, and a network
+benchmark does not replace a production profile. The `benchgate stamp` command
+is an internal orchestration primitive, not a supported way to turn an old raw
+file into trusted evidence.
+
+This lane is deliberately not a hostile-code boundary. The measured harness runs
+under the same Unix identity as the orchestrator and can access that identity's
+files and Docker daemon. Run it only for maintainer-reviewed commits; never grant
+blocking authority to an untrusted pull request. Hostile-candidate isolation
+requires a separate identity and mount/cgroup boundary with gate artifacts kept
+outside the workload. The trusted candidate must not daemonize outside the
+harness or change its affinity/cgroup. Closing the inherited runner-lock file
+descriptor prevents accidental lock ownership from entering the workload, but
+does not turn the workload into a sandbox.
+
+Base runs before candidate without overlap. This removes simultaneous resource
+contention but not residual thermal, DVFS, cache, or Docker warm-state bias. A
+deciding runner must be idle and thermally stabilized; borderline results need a
+counterbalanced follow-up or production profile. Relative output paths must stay
+under `BENCH_REPO_ROOT`, and every output-parent component must be a real directory,
+not a symlink.
+
+Formal blocking runs must execute directly in Linux's initial cgroup namespace,
+with each relevant cgroup hierarchy mounted from `/` and its complete membership
+ancestry visible without nested mounts or overmounts. At least one CPU or cpuset
+control must be readable. The kernel must expose nsfs namespace type/identity and
+`statx` mount IDs so every consumed control file can be bound to the mountinfo
+record. Containerized Docker/Kubernetes runners, hidden cgroup ancestors, and
+older kernels without those identity primitives fail as infrastructure rather
+than producing partially comparable evidence. Cgroup v1 `noprefix` hierarchies
+are also unsupported because their control-file identity is ambiguous. Use such
+environments only for informational runs.
 
 Runtime gRPC benchmarking is unsupported because this fork supports NATS as its
 business transport. `benchmark-test-grpc` now exits with a migration message;
@@ -349,6 +462,8 @@ the same prefix with `.supervisor.log`, `.frontend.log`, or `.backend.log`.
 - NATS E2E diagnostics: emitted directly by `scripts/test-e2e-nats.sh` before
   project cleanup;
 - failed NATS benchmark output: `<BENCH_OUT>.failed-<project>`;
+- NATS base/candidate decision bundles: `build/benchmarks/nats-gate-<run-id>`,
+  with infrastructure failures retained at the adjacent `.failed-<run-id>` path;
 - NATS stress JSON/log evidence: `build/stress`, including failed outputs named
   from `<STRESS_OUT>.failed-<project>`;
 - distribution scratch data: temporary and removed by the owning script.

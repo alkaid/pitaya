@@ -203,6 +203,12 @@ benchmark-test-nats:
 benchmark-regression:
 	@BENCH_COUNT=$${BENCH_COUNT:-10} ./scripts/test-benchmark-nats.sh
 
+# Blocking use invokes this target from a separately reviewed gate checkout and
+# pins BENCH_GATE_SOURCE_SHA plus BENCH_POLICY_SHA256. BENCH_REPO_ROOT names a
+# trusted maintainer candidate; this same-UID lane is not an untrusted-PR sandbox.
+benchmark-gate-nats:
+	@./scripts/benchmark-gate-nats.sh
+
 # Long-running capacity evidence belongs only in the nightly/manual lane.
 test-stress-nats:
 	@NATS_WORKLOAD=stress ./scripts/test-benchmark-nats.sh
@@ -290,7 +296,7 @@ test-coverage-func coverage-func: test-coverage
 	@echo "\033[1;34m=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\033[0m"
 	@go tool cover -func="$(COVERAGE_PROFILE)" | grep -Ev "100[.]0%"
 
-.PHONY: compile-core compile-root compile-cli compile-xk6 compile test-unit vet verify-root module-verify tools-verify logrus-verify test-consumer test-distribution docs docs-lint verify-fast scan-deps test-e2e-nats e2e-test-nats e2e-test benchmark-test-nats benchmark-regression test-stress-nats benchmark-test-grpc test-fuzz-seeds test-fuzz-nightly test-fuzz-one test coverage coverage-stamped coverage-gate coverage-baseline init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
+.PHONY: compile-core compile-root compile-cli compile-xk6 compile test-unit vet verify-root module-verify tools-verify logrus-verify test-consumer test-distribution docs docs-lint verify-fast scan-deps test-e2e-nats e2e-test-nats e2e-test benchmark-test-nats benchmark-regression benchmark-gate-nats test-stress-nats benchmark-test-grpc test-fuzz-seeds test-fuzz-nightly test-fuzz-one test coverage coverage-stamped coverage-gate coverage-baseline init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 
 mocks: agent-mock session-mock networkentity-mock pitaya-mock serializer-mock metrics-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 

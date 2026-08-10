@@ -103,10 +103,19 @@ if [[ $vuln_version != v1.6.0 ]]; then
 	exit 1
 fi
 
+perf_version=$(cd "$repo_root/tools" && GOWORK=off go list -m -f '{{.Version}}' golang.org/x/perf)
+if [[ $perf_version != v0.0.0-20260709024250-82a0b07e230d ]]; then
+	echo "unexpected benchmark parser/statistics module version: $perf_version" >&2
+	exit 1
+fi
+
 (
 	cd "$repo_root/tools"
 	GOWORK=off go mod verify
 	GOWORK=off go test ./...
 )
+
+# Exercise lock, publication, regression, and cleanup semantics without Docker.
+"$repo_root/scripts/test-benchmark-gate-nats-orchestration.sh"
 
 echo "tool, action, and image pin verification passed"

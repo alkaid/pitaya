@@ -84,6 +84,7 @@ make docs                 # warning-free Sphinx build
 make test-e2e-nats        # isolated Docker-backed NATS/etcd/Redis path
 make test-distribution    # versioned CLI/xk6/module/Docker smoke
 make benchmark-regression # isolated NATS network benchmark report
+make benchmark-gate-nats  # fixed-runner decision for trusted maintainer candidates
 make scan-deps            # reachable dependency report
 ```
 

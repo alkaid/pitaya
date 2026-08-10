@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "profile": "nats-network-v1",
+  "package": "github.com/alkaid/pitaya/v2/benchmark",
+  "pattern": ".",
+  "benchtime": "1s",
+  "count": 10,
+  "timeout": "20m",
+  "tags": [
+    "benchmark"
+  ],
+  "test_run": "^$",
+  "benchmem": true,
+  "benchmark_names": [
+    "BackHandlerWithSessionOnlyReturnsPtr",
+    "BackHandlerWithSessionOnlyReturnsPtrParallel",
+    "BackHandlerWithSessionOnlyReturnsPtrParallelMultipleClients",
+    "CreateManyClients",
+    "FrontHandlerWithSessionAndPtrReturnsPtr",
+    "FrontHandlerWithSessionAndPtrReturnsPtrManyClientsParallel",
+    "FrontHandlerWithSessionAndPtrReturnsPtrParallel",
+    "FrontHandlerWithSessionAndRawReturnsRaw",
+    "FrontHandlerWithSessionOnlyReturnsPtr",
+    "FrontHandlerWithSessionOnlyReturnsPtrParallel"
+  ],
+  "apparatus_paths": [
+    "benchmark/benchmark_client_test.go",
+    "benchmark/benchmark_test.go",
+    "benchmark/harness/main.go",
+    "examples/testing/docker-compose.yml",
+    "examples/testing/main.go",
+    "examples/testing/protos/cluster.pb.go",
+    "go.mod",
+    "go.sum",
+    "helpers/helpers.go",
+    "helpers/process_parent_linux.go",
+    "helpers/process_signal_unix.go",
+    "helpers/type_support.go",
+    "protos/test/somestruct.pb.go",
+    "protos/test/testrequest.pb.go",
+    "protos/test/testresponse.pb.go",
+    "scripts/test-benchmark-nats.sh"
+  ]
+}
