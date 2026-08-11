@@ -38,8 +38,15 @@ type ServiceDiscovery interface {
 	//  @receiver sd
 	//  @return map[string]*Server 索引为serverType,元素为Server
 	GetServerTypes() map[string]*Server
+	// SyncServers waits for topology callbacks admitted by this synchronization.
+	// An SDListener callback must not call SyncServers synchronously; schedule a
+	// later synchronization after the callback returns instead. SDListener and
+	// LeaderChangeListener use independent FIFO lanes and may run concurrently.
 	SyncServers(firstSync bool) error
-	AddListener(listener SDListener) // OnLeaderChange 设置leader变化监听
+	// Neither listener type may call BeforeShutdown synchronously; Shutdown is
+	// safe because it does not join callback drains.
+	AddListener(listener SDListener)
+	// OnLeaderChange 设置leader变化监听.
 	OnLeaderChange(listener LeaderChangeListener)
 	// FlushServer2Cluster 将修改后的server数据保存到云端(etcd)
 	//  @param server

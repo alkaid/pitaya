@@ -320,7 +320,7 @@ func TestStartAndListenStandalone(t *testing.T) {
 
 func TestStartAndListenCluster(t *testing.T) {
 	es, cli := helpers.GetTestEtcd(t)
-	defer es.Terminate(t)
+	t.Cleanup(func() { es.Terminate(t) })
 
 	ns := helpers.GetTestNatsServer(t)
 	nsAddr := ns.Addr().String()
@@ -349,9 +349,19 @@ func TestStartAndListenCluster(t *testing.T) {
 	builder.AddAcceptor(acc)
 	app := builder.Build().(*App)
 
+	appDone := make(chan struct{})
 	go func() {
+		defer close(appDone)
 		app.Start()
 	}()
+	t.Cleanup(func() {
+		app.Shutdown()
+		select {
+		case <-appDone:
+		case <-time.After(5 * time.Second):
+			t.Error("timed out waiting for app shutdown")
+		}
+	})
 	helpers.ShouldEventuallyReturn(t, func() bool {
 		return app.running
 	}, true)
