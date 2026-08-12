@@ -41,6 +41,7 @@ import (
 	"github.com/google/uuid"
 	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 )
 
@@ -141,11 +142,10 @@ func TestNatsRPCClientBroadcastSessionBind(t *testing.T) {
 	rpcClient, _ := NewNatsRPCClient(cfg, sv, nil, nil)
 	rpcClient.Init()
 
-	subChan := make(chan *nats.Msg)
+	subChan := make(chan *nats.Msg, 1)
 	subs, err := rpcClient.conn.ChanSubscribe(GetBindBroadcastTopic(sv.Type), subChan)
-	assert.NoError(t, err)
-	// TODO this is ugly, can lead to flaky tests and we could probably do it better
-	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, err)
+	require.NoError(t, rpcClient.conn.Flush())
 
 	err = rpcClient.BroadcastSessionBind(uid)
 	assert.NoError(t, err)
@@ -174,10 +174,10 @@ func TestNatsRPCClientSendKick(t *testing.T) {
 	err := rpcClient.Init()
 	assert.NoError(t, err)
 
-	kickChan := make(chan *nats.Msg)
+	kickChan := make(chan *nats.Msg, 1)
 	subs, err := rpcClient.conn.ChanSubscribe(GetUserKickTopic(uid, sv.Type), kickChan)
-	assert.NoError(t, err)
-	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, err)
+	require.NoError(t, rpcClient.conn.Flush())
 
 	kick := &protos.KickMsg{
 		UserId: uid,
@@ -208,11 +208,10 @@ func TestNatsRPCClientSendPush(t *testing.T) {
 	rpcClient, _ := NewNatsRPCClient(cfg, sv, nil, nil)
 	rpcClient.Init()
 
-	subChan := make(chan *nats.Msg)
+	subChan := make(chan *nats.Msg, 1)
 	subs, err := rpcClient.conn.ChanSubscribe(GetUserMessagesTopic(uid, sv.Type), subChan)
-	assert.NoError(t, err)
-	// TODO this is ugly, can lead to flaky tests and we could probably do it better
-	time.Sleep(50 * time.Millisecond)
+	require.NoError(t, err)
+	require.NoError(t, rpcClient.conn.Flush())
 
 	push := &protos.Push{
 		Route: "hellow",
@@ -265,11 +264,10 @@ func TestNatsRPCClientSend(t *testing.T) {
 	}
 	for _, table := range tables {
 		t.Run(table.name, func(t *testing.T) {
-			subChan := make(chan *nats.Msg)
+			subChan := make(chan *nats.Msg, 1)
 			subs, err := rpcClient.conn.ChanSubscribe(table.topic, subChan)
-			assert.NoError(t, err)
-			// TODO this is ugly, can lead to flaky tests and we could probably do it better
-			time.Sleep(50 * time.Millisecond)
+			require.NoError(t, err)
+			require.NoError(t, rpcClient.conn.Flush())
 
 			err = rpcClient.Send(table.topic, table.data)
 			assert.NoError(t, err)
@@ -472,9 +470,8 @@ func TestNatsRPCClientCall(t *testing.T) {
 					}
 				}
 			})
-			assert.NoError(t, err)
-			// TODO this is ugly, can lead to flaky tests and we could probably do it better
-			time.Sleep(50 * time.Millisecond)
+			require.NoError(t, err)
+			require.NoError(t, conn.Flush())
 
 			ss := sessionmocks.NewMockSession(ctrl)
 			ss.EXPECT().GetFrontendSessionID().Return(sessionID).Times(1)

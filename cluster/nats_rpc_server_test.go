@@ -556,8 +556,10 @@ func TestNatsRPCServerInit(t *testing.T) {
 	}
 	for _, table := range tables {
 		t.Run(table.name, func(t *testing.T) {
-			c := make(chan *nats.Msg)
-			rpcServer.conn.ChanSubscribe(table.req.Msg.Reply, c)
+			c := make(chan *nats.Msg, 1)
+			_, err := rpcServer.conn.ChanSubscribe(table.req.Msg.Reply, c)
+			require.NoError(t, err)
+			require.NoError(t, rpcServer.conn.Flush())
 			rpcServer.unhandledReqCh <- table.req
 			r := helpers.ShouldEventuallyReceive(t, c).(*nats.Msg)
 			assert.NotNil(t, r.Data)
