@@ -131,14 +131,16 @@ type etcdServiceDiscovery struct {
 	leaderCallbackDrainOnce sync.Once
 
 	// 选主相关
-	electionEnable   bool   // 是否开启选举
-	electionName     string // 竞选名,不传的话默认为election/server.Type
-	resumeLeader     bool   // 若连上后发现自己是leader 是否使用原leader创建election. false的话会辞职
-	reconnectBackOff time.Duration
-	electionCancel   context.CancelFunc // 选举取消
-	leaderLock       sync.RWMutex
-	leaderID         string
-	onLeaderChange   LeaderChangeListener
+	electionEnable      bool   // 是否开启选举
+	electionName        string // 竞选名,不传的话默认为election/server.Type
+	resumeLeader        bool   // 若连上后发现自己是leader 是否使用原leader创建election. false的话会辞职
+	reconnectBackOff    time.Duration
+	electionCancel      context.CancelFunc // 选举取消
+	leaderAdmissionLock sync.Mutex
+	leaderGeneration    uint64
+	leaderLock          sync.RWMutex
+	leaderID            string
+	onLeaderChange      LeaderChangeListener
 }
 
 type callbackWork struct {
@@ -949,11 +951,27 @@ func (sd *etcdServiceDiscovery) OnLeaderChange(listener LeaderChangeListener) {
 	sd.onLeaderChange = listener
 }
 
-func (sd *etcdServiceDiscovery) notifyLeaderChange(leader string) {
-	// Publish the leader state and invoke its listener in the same FIFO work.
-	// Some listeners query IsLeader instead of trusting the callback argument,
-	// so publishing a later transition early would invert Start/Stop decisions.
-	_, _ = sd.enqueueLeaderCallback(func() {
+func (sd *etcdServiceDiscovery) activateLeaderGeneration(generation uint64) bool {
+	sd.leaderAdmissionLock.Lock()
+	defer sd.leaderAdmissionLock.Unlock()
+	if generation <= sd.leaderGeneration {
+		return false
+	}
+	sd.leaderGeneration = generation
+	return true
+}
+
+func (sd *etcdServiceDiscovery) notifyLeaderChange(generation uint64, leader string, initial bool) bool {
+	// Pair the generation check with callback admission. A stale generation
+	// cannot wait on a full lane and enter it after the coordinator has moved on.
+	sd.leaderAdmissionLock.Lock()
+	defer sd.leaderAdmissionLock.Unlock()
+	if generation != sd.leaderGeneration {
+		return false
+	}
+	_, accepted := sd.enqueueLeaderCallback(func() {
+		// Publish later transitions and invoke the listener in the same FIFO work.
+		// Some listeners query IsLeader instead of trusting the callback argument.
 		sd.leaderLock.Lock()
 		sd.leaderID = leader
 		listener := sd.onLeaderChange
@@ -962,6 +980,14 @@ func (sd *etcdServiceDiscovery) notifyLeaderChange(leader string) {
 			listener(leader)
 		}
 	})
+	if accepted && initial {
+		// The first non-empty leader is visible before Init returns. Its listener
+		// remains asynchronous, and later state still advances inside the FIFO lane.
+		sd.leaderLock.Lock()
+		sd.leaderID = leader
+		sd.leaderLock.Unlock()
+	}
+	return accepted
 }
 
 // AfterInit executes after Init
@@ -1236,28 +1262,10 @@ func (sd *etcdServiceDiscovery) bootstrap() error {
 			cancel()
 			return sd.lifecycleCtx.Err()
 		}
-		leaderChan, err := sd.runElection(ctx)
-		if err != nil {
+		if err := sd.runElection(ctx); err != nil {
 			cancel()
 			return err
 		}
-		if !sd.startLifecycleWorker(func() {
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case leader, ok := <-leaderChan:
-					if !ok {
-						return
-					}
-					sd.notifyLeaderChange(leader)
-				}
-			}
-		}) {
-			cancel()
-			return sd.lifecycleCtx.Err()
-		}
-
 	}
 
 	if err := sd.bootstrapServerContext(sd.lifecycleCtx, sd.server); err != nil {
@@ -2123,188 +2131,172 @@ func (sd *etcdServiceDiscovery) shouldIgnoreServer(serverType, serverID string) 
 	return serverType != sd.server.Type || serverID != sd.server.ID
 }
 
+type electionLeaseProvenance uint8
+
+const (
+	electionLeaseInvalid electionLeaseProvenance = iota
+	electionLeaseService
+	electionLeaseLocal
+	electionLeaseBorrowed
+)
+
+type electionLease struct {
+	id         clientv3.LeaseID
+	provenance electionLeaseProvenance
+}
+
 type electionGeneration struct {
+	token    uint64
 	ctx      context.Context
 	cancel   context.CancelFunc
 	session  *concurrency.Session
 	election *concurrency.Election
+	lease    electionLease
 }
 
-type currentElection struct {
-	lock     sync.RWMutex
-	election *concurrency.Election
-}
-
-func (state *currentElection) load() *concurrency.Election {
-	state.lock.RLock()
-	defer state.lock.RUnlock()
-	return state.election
-}
-
-func (state *currentElection) store(election *concurrency.Election) {
-	state.lock.Lock()
-	state.election = election
-	state.lock.Unlock()
-}
-
-func (sd *etcdServiceDiscovery) watchLeader(
-	ctx context.Context,
-	state *currentElection,
-	setLeader func(string),
-) {
-	for {
-		watchCtx, cancelWatch := context.WithCancel(ctx)
-		watchChan := sd.cli.Watch(watchCtx, sd.electionName+"/", clientv3.WithPrefix())
-		retryDelay := time.Second
-		for watchChan != nil {
-			select {
-			case <-ctx.Done():
-				cancelWatch()
-				return
-			case watchResponse, ok := <-watchChan:
-				if !ok {
-					if ctx.Err() != nil {
-						cancelWatch()
-						return
-					}
-					logger.Log.Error("etcd election watcher died, retrying to watch in 1 second")
-					watchChan = nil
-					continue
-				}
-				if err := watchResponse.Err(); err != nil {
-					logger.Zap.Warn("etcd election watcher response error", zap.String("self", sd.server.ID), zap.Error(err))
-					retryDelay = 100 * time.Millisecond
-					watchChan = nil
-					continue
-				}
-				election := state.load()
-				if election == nil {
-					continue
-				}
-				resp, err := election.Leader(watchCtx)
-				if errors.Is(err, concurrency.ErrElectionNoLeader) {
-					setLeader("")
-					continue
-				}
-				if err != nil {
-					if ctx.Err() != nil {
-						cancelWatch()
-						return
-					}
-					logger.Log.Error("etcd election error", zap.String("self", sd.server.ID), zap.Error(err))
-					continue
-				}
-				logger.Zap.Debug("etcd election watcher", zap.String("self", sd.server.ID), zap.ByteString("leader", resp.Kvs[0].Value))
-				setLeader(string(resp.Kvs[0].Value))
-			}
-		}
-		cancelWatch()
-		if !waitForContext(ctx, retryDelay) {
-			return
-		}
+func (generation *electionGeneration) reconnectLease(id clientv3.LeaseID) electionLease {
+	if id == 0 {
+		return electionLease{provenance: electionLeaseLocal}
 	}
+	if id == generation.lease.id {
+		return generation.lease
+	}
+	return electionLease{id: id, provenance: electionLeaseBorrowed}
 }
 
-func (sd *etcdServiceDiscovery) runElection(ctx context.Context) (<-chan string, error) {
-	var leaderID string
-	var leaderIDLock sync.Mutex
-	var leaderReadyOnce sync.Once
-	leaderReady := make(chan struct{})
-	leaderChan := make(chan string, 10)
-	setLeader := func(id string) {
-		leaderIDLock.Lock()
-		defer leaderIDLock.Unlock()
-		if leaderID == id {
-			logger.Zap.Debug("etcd election leader remains the same,ignore", zap.String("leaderID", leaderID), zap.String("self", sd.server.ID))
-			return
-		}
-		logger.Zap.Info("etcd election leader changed", zap.String("name", sd.electionName),
-			zap.String("leaderID", id), zap.String("old", leaderID), zap.String("self", sd.server.ID))
-		leaderID = id
-		select {
-		case leaderChan <- id:
-			if id != "" {
-				leaderReadyOnce.Do(func() { close(leaderReady) })
-			}
-		case <-ctx.Done():
-		}
-	}
-	isLeader := func() bool {
-		leaderIDLock.Lock()
-		defer leaderIDLock.Unlock()
-		return leaderID == sd.server.ID
-	}
-
-	generation, err := sd.newElectionGeneration(ctx, clientv3.LeaseID(sd.leaseID.Load()))
+func (sd *etcdServiceDiscovery) runElection(ctx context.Context) error {
+	const initialGeneration uint64 = 1
+	generation, err := sd.newElectionGeneration(ctx, electionLease{
+		id:         clientv3.LeaseID(sd.leaseID.Load()),
+		provenance: electionLeaseService,
+	}, initialGeneration)
 	if err != nil {
-		return nil, errors.Wrap(err, "while creating initial session")
+		return errors.Wrap(err, "while creating initial session")
 	}
-	state := &currentElection{}
-	state.store(generation.election)
+	if !sd.activateLeaderGeneration(initialGeneration) {
+		sd.stopElectionGeneration(generation, false)
+		return errors.New("while activating initial election generation")
+	}
 
-	if !sd.startLifecycleWorker(func() {
-		for {
-			nextLease, reconnect := sd.runElectionGeneration(ctx, generation, state, setLeader, isLeader)
-			state.store(nil)
-			sd.stopElectionGeneration(generation)
-			if !reconnect || ctx.Err() != nil {
-				return
-			}
-			logger.Zap.Debug("etcd election need reconnect", zap.String("self", sd.server.ID))
-			setLeader("")
-			if nextLease == 0 && !waitForContext(ctx, sd.reconnectBackOff) {
-				return
-			}
-			for {
-				generation, err = sd.newElectionGeneration(ctx, nextLease)
-				if err == nil {
-					state.store(generation.election)
-					break
-				}
-				if ctx.Err() != nil {
-					return
-				}
-				logger.Zap.Error("while creating new session", zap.String("self", sd.server.ID), zap.Error(err))
-				nextLease = 0
-				if !waitForContext(ctx, sd.reconnectBackOff) {
-					return
-				}
-			}
+	leaderReady := make(chan struct{})
+	if !sd.startLifecycleWorker(func() { sd.runElectionCoordinator(ctx, generation, leaderReady) }) {
+		sd.stopElectionGeneration(generation, false)
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-	}) {
-		sd.stopElectionGeneration(generation)
-		return nil, ctx.Err()
-	}
-
-	if !sd.startLifecycleWorker(func() { sd.watchLeader(ctx, state, setLeader) }) {
-		return nil, ctx.Err()
+		return errors.New("while starting election coordinator")
 	}
 
 	select {
 	case <-leaderReady:
-		return leaderChan, nil
+		return nil
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return ctx.Err()
+	}
+}
+
+func (sd *etcdServiceDiscovery) runElectionCoordinator(
+	ctx context.Context,
+	generation *electionGeneration,
+	leaderReady chan struct{},
+) {
+	var leader string
+	var pendingLease electionLease
+	defer func() { sd.revokeElectionLease(pendingLease, false) }()
+	initialPublished := false
+	publish := func(next string) bool {
+		if leader == next {
+			logger.Zap.Debug("etcd election leader remains the same,ignore", zap.String("leaderID", leader), zap.String("self", sd.server.ID))
+			return true
+		}
+		initial := !initialPublished && next != ""
+		if !sd.notifyLeaderChange(generation.token, next, initial) {
+			return false
+		}
+		logger.Zap.Info("etcd election leader changed", zap.String("name", sd.electionName),
+			zap.Uint64("generation", generation.token), zap.String("leaderID", next),
+			zap.String("old", leader), zap.String("self", sd.server.ID))
+		leader = next
+		if initial {
+			initialPublished = true
+			close(leaderReady)
+		}
+		return true
+	}
+
+	for {
+		nextLeaseID, reconnect := sd.runElectionGeneration(ctx, generation, publish)
+		nextLease := generation.reconnectLease(nextLeaseID)
+		currentLease := generation.lease
+		sd.detachElectionGeneration(generation)
+		pendingLease = currentLease
+		if !reconnect || ctx.Err() != nil {
+			return
+		}
+
+		logger.Zap.Debug("etcd election need reconnect", zap.String("self", sd.server.ID))
+		nextGeneration := generation.token + 1
+		if nextGeneration == 0 || !sd.activateLeaderGeneration(nextGeneration) {
+			return
+		}
+		generation.token = nextGeneration
+		if leader != "" && !publish("") {
+			return
+		}
+		preserveLease := nextLease == currentLease
+		sd.revokeElectionLease(currentLease, preserveLease)
+		pendingLease = nextLease
+		if (nextLease.id == 0 || preserveLease) && !waitForContext(ctx, sd.reconnectBackOff) {
+			return
+		}
+		for {
+			next, err := sd.newElectionGeneration(ctx, nextLease, nextGeneration)
+			if err == nil {
+				generation = next
+				pendingLease = electionLease{}
+				break
+			}
+			if ctx.Err() != nil {
+				return
+			}
+			logger.Zap.Error("while creating new session", zap.String("self", sd.server.ID),
+				zap.Int64("lease", int64(nextLease.id)), zap.Error(err))
+			if !waitForContext(ctx, sd.reconnectBackOff) {
+				return
+			}
+		}
 	}
 }
 
 func (sd *etcdServiceDiscovery) runElectionGeneration(
 	ctx context.Context,
 	generation *electionGeneration,
-	state *currentElection,
-	setLeader func(string),
-	isLeader func() bool,
+	publish func(string) bool,
 ) (clientv3.LeaseID, bool) {
-	for {
-		node, err := generation.election.Leader(generation.ctx)
-		resumeObservation := false
-		if err != nil && !errors.Is(err, concurrency.ErrElectionNoLeader) {
-			if ctx.Err() == nil {
-				logger.Zap.Error("while determining election leader", zap.String("self", sd.server.ID), zap.Error(err))
-			}
-			return 0, ctx.Err() == nil
+	sessionCtx := generation.session.Ctx()
+	reconnectLeaseAfterReadError := func() clientv3.LeaseID {
+		if sessionCtx.Err() != nil {
+			return 0
 		}
-		if err == nil && len(node.Kvs) > 0 && string(node.Kvs[0].Value) == sd.server.ID {
+		return generation.session.Lease()
+	}
+	readCurrentLeader := func() (*clientv3.GetResponse, error) {
+		readCtx, cancel := withOptionalTimeout(sessionCtx, sd.electionShutdownTimeout())
+		defer cancel()
+		return generation.election.Leader(readCtx)
+	}
+	node, err := readCurrentLeader()
+	resumeObservation := false
+	var initialLeader *clientv3.GetResponse
+	if err != nil && !errors.Is(err, concurrency.ErrElectionNoLeader) {
+		if ctx.Err() == nil {
+			logger.Zap.Error("while determining election leader", zap.String("self", sd.server.ID), zap.Error(err))
+		}
+		return reconnectLeaseAfterReadError(), ctx.Err() == nil
+	}
+	if err == nil && len(node.Kvs) > 0 {
+		initialLeader = node
+		if string(node.Kvs[0].Value) == sd.server.ID {
 			leaderLease := clientv3.LeaseID(node.Kvs[0].Lease)
 			if generation.session.Lease() != leaderLease {
 				return leaderLease, true
@@ -2312,122 +2304,417 @@ func (sd *etcdServiceDiscovery) runElectionGeneration(
 			resumed := concurrency.ResumeElection(generation.session, sd.electionName+"/",
 				string(node.Kvs[0].Key), node.Kvs[0].CreateRevision)
 			generation.election = resumed
-			state.store(resumed)
 			if sd.resumeLeader {
 				resumeObservation = true
 			} else {
 				resignCtx, cancel := context.WithTimeout(generation.ctx, sd.electionShutdownTimeout())
 				err = resumed.Resign(resignCtx)
 				cancel()
+				initialLeader = nil
 				if err != nil {
 					logger.Zap.Error("while resigning leadership after reconnect", zap.String("self", sd.server.ID), zap.Error(err))
-					return 0, ctx.Err() == nil
+					if errors.Is(err, rpctypes.ErrLeaseNotFound) {
+						return 0, ctx.Err() == nil
+					}
+					return generation.session.Lease(), ctx.Err() == nil
 				}
-				setLeader("")
 			}
 		}
-		if !resumeObservation {
-			if err != nil {
-				setLeader("")
-			} else if len(node.Kvs) > 0 {
-				setLeader(string(node.Kvs[0].Value))
-			}
+	}
 
-			campaignCtx, cancelCampaign := context.WithCancel(generation.ctx)
-			campaignDone := make(chan error, 1)
-			election := generation.election
-			go func() {
-				campaignDone <- election.Campaign(campaignCtx, sd.server.ID)
-			}()
-			select {
-			case err = <-campaignDone:
-				cancelCampaign()
-				if err != nil {
-					if ctx.Err() == nil {
-						logger.Zap.Error("while campaigning for leader", zap.String("self", sd.server.ID), zap.Error(err))
-					}
-					return 0, ctx.Err() == nil
-				}
-			case <-ctx.Done():
+	observeCtx, cancelObserve := context.WithCancel(generation.ctx)
+	observe := generation.election.Observe(observeCtx)
+	stopObservation := func() {
+		cancelObserve()
+		for range observe {
+		}
+	}
+	type leaderKeyIdentity struct {
+		key            string
+		createRevision int64
+	}
+	var leaderDeleteWatch clientv3.WatchChan
+	var cancelLeaderDeleteWatch context.CancelFunc
+	var watchedLeader leaderKeyIdentity
+	stopLeaderDeleteWatch := func() {
+		if cancelLeaderDeleteWatch == nil {
+			return
+		}
+		cancelLeaderDeleteWatch()
+		if leaderDeleteWatch != nil {
+			for range leaderDeleteWatch {
+			}
+		}
+		leaderDeleteWatch = nil
+		cancelLeaderDeleteWatch = nil
+		watchedLeader = leaderKeyIdentity{}
+	}
+	installLeaderDeleteWatch := func(key string, createRevision, snapshotRevision int64) bool {
+		if key == "" || createRevision <= 0 || snapshotRevision <= 0 {
+			return false
+		}
+		identity := leaderKeyIdentity{key: key, createRevision: createRevision}
+		if cancelLeaderDeleteWatch != nil && watchedLeader == identity {
+			return true
+		}
+		stopLeaderDeleteWatch()
+		watchCtx, cancel := context.WithCancel(generation.ctx)
+		watch := generation.session.Client().Watch(watchCtx, key,
+			clientv3.WithRev(snapshotRevision+1), clientv3.WithFilterPut())
+		if watch == nil {
+			cancel()
+			return false
+		}
+		leaderDeleteWatch = watch
+		cancelLeaderDeleteWatch = cancel
+		watchedLeader = identity
+		return true
+	}
+	installLeaderResponseWatch := func(response *clientv3.GetResponse) bool {
+		if response == nil || response.Header == nil || len(response.Kvs) == 0 {
+			return false
+		}
+		kv := response.Kvs[0]
+		return installLeaderDeleteWatch(string(kv.Key), kv.CreateRevision, response.Header.Revision)
+	}
+	stopGenerationObservation := func() {
+		stopLeaderDeleteWatch()
+		stopObservation()
+	}
+
+	var campaignDone chan error
+	var cancelCampaign context.CancelFunc
+	startCampaign := func() {
+		if campaignDone != nil {
+			return
+		}
+		campaignCtx, cancel := context.WithCancel(generation.ctx)
+		done := make(chan error, 1)
+		election := generation.election
+		cancelCampaign = cancel
+		campaignDone = done
+		go func() {
+			done <- election.Campaign(campaignCtx, sd.server.ID)
+		}()
+	}
+	stopCampaign := func() error {
+		if campaignDone == nil {
+			return nil
+		}
+		cancelCampaign()
+		err := <-campaignDone
+		cancelCampaign = nil
+		campaignDone = nil
+		return err
+	}
+	if initialLeader != nil && !installLeaderResponseWatch(initialLeader) {
+		generation.cancel()
+		stopGenerationObservation()
+		return generation.session.Lease(), ctx.Err() == nil
+	}
+
+	ownsLeadership := resumeObservation
+	// A resumed snapshot already establishes self ownership. Observe guarantees
+	// the most recent leader, not replay of that snapshot, so its first value may
+	// legitimately be another candidate and must restart Campaign.
+	recampaignPending := false
+	var lastDeletedLeader leaderKeyIdentity
+	var deletedRevisionFloor int64
+	if !resumeObservation {
+		startCampaign()
+	}
+
+	for {
+		select {
+		case resp, ok := <-observe:
+			if !ok {
 				generation.cancel()
-				cancelCampaign()
-				<-campaignDone
+				stopGenerationObservation()
+				_ = stopCampaign()
+				if ctx.Err() == nil {
+					logger.Zap.Error("election observe stream closed", zap.String("self", sd.server.ID))
+				}
+				return generation.session.Lease(), ctx.Err() == nil
+			}
+			if len(resp.Kvs) == 0 {
+				continue
+			}
+			if resp.Header == nil || resp.Header.Revision <= 0 || resp.Kvs[0].CreateRevision <= 0 {
+				generation.cancel()
+				stopGenerationObservation()
+				_ = stopCampaign()
+				if ctx.Err() == nil {
+					logger.Zap.Error("invalid election observe response", zap.String("self", sd.server.ID))
+				}
+				return generation.session.Lease(), ctx.Err() == nil
+			}
+			observedLeader := leaderKeyIdentity{
+				key:            string(resp.Kvs[0].Key),
+				createRevision: resp.Kvs[0].CreateRevision,
+			}
+			if resp.Header.Revision < deletedRevisionFloor || observedLeader == lastDeletedLeader {
+				logger.Zap.Debug("ignoring deleted election leader observation", zap.String("self", sd.server.ID),
+					zap.Uint64("generation", generation.token), zap.String("key", observedLeader.key),
+					zap.Int64("createRevision", observedLeader.createRevision),
+					zap.Int64("responseRevision", resp.Header.Revision),
+					zap.Int64("deletedRevisionFloor", deletedRevisionFloor))
+				continue
+			}
+			leader := string(resp.Kvs[0].Value)
+			leaderLease := clientv3.LeaseID(resp.Kvs[0].Lease)
+			currentLeader, leaderErr := readCurrentLeader()
+			if errors.Is(leaderErr, concurrency.ErrElectionNoLeader) {
+				logger.Zap.Debug("ignoring election leader observation with no current leader",
+					zap.String("self", sd.server.ID), zap.Uint64("generation", generation.token),
+					zap.String("key", observedLeader.key),
+					zap.Int64("createRevision", observedLeader.createRevision))
+				continue
+			}
+			if leaderErr != nil {
+				nextLease := reconnectLeaseAfterReadError()
+				generation.cancel()
+				stopGenerationObservation()
+				_ = stopCampaign()
+				if ctx.Err() == nil {
+					logger.Zap.Error("while rechecking observed election leader",
+						zap.String("self", sd.server.ID), zap.Error(leaderErr))
+				}
+				return nextLease, ctx.Err() == nil
+			}
+			if currentLeader == nil || currentLeader.Header == nil ||
+				len(currentLeader.Kvs) == 0 || currentLeader.Kvs[0].CreateRevision <= 0 {
+				generation.cancel()
+				stopGenerationObservation()
+				_ = stopCampaign()
+				if ctx.Err() == nil {
+					logger.Zap.Error("invalid current election leader response",
+						zap.String("self", sd.server.ID))
+				}
+				return generation.session.Lease(), ctx.Err() == nil
+			}
+			currentKV := currentLeader.Kvs[0]
+			if string(currentKV.Key) != observedLeader.key ||
+				currentKV.CreateRevision != observedLeader.createRevision ||
+				string(currentKV.Value) != leader ||
+				clientv3.LeaseID(currentKV.Lease) != leaderLease {
+				logger.Zap.Debug("ignoring non-current election leader observation",
+					zap.String("self", sd.server.ID), zap.Uint64("generation", generation.token),
+					zap.String("key", observedLeader.key),
+					zap.Int64("createRevision", observedLeader.createRevision),
+					zap.Int64("responseRevision", resp.Header.Revision),
+					zap.String("currentKey", string(currentKV.Key)),
+					zap.Int64("currentCreateRevision", currentKV.CreateRevision))
+				continue
+			}
+			logger.Zap.Debug("etcd election observe", zap.String("self", sd.server.ID),
+				zap.Uint64("generation", generation.token), zap.String("leader", leader),
+				zap.Int64("leaderLease", int64(leaderLease)))
+			if leader == sd.server.ID && leaderLease != generation.session.Lease() {
+				// Adopt the observed lease as borrowed in a new generation before
+				// publishing self ownership. Cleanup must never revoke that lease.
+				generation.cancel()
+				stopGenerationObservation()
+				_ = stopCampaign()
+				return leaderLease, ctx.Err() == nil
+			}
+			if !installLeaderResponseWatch(currentLeader) {
+				generation.cancel()
+				stopGenerationObservation()
+				_ = stopCampaign()
+				return generation.session.Lease(), ctx.Err() == nil
+			}
+			if !publish(leader) {
+				generation.cancel()
+				stopGenerationObservation()
+				_ = stopCampaign()
 				return 0, false
-			case <-generation.session.Done():
-				generation.cancel()
-				cancelCampaign()
-				<-campaignDone
-				return 0, ctx.Err() == nil
 			}
-		}
-
-		setLeader(sd.server.ID)
-		observeCtx, cancelObserve := context.WithCancel(generation.ctx)
-		observe := generation.election.Observe(observeCtx)
-		for {
-			select {
-			case resp, ok := <-observe:
-				if !ok {
-					cancelObserve()
-					if ctx.Err() == nil {
-						logger.Zap.Error("election observe stream closed", zap.String("self", sd.server.ID))
-					}
+			if leader == sd.server.ID {
+				ownsLeadership = true
+				recampaignPending = false
+			} else {
+				// Observe may skip a short-lived self proposal. Record every foreign
+				// leader so both Campaign-first and Observe-first orderings leave a
+				// fresh proposal behind the replacement.
+				ownsLeadership = false
+				if campaignDone == nil {
+					startCampaign()
+				} else {
+					recampaignPending = true
+				}
+			}
+		case campaignErr := <-campaignDone:
+			cancelCampaign()
+			cancelCampaign = nil
+			campaignDone = nil
+			if campaignErr != nil {
+				generation.cancel()
+				stopGenerationObservation()
+				if ctx.Err() == nil {
+					logger.Zap.Error("while campaigning for leader", zap.String("self", sd.server.ID), zap.Error(campaignErr))
+				}
+				if errors.Is(campaignErr, rpctypes.ErrLeaseNotFound) {
 					return 0, ctx.Err() == nil
 				}
-				if len(resp.Kvs) == 0 {
+				return generation.session.Lease(), ctx.Err() == nil
+			}
+			if recampaignPending {
+				recampaignPending = false
+				ownsLeadership = false
+				startCampaign()
+			} else {
+				header := generation.election.Header()
+				if header == nil || !installLeaderDeleteWatch(generation.election.Key(),
+					generation.election.Rev(), header.Revision) {
+					generation.cancel()
+					stopGenerationObservation()
+					return generation.session.Lease(), ctx.Err() == nil
+				}
+				ownsLeadership = true
+			}
+		case watchResponse, ok := <-leaderDeleteWatch:
+			if !ok || watchResponse.Err() != nil {
+				watchErr := watchResponse.Err()
+				generation.cancel()
+				stopGenerationObservation()
+				_ = stopCampaign()
+				if ctx.Err() == nil {
+					logger.Zap.Error("election leader delete watch closed", zap.String("self", sd.server.ID),
+						zap.Error(watchErr))
+				}
+				return generation.session.Lease(), ctx.Err() == nil
+			}
+			deleted := false
+			deleteRevision := int64(0)
+			for _, event := range watchResponse.Events {
+				if event.Type != clientv3.EventTypeDelete || string(event.Kv.Key) != watchedLeader.key {
 					continue
 				}
-				leader := string(resp.Kvs[0].Value)
-				logger.Zap.Debug("etcd election observe", zap.String("self", sd.server.ID), zap.String("leader", leader))
-				setLeader(leader)
-				if leader != sd.server.ID {
-					cancelObserve()
-					for range observe {
-					}
-					break
+				deleted = true
+				if event.Kv.ModRevision > deleteRevision {
+					deleteRevision = event.Kv.ModRevision
 				}
-			case <-ctx.Done():
-				cancelObserve()
-				for range observe {
-				}
-				if isLeader() {
-					resignCtx, cancel := context.WithTimeout(context.Background(), sd.electionShutdownTimeout())
-					if err := generation.election.Resign(resignCtx); err != nil {
-						logger.Zap.Error("while resigning leadership during shutdown", zap.String("self", sd.server.ID), zap.Error(err))
-					}
-					cancel()
-				}
-				return 0, false
-			case <-generation.session.Done():
-				cancelObserve()
-				for range observe {
-				}
-				return 0, ctx.Err() == nil
 			}
+			if !deleted {
+				continue
+			}
+			deletedLeader := watchedLeader
+			if deleteRevision == 0 {
+				deleteRevision = watchResponse.Header.Revision
+			}
+			if deleteRevision > deletedRevisionFloor {
+				deletedRevisionFloor = deleteRevision
+			}
+			lastDeletedLeader = deletedLeader
+			stopLeaderDeleteWatch()
+			ownsLeadership = false
+
+			currentLeader, leaderErr := readCurrentLeader()
+			if leaderErr == nil && len(currentLeader.Kvs) == 0 {
+				leaderErr = concurrency.ErrElectionNoLeader
+			}
+			switch {
+			case leaderErr == nil:
+				if !installLeaderResponseWatch(currentLeader) {
+					generation.cancel()
+					stopGenerationObservation()
+					_ = stopCampaign()
+					return generation.session.Lease(), ctx.Err() == nil
+				}
+			case errors.Is(leaderErr, concurrency.ErrElectionNoLeader):
+				if campaignDone == nil {
+					startCampaign()
+				} else {
+					recampaignPending = true
+				}
+				if !publish("") {
+					generation.cancel()
+					stopGenerationObservation()
+					_ = stopCampaign()
+					return 0, false
+				}
+			default:
+				nextLease := reconnectLeaseAfterReadError()
+				generation.cancel()
+				stopGenerationObservation()
+				_ = stopCampaign()
+				if ctx.Err() == nil {
+					logger.Zap.Error("while rechecking deleted election leader", zap.String("self", sd.server.ID),
+						zap.String("key", deletedLeader.key), zap.Error(leaderErr))
+				}
+				return nextLease, ctx.Err() == nil
+			}
+		case <-ctx.Done():
+			stopGenerationObservation()
+			if campaignDone != nil {
+				generation.cancel()
+				if stopCampaign() == nil && !recampaignPending {
+					ownsLeadership = true
+				}
+			}
+			if ownsLeadership {
+				resignCtx, cancel := context.WithTimeout(context.Background(), sd.electionShutdownTimeout())
+				if err := generation.election.Resign(resignCtx); err != nil {
+					logger.Zap.Error("while resigning leadership during shutdown", zap.String("self", sd.server.ID), zap.Error(err))
+				}
+				cancel()
+			}
+			generation.cancel()
+			return 0, false
+		case <-generation.session.Done():
+			generation.cancel()
+			stopGenerationObservation()
+			_ = stopCampaign()
+			return 0, ctx.Err() == nil
 		}
 	}
 }
 
-func (sd *etcdServiceDiscovery) newElectionGeneration(ctx context.Context, id clientv3.LeaseID) (*electionGeneration, error) {
+func (sd *etcdServiceDiscovery) newElectionGeneration(ctx context.Context, lease electionLease, token uint64) (*electionGeneration, error) {
+	if lease.provenance == electionLeaseInvalid || (lease.id == 0 && lease.provenance != electionLeaseLocal) {
+		return nil, errors.Errorf("invalid election lease request: id=%x provenance=%d", lease.id, lease.provenance)
+	}
 	generationCtx, cancel := context.WithCancel(ctx)
 	generationClient := borrowEtcdClient(generationCtx, sd.cli)
 	session, err := concurrency.NewSession(generationClient, concurrency.WithTTL(int(sd.heartbeatTTL.Seconds())),
-		concurrency.WithContext(generationCtx), concurrency.WithLease(id))
+		concurrency.WithContext(generationCtx), concurrency.WithLease(lease.id))
 	if err != nil {
 		cancel()
 		return nil, err
 	}
+	lease.id = session.Lease()
 	return &electionGeneration{
+		token:    token,
 		ctx:      generationCtx,
 		cancel:   cancel,
 		session:  session,
 		election: concurrency.NewElection(session, sd.electionName),
+		lease:    lease,
 	}, nil
 }
 
-func (sd *etcdServiceDiscovery) stopElectionGeneration(generation *electionGeneration) {
+func (sd *etcdServiceDiscovery) detachElectionGeneration(generation *electionGeneration) {
 	generation.cancel()
 	generation.session.Orphan()
+}
+
+func (sd *etcdServiceDiscovery) revokeElectionLease(lease electionLease, preserve bool) {
+	if preserve || lease.id == 0 || lease.provenance != electionLeaseLocal {
+		return
+	}
+	revokeCtx, cancel := context.WithTimeout(context.Background(), sd.electionShutdownTimeout())
+	_, err := sd.cli.Revoke(revokeCtx, lease.id)
+	cancel()
+	if err != nil {
+		logger.Zap.Error("while revoking detached election lease", zap.String("self", sd.server.ID),
+			zap.Int64("lease", int64(lease.id)), zap.Error(err))
+	}
+}
+
+func (sd *etcdServiceDiscovery) stopElectionGeneration(generation *electionGeneration, preserveLease bool) {
+	lease := generation.lease
+	sd.detachElectionGeneration(generation)
+	sd.revokeElectionLease(lease, preserveLease)
 }
 
 func (sd *etcdServiceDiscovery) electionShutdownTimeout() time.Duration {
