@@ -53,8 +53,11 @@ Prerequisites:
 - Git submodule support;
 - `protoc` 35.1 only when regenerating protobuf files;
 - Python 3.12 or newer only when building documentation;
-- Docker Engine and Docker Compose v2 only for distribution and NATS E2E
-  checks.
+- Docker Engine and Docker Compose v2 only for Redis integration, distribution,
+  NATS E2E, network benchmark, and NATS stress checks;
+- GNU coreutils `timeout` (or Homebrew `gtimeout`) for Redis integration;
+- Linux with GNU coreutils `timeout` for NATS E2E and the full `make verify`
+  process-tree ownership contract.
 
 ```sh
 git clone https://github.com/alkaid/pitaya.git
@@ -79,14 +82,20 @@ Use the narrowest gate that matches a change:
 
 ```sh
 make verify-fast          # source, docs policy, unit, vet, and consumer checks
+make verify               # sequential engineering-health aggregate
 make docs-lint            # fork identity, link policy, and ledger checks
 make docs                 # warning-free Sphinx build
+make test-integration     # isolated Redis session-storage round trip
 make test-e2e-nats        # isolated Docker-backed NATS/etcd/Redis path
 make test-distribution    # versioned CLI/xk6/module/Docker smoke
 make benchmark-regression # isolated NATS network benchmark report
 make benchmark-gate-nats  # fixed-runner decision for trusted maintainer candidates
 make scan-deps            # reachable dependency report
 ```
+
+`make verify` runs `verify-fast`, the full targeted race lane, Redis integration,
+and NATS E2E in sequence. It is an explicit engineering-health check, not the
+ordinary pull-request or lightweight release gate.
 
 The dependency scan intentionally returns a non-zero status for an unaccepted
 reachable vulnerability. See [Testing the fork](docs/testing.md) for lane

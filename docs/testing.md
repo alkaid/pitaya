@@ -12,8 +12,14 @@ different compiler. Protobuf regeneration additionally requires `protoc` 35.1.
 Documentation uses Python 3.12 or newer with the exact packages in
 `docs/requirements.txt`.
 
-Docker Engine and Docker Compose v2 are required only for distribution and NATS
-E2E checks. Unit, vet, consumer, module, and docs-lint lanes do not start Docker.
+Docker Engine and Docker Compose v2 are required only for Redis integration,
+distribution, NATS E2E, network benchmark, and NATS stress checks. Unit, vet,
+consumer, module, and docs-lint lanes do not start Docker. Redis integration
+requires GNU coreutils `timeout` (Homebrew's `gtimeout` is detected on macOS).
+NATS E2E and the full `make verify` require Linux and GNU `timeout`: the
+testing-server process tree relies on Linux parent-death signaling. The standalone
+NATS lane fails before starting Docker on other platforms; `make verify` reaches
+that check after its Redis integration lane.
 
 ## Fast source gate
 
@@ -38,10 +44,18 @@ This target contains:
 The fast gate does not prove NATS/etcd/Redis behavior, race safety, coverage,
 long-running fuzz mutation, published tags, or dependency safety.
 
-There is intentionally no root `make verify` aggregate yet. Phase 5 must define
-that command only after its integration, race, fuzz, coverage, and benchmark
-contracts are executable. Do not introduce a green alias from `verify` to
-`verify-fast`.
+The explicit engineering-health aggregate is:
+
+```sh
+make verify
+```
+
+It runs `verify-fast`, `test-race`, `test-integration`, and `test-e2e-nats`
+sequentially. Required targets clear inherited `GOFLAGS` and fix their workspace
+mode so caller settings cannot skip tests or alter the source graph. This broad
+command is not the ordinary pull-request or lightweight release gate. Coverage,
+distribution, dependency scanning, nightly fuzz mutation, benchmarks, stress,
+and published-artifact verification remain independent evidence lanes.
 
 ## Documentation
 
@@ -62,14 +76,27 @@ isolated CI artifact; do not weaken `SPHINXOPTS` in a required gate.
 ## External-service and distribution lanes
 
 ```sh
+make test-integration
 make test-e2e-nats
 make test-distribution
 ```
 
+The Redis integration harness starts only the digest-pinned Redis service in a
+unique Compose project. It uses a dynamic literal IPv4 loopback port, health-based
+readiness, bounded client timeouts, and a short-lived sentinel written from
+inside the container. The tagged test refuses to write until that sentinel
+matches and its UUID session key is absent, then exercises the public session
+pool and Redis cache APIs and checks the exact five-field hash. Cleanup deletes
+only that confirmed-owned key and removes only the harness's project and volumes.
+Missing configuration, an invalid address, a zero-match test, a skipped test, or
+failed teardown is an error. The Tests workflow runs this lane only on `main`
+pushes and manual dispatches.
+
 The NATS E2E script creates a unique Compose project, binds dynamically selected
 loopback ports, waits for health and application readiness, and owns cleanup for
-that project. On failure it prints Compose state and bounded recent logs. A
-second run must not depend on containers or files left by the first.
+that project. On failure it prints Compose state and bounded recent logs; failed
+teardown also fails the lane. A second run must not depend on containers or files
+left by the first.
 
 The distribution lane creates a local file proxy for synthetic root, CLI, and
 xk6 versions. It verifies no-replace module graphs, versioned `go install`, a
@@ -468,6 +495,8 @@ the same prefix with `.supervisor.log`, `.frontend.log`, or `.backend.log`.
 - stamped coverage provenance: `coverprofile.out.meta.json`;
 - fuzz JSON/stderr and the gate marker: `build/fuzz`;
 - minimized fuzz failures: `<package>/testdata/fuzz/<target>/<hash>`;
+- Redis integration diagnostics: bounded Compose state and Redis log tails from
+  `scripts/test-integration.sh` before owned-project cleanup;
 - NATS E2E diagnostics: emitted directly by `scripts/test-e2e-nats.sh` before
   project cleanup;
 - failed NATS benchmark output: `<BENCH_OUT>.failed-<project>`;
