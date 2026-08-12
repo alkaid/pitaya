@@ -169,6 +169,32 @@ jobs:
     - name: Run root unit tests
       run: make test-unit
 
+  race:
+    name: Targeted Race
+    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
+    needs: compile
+    runs-on: ubuntu-24.04
+    # Leave setup and failure-diagnostic headroom beyond go test's 10m timeout.
+    timeout-minutes: 15
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: |
+          go.sum
+          tools/go.sum
+          pitaya-cli/go.sum
+          xk6-pitaya/go.sum
+    - name: Download and verify root module
+      run: |
+        GOWORK=off go mod download
+        GOWORK=off go mod verify
+    - name: Run the full targeted race set
+      run: make test-race
+
   vet:
     name: Vet
     needs: compile

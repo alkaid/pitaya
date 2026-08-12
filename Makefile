@@ -58,6 +58,9 @@ compile: compile-root compile-cli compile-xk6
 test-unit:
 	@go test ./... -count=1
 
+test-race:
+	@GOWORK=off GOFLAGS= go test -race ./co ./session ./agent ./cluster ./service ./router -count=10 -timeout=10m
+
 vet:
 	@go vet ./...
 
@@ -92,7 +95,7 @@ verify-fast: tools-verify module-verify logrus-verify docs-lint compile test-uni
 scan-deps: init-toolchain
 	@./scripts/scan-deps.sh
 
-compile-core compile-root test-unit vet verify-root init-toolchain setup-ci build-k6-extension protos-compile protos-compile-demo scan-deps: export GOWORK = off
+compile-core compile-root test-unit test-race vet verify-root init-toolchain setup-ci build-k6-extension protos-compile protos-compile-demo scan-deps: export GOWORK = off
 compile-cli compile-xk6: export GOWORK = $(WORKSPACE)
 
 init-toolchain:
@@ -296,7 +299,7 @@ test-coverage-func coverage-func: test-coverage
 	@echo "\033[1;34m=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\033[0m"
 	@go tool cover -func="$(COVERAGE_PROFILE)" | grep -Ev "100[.]0%"
 
-.PHONY: compile-core compile-root compile-cli compile-xk6 compile test-unit vet verify-root module-verify tools-verify logrus-verify test-consumer test-distribution docs docs-lint verify-fast scan-deps test-e2e-nats e2e-test-nats e2e-test benchmark-test-nats benchmark-regression benchmark-gate-nats test-stress-nats benchmark-test-grpc test-fuzz-seeds test-fuzz-nightly test-fuzz-one test coverage coverage-stamped coverage-gate coverage-baseline init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
+.PHONY: compile-core compile-root compile-cli compile-xk6 compile test-unit test-race vet verify-root module-verify tools-verify logrus-verify test-consumer test-distribution docs docs-lint verify-fast scan-deps test-e2e-nats e2e-test-nats e2e-test benchmark-test-nats benchmark-regression benchmark-gate-nats test-stress-nats benchmark-test-grpc test-fuzz-seeds test-fuzz-nightly test-fuzz-one test coverage coverage-stamped coverage-gate coverage-baseline init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 
 mocks: agent-mock session-mock networkentity-mock pitaya-mock serializer-mock metrics-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 
