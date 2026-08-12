@@ -86,6 +86,19 @@ func TestNewConfig(t *testing.T) {
 	}
 }
 
+func TestDefaultCustomMetricsSpecPreservesEmptyRepresentation(t *testing.T) {
+	t.Parallel()
+
+	spec := NewDefaultCustomMetricsSpec()
+	require.NotNil(t, spec.Summaries)
+	require.Len(t, spec.Summaries, 0)
+	require.Nil(t, spec.Histograms)
+	require.NotNil(t, spec.Gauges)
+	require.Len(t, spec.Gauges, 0)
+	require.NotNil(t, spec.Counters)
+	require.Len(t, spec.Counters, 0)
+}
+
 func TestNATSMessagesBufferEnvironmentOverride(t *testing.T) {
 	t.Setenv("PITAYA_CLUSTER_RPC_SERVER_NATS_BUFFER_MESSAGES", "16384")
 
