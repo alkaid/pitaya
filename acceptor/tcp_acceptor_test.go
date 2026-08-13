@@ -26,10 +26,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/conn/packet"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/helpers"
+	"github.com/stretchr/testify/assert"
 )
 
 var tcpAcceptorTables = []struct {
@@ -219,83 +219,66 @@ func TestGetNextMessageTwoMessagesInBuffer(t *testing.T) {
 }
 
 func TestGetNextMessageEOF(t *testing.T) {
-	a := NewTCPAcceptor("0.0.0.0:0")
-	go a.ListenAndServe()
-	defer a.Stop()
-	c := a.GetConnChan()
-	// should be able to connect within 100 milliseconds
-	var conn net.Conn
-	var err error
-	helpers.ShouldEventuallyReturn(t, func() error {
-		conn, err = net.Dial("tcp", a.GetAddr())
-		return err
-	}, nil, 10*time.Millisecond, 100*time.Millisecond)
-
-	playerConn := helpers.ShouldEventuallyReceive(t, c, 100*time.Millisecond).(PlayerConn)
+	reader, writer := net.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	playerConn := &tcpPlayerConn{Conn: reader, remoteAddr: reader.RemoteAddr()}
 	buffer := []byte{0x02, 0x00, 0x00, 0x02, 0x01}
-	_, err = conn.Write(buffer)
-	assert.NoError(t, err)
-
+	writeDone := make(chan error, 1)
 	go func() {
-		time.Sleep(100 * time.Millisecond)
-		conn.Close()
+		defer writer.Close()
+		_, err := writer.Write(buffer)
+		writeDone <- err
 	}()
 
-	_, err = playerConn.GetNextMessage()
+	_, err := playerConn.GetNextMessage()
 	assert.EqualError(t, err, constants.ErrReceivedMsgSmallerThanExpected.Error())
+	assert.NoError(t, reader.Close())
+	assertPipeWriteCompleted(t, writeDone)
 }
 
 func TestGetNextMessageEmptyEOF(t *testing.T) {
-	a := NewTCPAcceptor("0.0.0.0:0")
-	go a.ListenAndServe()
-	defer a.Stop()
-	c := a.GetConnChan()
-	// should be able to connect within 100 milliseconds
-	var conn net.Conn
-	var err error
-	helpers.ShouldEventuallyReturn(t, func() error {
-		conn, err = net.Dial("tcp", a.GetAddr())
-		return err
-	}, nil, 10*time.Millisecond, 100*time.Millisecond)
+	reader, writer := net.Pipe()
+	defer reader.Close()
+	playerConn := &tcpPlayerConn{Conn: reader, remoteAddr: reader.RemoteAddr()}
+	assert.NoError(t, writer.Close())
 
-	playerConn := helpers.ShouldEventuallyReceive(t, c, 100*time.Millisecond).(PlayerConn)
-
-	go func() {
-		time.Sleep(100 * time.Millisecond)
-		conn.Close()
-	}()
-
-	_, err = playerConn.GetNextMessage()
+	_, err := playerConn.GetNextMessage()
 	assert.EqualError(t, err, constants.ErrConnectionClosed.Error())
 }
 
 func TestGetNextMessageInParts(t *testing.T) {
-	a := NewTCPAcceptor("0.0.0.0:0")
-	go a.ListenAndServe()
-	defer a.Stop()
-	c := a.GetConnChan()
-	// should be able to connect within 100 milliseconds
-	var conn net.Conn
-	var err error
-	helpers.ShouldEventuallyReturn(t, func() error {
-		conn, err = net.Dial("tcp", a.GetAddr())
-		return err
-	}, nil, 10*time.Millisecond, 100*time.Millisecond)
-
-	defer conn.Close()
-	playerConn := helpers.ShouldEventuallyReceive(t, c, 100*time.Millisecond).(PlayerConn)
+	reader, writer := net.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	playerConn := &tcpPlayerConn{Conn: reader, remoteAddr: reader.RemoteAddr()}
 	part1 := []byte{0x02, 0x00, 0x00, 0x03, 0x01}
 	part2 := []byte{0x01, 0x02}
-	_, err = conn.Write(part1)
-	assert.NoError(t, err)
-
+	writeDone := make(chan error, 1)
 	go func() {
-		time.Sleep(200 * time.Millisecond)
-		_, err = conn.Write(part2)
+		defer writer.Close()
+		_, err := writer.Write(part1)
+		if err == nil {
+			_, err = writer.Write(part2)
+		}
+		writeDone <- err
 	}()
 
 	msg, err := playerConn.GetNextMessage()
 	assert.NoError(t, err)
 	assert.Equal(t, msg, append(part1, part2...))
+	assert.NoError(t, reader.Close())
+	assertPipeWriteCompleted(t, writeDone)
+}
 
+func assertPipeWriteCompleted(t *testing.T, writeDone <-chan error) {
+	t.Helper()
+	timer := time.NewTimer(time.Second)
+	defer timer.Stop()
+	select {
+	case err := <-writeDone:
+		assert.NoError(t, err)
+	case <-timer.C:
+		t.Fatal("pipe writer did not stop after the reader closed")
+	}
 }

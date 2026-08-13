@@ -43,14 +43,13 @@ func TestReportTimingFromCtx(t *testing.T) {
 		defer ctrl.Finish()
 		mockMetricsReporter := mocks.NewMockReporter(ctrl)
 
-		originalTs := time.Now().UnixNano()
+		originalTs := time.Now().Add(-200 * time.Millisecond).UnixNano()
 		expectedRoute := uuid.New().String()
 		expectedType := uuid.New().String()
 		expectedErr := errors.New(uuid.New().String())
 		ctx := pcontext.AddToPropagateCtx(context.Background(), constants.StartTimeKey, originalTs)
 		ctx = pcontext.AddToPropagateCtx(ctx, constants.RouteKey, expectedRoute)
 
-		time.Sleep(200 * time.Millisecond) // to test duration report
 		mockMetricsReporter.EXPECT().ReportSummary(ResponseTime, gomock.Any(), gomock.Any()).Do(
 			func(metric string, tags map[string]string, duration float64) {
 				assert.InDelta(t, duration, time.Now().UnixNano()-originalTs, 10e6)

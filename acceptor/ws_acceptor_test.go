@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gorilla/websocket"
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/conn/packet"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/helpers"
+	"github.com/gorilla/websocket"
+	"github.com/stretchr/testify/assert"
 )
 
 var wsAcceptorTables = []struct {
@@ -204,8 +204,7 @@ func TestWSConnSetDeadline(t *testing.T) {
 			go w.ListenAndServe()
 			mustConnectToWS(t, table.write, w, "ws")
 			conn := helpers.ShouldEventuallyReceive(t, c, 100*time.Millisecond).(*WSConn)
-			conn.SetDeadline(time.Now().Add(5 * time.Millisecond))
-			time.Sleep(10 * time.Millisecond)
+			assert.NoError(t, conn.SetDeadline(time.Now().Add(-time.Second)))
 			_, err := conn.Write(table.write)
 			assert.Error(t, err)
 		})

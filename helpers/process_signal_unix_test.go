@@ -51,7 +51,10 @@ func TestManagedProcessStopsDescendantTree(t *testing.T) {
 		t.Fatalf("Stop() error = %v", err)
 	}
 
-	deadline := time.Now().Add(time.Second)
+	deadline := time.NewTimer(time.Second)
+	defer deadline.Stop()
+	poll := time.NewTicker(10 * time.Millisecond)
+	defer poll.Stop()
 	for {
 		err := syscall.Kill(childPID, 0)
 		if err == syscall.ESRCH {
@@ -60,10 +63,11 @@ func TestManagedProcessStopsDescendantTree(t *testing.T) {
 		if err != nil {
 			t.Fatalf("probe child process %d: %v", childPID, err)
 		}
-		if time.Now().After(deadline) {
+		select {
+		case <-deadline.C:
 			t.Fatalf("descendant process %d survived Stop()", childPID)
+		case <-poll.C:
 		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }
 

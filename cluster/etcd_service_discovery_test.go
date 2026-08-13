@@ -24,7 +24,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
 	"os"
 	"os/exec"
 	"runtime"
@@ -1299,7 +1298,6 @@ func TestEtcdSDInit(t *testing.T) {
 	for _, table := range etcdSDTables {
 		t.Run(table.server.ID, func(t *testing.T) {
 			config := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
-			config.SyncServers.Interval = time.Duration(300 * time.Millisecond)
 			c, cli := helpers.GetTestEtcd(t)
 			t.Cleanup(func() { c.Terminate(t) })
 			e := getEtcdSD(t, config, table.server, cli)
@@ -1312,13 +1310,8 @@ func TestEtcdSDInit(t *testing.T) {
 			sv, err := e.GetServer(table.server.ID)
 			assert.NoError(t, err)
 			assert.Equal(t, table.server, sv)
-			// should heartbeat and sync
-			time.Sleep(50 * time.Millisecond)
-			// TODO may be flaky
-			helpers.ShouldEventuallyReturn(t, func() bool {
-				lastSyncTime := time.Unix(0, e.lastSyncUnixNano.Load())
-				return math.Abs(float64(time.Now().Unix()-lastSyncTime.Unix())) < 5
-			}, true, 50*time.Millisecond, 2*time.Second)
+			// Init completes the first server snapshot before returning.
+			assert.NotZero(t, e.lastSyncUnixNano.Load())
 		})
 	}
 }
