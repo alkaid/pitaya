@@ -597,17 +597,19 @@ func TestNatsRPCServerProcessBindings(t *testing.T) {
 
 	unmarshalledMsg := &protos.BindMsg{}
 	_ = proto.Unmarshal(bindData, unmarshalledMsg)
+	processed := make(chan *protos.BindMsg, 1)
 
 	rpcServer.SetPitayaServer(&pitayaServerStub{
 		sessionBindRemote: func(ctx context.Context, b *protos.BindMsg) (*protos.Response, error) {
-			assert.Equal(t, bindMsg.Uid, b.Uid)
-			assert.Equal(t, bindMsg.Fid, b.Fid)
+			processed <- b
 			return &protos.Response{}, nil
 		},
 	})
 
 	rpcServer.bindingsChan <- msg
-	time.Sleep(30 * time.Millisecond)
+	got := helpers.ShouldEventuallyReceive(t, processed).(*protos.BindMsg)
+	assert.Equal(t, bindMsg.Uid, got.Uid)
+	assert.Equal(t, bindMsg.Fid, got.Fid)
 }
 
 func TestNatsRPCServerProcessPushes(t *testing.T) {
@@ -631,18 +633,20 @@ func TestNatsRPCServerProcessPushes(t *testing.T) {
 		Uid:   "someuid",
 		Data:  []byte{0x01},
 	}
+	processed := make(chan *protos.Push, 1)
 
 	rpcServer.SetPitayaServer(&pitayaServerStub{
 		pushToUser: func(ctx context.Context, p *protos.Push) (*protos.Response, error) {
-			assert.Equal(t, push.Route, p.Route)
-			assert.Equal(t, push.Uid, p.Uid)
-			assert.Equal(t, push.Data, p.Data)
+			processed <- p
 			return &protos.Response{}, nil
 		},
 	})
 
 	rpcServer.userPushCh <- push
-	time.Sleep(30 * time.Millisecond)
+	got := helpers.ShouldEventuallyReceive(t, processed).(*protos.Push)
+	assert.Equal(t, push.Route, got.Route)
+	assert.Equal(t, push.Uid, got.Uid)
+	assert.Equal(t, push.Data, got.Data)
 }
 
 func TestNatsRPCServerProcessKick(t *testing.T) {
@@ -664,16 +668,18 @@ func TestNatsRPCServerProcessKick(t *testing.T) {
 	kick := &protos.KickMsg{
 		UserId: "someuid",
 	}
+	processed := make(chan *protos.KickMsg, 1)
 
 	rpcServer.SetPitayaServer(&pitayaServerStub{
 		kickUser: func(ctx context.Context, p *protos.KickMsg) (*protos.KickAnswer, error) {
-			assert.Equal(t, kick.UserId, p.UserId)
+			processed <- p
 			return &protos.KickAnswer{}, nil
 		},
 	})
 
 	rpcServer.userKickCh <- kick
-	time.Sleep(30 * time.Millisecond)
+	got := helpers.ShouldEventuallyReceive(t, processed).(*protos.KickMsg)
+	assert.Equal(t, kick.UserId, got.UserId)
 }
 
 func TestNatsRPCServerReportMetrics(t *testing.T) {

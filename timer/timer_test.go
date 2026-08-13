@@ -24,8 +24,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/helpers"
+	"github.com/stretchr/testify/assert"
 )
 
 type alwaysRunCondition struct{}
@@ -167,40 +167,58 @@ func TestCron(t *testing.T) {
 		k++
 	}
 
-	tmi := NewTimer(fi, 20*time.Millisecond, 1)
+	newCronTimer := func(id int64, fn Func, counter int) *Timer {
+		return &Timer{
+			ID:       id,
+			fn:       fn,
+			createAt: time.Now().UnixNano(),
+			interval: 20 * time.Millisecond,
+			elapse:   int64(20 * time.Millisecond),
+			counter:  counter,
+		}
+	}
+
+	tmi := newCronTimer(-1, fi, 1)
 	tmi.SetCondition(&alwaysRunCondition{})
 
-	tmj := NewTimer(fj, 20*time.Millisecond, 2)
+	tmj := newCronTimer(-2, fj, 2)
 
-	tmk := NewTimer(fk, 20*time.Millisecond, 2)
+	tmk := newCronTimer(-3, fk, 2)
 	tmk.SetCondition(&neverRunCondition{})
+	tmj.createAt = time.Now().Add(time.Hour).UnixNano()
 
 	AddTimer(tmi)
 	AddTimer(tmj)
 	AddTimer(tmk)
+	t.Cleanup(func() {
+		RemoveTimer(tmi.ID)
+		RemoveTimer(tmj.ID)
+		RemoveTimer(tmk.ID)
+	})
 
-	time.Sleep(10 * time.Millisecond)
 	Cron()
-	// after 10ms only tmi should run because it has always run condition
-	assert.Equal(t, i, i)
+	// Only the unconditional timer is eligible on the first tick.
+	assert.Equal(t, 1, i)
 	assert.Equal(t, 0, j)
 	assert.Equal(t, 0, k)
 
-	time.Sleep(15 * time.Millisecond)
+	// Make the interval timer due without coupling the test to wall-clock sleeps.
+	tmj.createAt = 0
 	Cron()
-	// after 25ms cron run, i should be 2, j should be 1, and k should be 0 because it has neverRunCondition
+	// The interval timer runs once and the false condition still suppresses k.
 	assert.Equal(t, 2, i)
 	assert.Equal(t, 1, j)
 	assert.Equal(t, 0, k)
 
-	time.Sleep(25 * time.Millisecond)
 	Cron()
-
-	// after more 25ms j should be 2
+	assert.Equal(t, 3, i)
 	assert.Equal(t, 2, j)
+	assert.Equal(t, 0, k)
 
-	time.Sleep(25 * time.Millisecond)
 	Cron()
-	// after more 25ms j should be still 2 because of the counter
+	// The interval timer reached its counter and cannot run again.
+	assert.Equal(t, 4, i)
 	assert.Equal(t, 2, j)
+	assert.Equal(t, 0, k)
+	assert.Equal(t, tmj.ID, helpers.ShouldEventuallyReceive(t, Manager.ChClosingTimer).(int64))
 }

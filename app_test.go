@@ -348,6 +348,8 @@ func TestStartAndListenCluster(t *testing.T) {
 	acc := acceptor.NewTCPAcceptor("0.0.0.0:0")
 	builder.AddAcceptor(acc)
 	app := builder.Build().(*App)
+	started := make(chan struct{})
+	app.OnStarted(func() { close(started) })
 
 	appDone := make(chan struct{})
 	go func() {
@@ -362,9 +364,11 @@ func TestStartAndListenCluster(t *testing.T) {
 			t.Error("timed out waiting for app shutdown")
 		}
 	})
-	helpers.ShouldEventuallyReturn(t, func() bool {
-		return app.running
-	}, true)
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for app startup")
+	}
 
 	assert.NotNil(t, app.handlerService)
 	assert.NotNil(t, timer.GlobalTicker)
