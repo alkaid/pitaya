@@ -118,4 +118,9 @@ fi
 # Exercise lock, publication, regression, and cleanup semantics without Docker.
 "$repo_root/scripts/test-benchmark-gate-nats-orchestration.sh"
 
+# Keep the fixed-host controller and the live-config auditor's fail-closed
+# behavior executable without contacting GitHub or running Docker.
+"$repo_root/scripts/test-audit-benchmark-gate-config.sh"
+"$repo_root/scripts/test-benchmark-gate-controller.sh"
+
 echo "tool, action, and image pin verification passed"

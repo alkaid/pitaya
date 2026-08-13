@@ -219,9 +219,9 @@ benchmark-test-nats:
 benchmark-regression:
 	@BENCH_COUNT=$${BENCH_COUNT:-10} ./scripts/test-benchmark-nats.sh
 
-# Blocking use invokes this target from a separately reviewed gate checkout and
-# pins BENCH_GATE_SOURCE_SHA plus BENCH_POLICY_SHA256. BENCH_REPO_ROOT names a
-# trusted maintainer candidate; this same-UID lane is not an untrusted-PR sandbox.
+# Low-level gate primitive. Formal runs use
+# scripts/run-benchmark-gate-controller.sh so protected pins are audited before
+# and after execution and pending evidence is promoted only after a stable read.
 benchmark-gate-nats:
 	@./scripts/benchmark-gate-nats.sh
 

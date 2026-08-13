@@ -89,7 +89,8 @@ make test-integration     # isolated Redis session-storage round trip
 make test-e2e-nats        # isolated Docker-backed NATS/etcd/Redis path
 make test-distribution    # versioned CLI/xk6/module/Docker smoke
 make benchmark-regression # isolated NATS network benchmark report
-make benchmark-gate-nats  # fixed-runner decision for trusted maintainer candidates
+scripts/run-benchmark-gate-controller.sh [--bootstrap] <candidate-sha> <base-sha> # fixed-host decision
+scripts/audit-benchmark-gate-config.sh --repo alkaid/pitaya # audit protected benchmark pins
 make scan-deps            # reachable dependency report
 ```
 
@@ -99,7 +100,7 @@ ordinary pull-request or lightweight release gate.
 
 The dependency scan intentionally returns a non-zero status for an unaccepted
 reachable vulnerability. See [Testing the fork](docs/testing.md) for lane
-dependencies, timeouts, artifacts, and the network benchmark workflow.
+dependencies, timeouts, artifacts, and the network benchmark controller.
 
 ## Documentation
 

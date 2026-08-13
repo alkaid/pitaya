@@ -315,28 +315,73 @@ channel. The production client still filters late or unknown response IDs before
 the benchmark dispatcher sees them.
 
 `make benchmark-regression` remains the configurable local raw-result producer;
-it does not make a blocking performance decision. To produce a source-verified
-base/candidate decision on a dedicated fixed runner, use:
+it does not make a blocking performance decision. On the fixed bare host, the
+supported formal entry point is the local controller:
 
 ```sh
-BENCH_RUNNER_ID=linux-amd64-perf-01 \
-  BENCH_RUNNER_LOCK=/var/lock/pitaya-benchmark.lock \
-  BENCH_GATE_SOURCE_SHA=<reviewed-gate-commit-sha> \
-  BENCH_POLICY_SHA256=<reviewed-policy-sha256> \
-  BENCH_REPO_ROOT=/path/to/clean/candidate-checkout \
-  BENCH_BASE_REF=<full-base-sha> \
-  BENCH_CANDIDATE_REF=<full-candidate-sha> \
-  make benchmark-gate-nats
+scripts/run-benchmark-gate-controller.sh <full-candidate-sha> <full-base-sha>
 ```
 
-Invoke the target from a clean, separately reviewed gate checkout whose current
-commit exactly matches `BENCH_GATE_SOURCE_SHA`. `BENCH_REPO_ROOT` names the clean
-trusted, maintainer-authored candidate checkout; its current `HEAD` must equal
-`BENCH_CANDIDATE_REF`, and the
-distinct base must be its ancestor. The candidate does not need to contain the
-gate implementation or policy. Both source SHA and `BENCH_POLICY_SHA256` must
-come from protected runner/workflow configuration; do not calculate either from
-the candidate during the deciding run. The trusted gate exports `tools` and the
+The maintainer supplies both complete lowercase SHAs. The candidate must equal
+the controller checkout's clean `HEAD` and the current `origin`
+`refs/heads/main`; the base must be a distinct ancestor. The repository must
+have no self-hosted GitHub Actions runners. This is a local, manually invoked
+lane and does not add a release workflow or hosted authorization service.
+
+The Environment is the sole authority for these non-secret configuration
+variables:
+
+```text
+BENCH_GATE_SOURCE_SHA=746624aa8874b7305fa913901c7b434fbc360a36
+BENCH_POLICY_SHA256=b566bf3367e53302ef20342057b2a5c2de78436dbc0eaf85d5fd968844090f4b
+```
+
+Do not define either name as a repository or organization variable, in the host
+service environment, or as controller input. The controller obtains both values
+only through exact Environment API requests and rejects either name in its own
+environment before starting; a missing pin cannot fall back to the candidate
+checkout or caller environment. Unrelated Environment variables are allowed.
+
+After provisioning or rotating the Environment, run the external configuration
+audit from an authenticated maintainer checkout:
+
+```sh
+scripts/audit-benchmark-gate-config.sh --repo alkaid/pitaya
+```
+
+The audit fails closed unless GitHub reports the exact Environment and pins, no
+repository or organization shadow variable, one custom deployment branch policy
+for branch `main`, the pinned policy bytes matching the digest, and zero
+repository self-hosted runners. Exact shadow checks first prove that the API
+credential can enumerate the corresponding scope; a concealed 404 is not
+accepted as absence.
+The live audit is an operator/deployment check and is deliberately not part of
+`verify-fast`; its mocked adversarial tests are part of `tools-verify`.
+
+GitHub updates the two variables separately. Rotate them only while the local
+controller is administratively disabled, update both values, run the audit, then
+run one informational bootstrap:
+
+```sh
+scripts/run-benchmark-gate-controller.sh --bootstrap <full-candidate-sha> <full-base-sha>
+```
+
+The bootstrap retains evidence under `.bootstrap-controller-<run-id>` and
+atomically records the audited tuple in the ignored host-local
+`build/benchmarks/.benchmark-gate-bootstrap.json`. It never creates a formal
+`nats-gate-*` directory. A normal run requires that marker to match both current
+pins exactly, so installing or changing either pin requires another bootstrap;
+deleting the local marker has the same fail-closed effect. Restore formal use
+only after reviewing the bootstrap result. The controller repeats the complete
+audit and remote `main` read after the benchmark; pin or branch drift keeps the
+pending result non-formal.
+
+The controller creates a temporary detached worktree at
+`BENCH_GATE_SOURCE_SHA` and invokes the low-level gate from that reviewed
+checkout. The clean trusted, maintainer-authored controller checkout is the
+candidate; the candidate does not need to contain the gate implementation or
+policy. Both pins come from the audited `benchmark-gate` Environment and are
+never calculated from the candidate. The trusted gate exports `tools` and the
 policy directly from the pinned commit, verifies the tools module cache, and
 builds with `-mod=readonly -pgo=off`; ignored files or an automatic vendor/PGO
 selection in the long-lived gate checkout therefore cannot alter the deciding
@@ -356,9 +401,9 @@ actual Linux/amd64 Go build graph inside those protected harness packages;
 selected ignored or untracked files fail closed. Ordinary production dependencies
 remain the measured input rather than being frozen as apparatus. A gate or policy
 change needs separate review and pin rotation; it cannot self-authorize a
-performance decision. The first run used to establish a newly introduced gate commit is
-bootstrap evidence and remains informational until that commit and policy digest
-have been independently reviewed and installed in protected configuration. The
+performance decision. After independently reviewing and installing a new gate
+commit or policy digest, run the controller once with `--bootstrap`; that result
+remains informational until the maintainer reviews it and restores formal use. The
 fixed `nats-network-v1` policy
 selects the exact network benchmark set, `1s` benchtime, ten samples,
 `benchmem`, and a 20-minute per-run timeout. `time/op` and `allocs/op` block when
@@ -368,10 +413,13 @@ turn decimal `100 ns/op` -> `110 ns/op` into a false regression. An all-zero
 allocation baseline blocks any positive candidate sample. `B/op` is required
 evidence but is currently informational.
 
-Exit `0` is a passing decision, `3` is a completed regression decision, `2` is
-invalid input, and `1` is an infrastructure, provenance, or comparability
-failure. Both exit `0` and exit `3` atomically publish a complete directory under
-`build/benchmarks/nats-gate-<run-id>` by default. It contains raw and sealed base
+At the supported controller boundary, exit `0` is pass, `3` is a completed
+regression decision, and every other failure is `1`. The low-level gate still
+uses `2` for invalid direct input. Both completed decisions first publish to a
+controller-owned `.pending-*` directory. Only a successful second configuration
+audit, an unchanged remote `main`, a matching bootstrap marker, and successful
+temporary-worktree cleanup permit no-clobber promotion to
+`build/benchmarks/nats-gate-<run-id>`. It contains raw and sealed base
 and candidate benchfmt files, JSON provenance sidecars, deterministic runner
 snapshots from before and after each harness invocation, `benchstat` output, and
 `gate.json` plus human-readable comparator output. Before publication, the
@@ -384,25 +432,32 @@ the sealed result and metadata contents and records their SHA-256 digests in the
 report. The final verification independently reads the reviewed policy, checks
 its configuration and benchmark inventory, and rehashes all four artifacts to
 bind the exact bytes to the report before publication.
-Infrastructure failures retain
-available evidence under the corresponding `.failed-<run-id>` path; stale formal
-output is never replaced. A post-rename rollback collision retains the adjacent
-output lock as a quarantine marker rather than exposing an unlocked formal
-result.
+Before controller promotion, infrastructure failures retain available evidence as
+`.pending-controller-<candidate>-<pid>-<nonce>.failed`; a low-level failure may
+instead retain `.pending-controller-<candidate>-<pid>-<nonce>.failed-<run-id>`. A
+failure after the controller rename is demoted to
+`.failed-controller-<run-id>-<pid>`. Stale formal output is never replaced. If a
+post-rename rollback cannot claim its no-clobber target, the adjacent output lock
+remains as a quarantine marker rather than exposing an unlocked formal result.
+Signals are forwarded to the owned low-level gate process. An interrupted run
+returns `1`, cleans its temporary worktree, and cannot promote formal evidence.
 
-`BENCH_RUNNER_ID` is a label, not proof of dedicated hardware. Blocking use also
-requires an otherwise idle runner with stable CPU allocation, toolchain, Docker
-daemon, and Compose version; `BENCH_RUNNER_LOCK` must be an absolute host-wide
-regular-file path. The protected runner/workflow, reviewed policy digest, and
-reviewed clean gate source form the trust boundary; a self-selected runner ID is
-not sufficient. The result records machine, boot, kernel, CPU/cgroup, Go, and
-container-tool provenance. Deterministic probes bracket each harness run, and
-`stamp` resamples the runner before sealing the after-probe, so observed drift
-fails closed. No hosted GitHub Actions job currently claims this fixed-runner
-result. Shared-runner and same-checkout runs remain informational, and a network
-benchmark does not replace a production profile. The `benchgate stamp` command
-is an internal orchestration primitive, not a supported way to turn an old raw
-file into trusted evidence.
+Blocking use requires an otherwise idle bare Linux/X64 host or VM with stable
+CPU allocation, Go 1.26.5 under `GOTOOLCHAIN=local`, Docker/Compose, no production
+secrets, and writable `/var/lock/pitaya/benchmark.lock`. The gate records actual
+kernel, tool, container, CPU, and cgroup provenance and requires it to remain
+stable during one run; it does not enforce a version allowlist. Review apparatus
+changes and re-bootstrap before restoring blocking authority.
+
+The protected Environment, reviewed policy digest, reviewed clean gate source,
+and fixed local host form the trust boundary. Deterministic probes bracket each
+harness run, and `stamp` resamples the host before sealing the after-probe, so
+observed drift fails closed. Until the Environment and pins are deployed and
+audited, controller runs do not carry formal authority. Direct low-level and
+same-checkout runs remain informational, and a network benchmark does not replace
+a production profile.
+The `benchgate stamp` command is an internal orchestration primitive, not a
+supported way to turn an old raw file into trusted evidence.
 
 This lane is deliberately not a hostile-code boundary. The measured harness runs
 under the same Unix identity as the orchestrator and can access that identity's
@@ -500,8 +555,10 @@ the same prefix with `.supervisor.log`, `.frontend.log`, or `.backend.log`.
 - NATS E2E diagnostics: emitted directly by `scripts/test-e2e-nats.sh` before
   project cleanup;
 - failed NATS benchmark output: `<BENCH_OUT>.failed-<project>`;
-- NATS base/candidate decision bundles: `build/benchmarks/nats-gate-<run-id>`,
-  with infrastructure failures retained at the adjacent `.failed-<run-id>` path;
+- NATS base/candidate decision bundles: `build/benchmarks/nats-gate-<run-id>`;
+  bootstrap evidence uses `.bootstrap-controller-<run-id>`, pre-promotion
+  failures use `.pending-controller-*.failed`, and post-rename controller
+  failures use `.failed-controller-<run-id>-<pid>`;
 - NATS stress JSON/log evidence: `build/stress`, including failed outputs named
   from `<STRESS_OUT>.failed-<project>`;
 - distribution scratch data: temporary and removed by the owning script.

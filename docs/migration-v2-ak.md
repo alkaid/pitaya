@@ -56,15 +56,13 @@ values use integer Go duration components and must resolve to at least `1ns`.
 `benchmark-regression` keeps that local, configurable raw-output contract. A new
 `benchmark-gate-nats` target performs the stricter fixed-policy comparison and
 does not reuse `BENCH_PATTERN`, `BENCH_TIME`, `BENCH_COUNT`, or `BENCH_OUT`.
-Automation that adopts it must invoke the target from a separately reviewed,
-clean gate checkout and provide its full `BENCH_GATE_SOURCE_SHA`, a stable
-`BENCH_RUNNER_ID`, an absolute host-wide `BENCH_RUNNER_LOCK`, a
-`BENCH_POLICY_SHA256` pinned in reviewed Linux/amd64 runner or protected workflow
-configuration, `BENCH_REPO_ROOT` for the clean measured checkout, and explicit
-`BENCH_BASE_REF` / `BENCH_CANDIDATE_REF` values. Do not derive the gate or policy
-pin from the candidate inside the deciding run. The candidate `HEAD` must equal
-the candidate SHA and the base must be a distinct ancestor; neither measured
-revision needs to contain the verifier or policy. The same trusted policy is
+Formal use now goes through `scripts/run-benchmark-gate-controller.sh` on a
+fixed bare host. The maintainer supplies only complete candidate and base SHAs
+(plus an optional repository identity); the controller obtains
+`BENCH_GATE_SOURCE_SHA` and `BENCH_POLICY_SHA256` exclusively from the protected
+`benchmark-gate` Environment. The candidate must equal clean local `HEAD` and
+current origin `refs/heads/main`; the base must be a distinct ancestor. Neither
+measured revision needs to contain the verifier or policy. The same trusted policy is
 applied to both source trees, so the base may predate the policy file. Gate or
 policy changes require separate review and pin rotation; the first bootstrap run
 of a new gate commit is informational until that pin is independently trusted.
@@ -92,14 +90,54 @@ configuration and benchmark inventory, then rehashes all four artifacts to bind
 their exact bytes plus the externally supplied policy and apparatus identities
 to the report. Exit status `3` means a complete regression decision whose artifact
 bundle was still published; it must not be treated as an infrastructure failure
-or discarded. Hosted CI remains unchanged until a fixed runner is provisioned.
-The blocking runner must also be a bare-host process in Linux's initial cgroup
+or discarded. The deciding process must be a bare-host process in Linux's initial cgroup
 namespace. Relevant hierarchies must be mounted from `/` with complete ancestry,
 no nested mount or overmount, and at least one readable CPU/cpuset control. The
 kernel must expose nsfs namespace identity/type and `statx` mount IDs. Docker or
 Kubernetes runners and older kernels without those proofs fail closed and are
 supported only for informational runs. Cgroup v1 `noprefix` hierarchies are also
 unsupported.
+
+Create the `benchmark-gate` Environment with custom deployment policy branch
+`main` and these two Environment variables:
+
+```text
+BENCH_GATE_SOURCE_SHA=746624aa8874b7305fa913901c7b434fbc360a36
+BENCH_POLICY_SHA256=b566bf3367e53302ef20342057b2a5c2de78436dbc0eaf85d5fd968844090f4b
+```
+
+Remove repository or organization variables with either name; do not pass the
+pins through the host environment or controller arguments. The repository must
+have zero self-hosted GitHub runners. Prepare the fixed local bare Linux/X64 host
+with Go 1.26.5, Docker/Compose, the required cgroup visibility, and writable
+`/var/lock/pitaya`, then run:
+
+```sh
+scripts/audit-benchmark-gate-config.sh --repo alkaid/pitaya
+```
+
+The audit uses exact-name API reads for the Environment pins and lower-scope
+shadows, verifies the exact `main` deployment policy, zero repository runners,
+and policy bytes at the pinned gate commit. Any unavailable or concealed API
+result, missing value, shadow variable, runner registration, or digest mismatch
+fails closed. Because the two GitHub variable updates are not atomic, disable
+the controller, update both, audit, then run one informational bootstrap before
+restoring formal use:
+
+```sh
+scripts/run-benchmark-gate-controller.sh --bootstrap <candidate-sha> <base-sha>
+```
+
+The controller reads the complete pin document before and after execution. The
+low-level gate publishes completed `0`/`3` evidence under a non-formal pending
+name. Bootstrap evidence remains under `.bootstrap-controller-<run-id>` and
+installs a host-local marker bound to the complete audited tuple; it never uses a
+formal output name. A normal run requires the marker, an unchanged post-run
+tuple and remote `main`, and successful temporary-worktree cleanup before it can
+promote without clobbering to `nats-gate-<run-id>`. Signals are forwarded to the
+owned gate process. All controller failures return `1` and retain only explicitly
+non-formal evidence. Source installation, a bootstrap run, and formal blocking
+evidence remain three distinct states.
 
 Formal output parents cannot contain symlinks, and relative paths remain below the
 candidate checkout. The runner-lock descriptor is closed before starting measured
