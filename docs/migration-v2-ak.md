@@ -317,7 +317,7 @@ TLS 在反向代理终止时，后端请求的 `r.TLS` 为空，默认策略会�
 
 WS Upgrade 的 header timeout、idle timeout 和 header 上限分别为 5 秒、60 秒和 64 KiB。Upgrade 完成后立即设置 `4 byte 协议头 + 16 MiB payload` 的 read limit，超限 frame 会在业务解码前被拒绝。
 
-`TCPAcceptor` 启用 PROXY protocol 时，客户端必须在 5 秒内完成 header。header 使用最多 64 路有界并发解析，单个慢连接不会占住主 accept loop；容量耗尽时新连接会被立即关闭，不进入业务 handler。超时、半包或非法 header 会关闭该连接，成功解析后清除 deadline。`TCPAcceptor.Stop` 或 Serve context 取消会立即关闭所有解析中的 raw connection，不等待 header deadline。未启用 PROXY protocol 的 TCP 连接直接使用底层 listener，不占用这 64 个解析槽位。
+`TCPAcceptor` 启用 PROXY protocol 时，客户端必须在 5 秒内完成 header。header 使用最多 64 路有界并发解析，单个慢连接不会占住主 accept loop；容量耗尽时新连接会被立即关闭，不进入业务 handler。超时、半包或非法 header 会关闭该连接，成功解析后清除 deadline。`TCPAcceptor.Stop` 或 Serve context 取消会立即关闭所有解析中的 raw connection，不等待 header deadline；关闭 wrapper 后，正在等待的 `Accept` 统一返回 `net.ErrClosed`，不再非确定性透传底层 listener 的关闭错误。未启用 PROXY protocol 的 TCP 连接直接使用底层 listener，不占用这 64 个解析槽位。
 
 `WSAcceptor` 当前不支持 PROXY protocol；它的 `EnableProxyProtocol()` 保留为空操作。WebSocket 部署不能依赖上述 5 秒 header 超时或 64 路解析保护，反向代理场景应由代理层终止 PROXY protocol，并通过受信代理配置处理客户端地址。
 

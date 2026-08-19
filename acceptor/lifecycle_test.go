@@ -3,6 +3,7 @@ package acceptor
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -84,6 +85,39 @@ func (l *queuedListener) Close() error {
 }
 
 func (l *queuedListener) Addr() net.Addr { return queuedListenerAddr{} }
+
+type stagedCloseListener struct {
+	acceptStarted chan struct{}
+	closeStarted  chan struct{}
+	releaseClose  chan struct{}
+	closed        chan struct{}
+	acceptErr     error
+}
+
+func newStagedCloseListener(acceptErr error) *stagedCloseListener {
+	return &stagedCloseListener{
+		acceptStarted: make(chan struct{}),
+		closeStarted:  make(chan struct{}),
+		releaseClose:  make(chan struct{}),
+		closed:        make(chan struct{}),
+		acceptErr:     acceptErr,
+	}
+}
+
+func (l *stagedCloseListener) Accept() (net.Conn, error) {
+	close(l.acceptStarted)
+	<-l.closed
+	return nil, l.acceptErr
+}
+
+func (l *stagedCloseListener) Close() error {
+	close(l.closeStarted)
+	<-l.releaseClose
+	close(l.closed)
+	return nil
+}
+
+func (l *stagedCloseListener) Addr() net.Addr { return queuedListenerAddr{} }
 
 func TestAcceptorStopBeforeServeIsSafeAndIdempotent(t *testing.T) {
 	tests := []struct {
@@ -274,6 +308,51 @@ func TestProxyProtocolDisabledAcceptsDirectlyFromUnderlyingListener(t *testing.T
 	var netErr net.Error
 	require.ErrorAs(t, err, &netErr)
 	assert.True(t, netErr.Timeout(), "queued connection was actively closed: %v", err)
+}
+
+func TestProxyProtocolCloseDoesNotLeakUnderlyingAcceptError(t *testing.T) {
+	underlyingErr := errors.New("synthetic listener close")
+	for range 64 {
+		listener := newStagedCloseListener(underlyingErr)
+		wrapped := &ProxyProtocolListener{
+			Listener:             listener,
+			ProxyProtocolEnabled: true,
+		}
+
+		acceptDone := make(chan error, 1)
+		go func() {
+			_, err := wrapped.Accept()
+			acceptDone <- err
+		}()
+		select {
+		case <-listener.acceptStarted:
+		case <-time.After(acceptorTestTimeout):
+			t.Fatal("underlying Accept did not start")
+		}
+
+		closeDone := make(chan error, 1)
+		go func() { closeDone <- wrapped.Close() }()
+		select {
+		case <-listener.closeStarted:
+		case <-time.After(acceptorTestTimeout):
+			t.Fatal("underlying Close did not start")
+		}
+		close(listener.releaseClose)
+
+		select {
+		case err := <-acceptDone:
+			require.ErrorIs(t, err, net.ErrClosed)
+			require.NotErrorIs(t, err, underlyingErr)
+		case <-time.After(acceptorTestTimeout):
+			t.Fatal("wrapped Accept did not return after Close")
+		}
+		select {
+		case err := <-closeDone:
+			require.NoError(t, err)
+		case <-time.After(acceptorTestTimeout):
+			t.Fatal("wrapped Close did not return")
+		}
+	}
 }
 
 func TestTCPProxyHeaderTimeoutRejectsAndContinues(t *testing.T) {

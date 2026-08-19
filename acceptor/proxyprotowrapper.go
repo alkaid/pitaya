@@ -111,6 +111,13 @@ func (p *ProxyProtocolListener) pump() {
 	for {
 		conn, err := p.Listener.Accept()
 		if err != nil {
+			// Close publishes done before closing the listener. Prefer the
+			// wrapper's terminal error over a listener-specific shutdown error.
+			select {
+			case <-p.done:
+				return
+			default:
+			}
 			select {
 			case <-p.done:
 				return
