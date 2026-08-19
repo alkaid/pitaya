@@ -147,16 +147,16 @@ flowchart TD
     HasUID -->|yes| HashUID["consistentHash(serviceType, UID)"]
     HasUID -->|no| HasTuple{Frontend tuple valid?}
     HasTuple -->|yes| HashSession["consistentHash(serviceType, frontendID-sessionID)"]
-    HasTuple -->|no| RandomNoKey["Current behavior:<br/>random server"]
+    HasTuple -->|no| MissingKey["ErrStatefulRouteKeyNotFound"]
     HashUID --> HashResult{Lookup succeeded?}
     HashSession --> HashResult
     HashResult -->|yes| HashServer[Hashed server]
-    HashResult -->|no| RandomFallback["Current behavior:<br/>random server"]
+    HashResult -->|no| LookupError[Return lookup error]
 ```
 
-一致性哈希环来自每个进程自己的 etcd service-discovery 视图。正常情况下，相同 server 列表会产生相同映射。节点加入、节点离开、watch 延迟或网络分区可能让不同进程暂时看到不同的环。当前路由没有 owner lease、handoff epoch 或 fencing token，哈希环也不会等待旧节点清空该 UID 的在途任务。
+一致性哈希环来自每个进程自己的 etcd service-discovery 视图。正常情况下，相同 server 列表会产生相同映射。节点加入、节点离开、watch 延迟或网络分区可能让不同进程暂时看到不同的环。nil session 的 stateless 路径仍可随机选择节点；需要 session affinity 的 stateful 路径缺少稳定 key 或哈希查询失败时会 fail-closed。
 
-对依赖单写者语义的服务，哈希查询失败后随机路由会直接破坏 UID 亲和性。应用在当前版本中应监控这类错误；框架后续应将它改成可重试失败，或只允许明确标记为 stateless 的路由随机降级。
+etcd registration lease 的 `CreateRevision` 现在作为 server identity owner epoch，出站 RPC 为每一 hop 携带目标 epoch，接收端在业务 handler 前执行 admission fencing。它可以拒绝发往同一 type/ID 旧 registration 的请求，但不是 per-UID handoff epoch：哈希环变化仍不会等待旧节点清空该 UID 的在途任务，外部业务存储也不会自动拒绝旧 owner 的迟到写入。
 
 ## 当前一致性边界
 
@@ -171,11 +171,11 @@ flowchart TD
 | NATS RPC 不携带 session | 使用无状态 `co.Submit` | 不可以 |
 | gRPC RPC | 直接调用 `PitayaServer.Call` | 不可以 |
 | 自定义 route | 完全由 route 函数选择节点 | 取决于应用实现 |
-| 一致性哈希查询失败 | 随机选择节点 | 不可以 |
-| 哈希环变化或 service-discovery 视图分裂 | 新旧节点可能同时处理同一 UID | 不可以 |
+| Stateful 路由缺少稳定 key 或一致性哈希查询失败 | 返回明确错误，不随机降级 | 请求未执行；调用方应重试或恢复 routing key |
+| 哈希环变化或 service-discovery 视图分裂 | registration/hop fencing 拒绝同一 server identity 的旧 epoch；不同 server ID 之间仍可能同时处理同一 UID | 不可以 |
 | 任务超过 `RunningTaskTimeout` 且允许 escape | replacement 继续消费，旧任务仍可能运行 | 不可以 |
 | 进程退出 | 内存队列丢失 | 不提供持久化和 exactly-once |
-| RPC 重试、消息重投 | 可能重复执行 | 需要业务幂等 |
+| RPC 重试、消息重投 | 带稳定 idempotency key 的 RPC 可在所用 store 范围内去重；无 key 或 store 丢失时仍可能重复 | 仍需业务幂等和持久 store |
 
 ## 任务顺序如何定义
 
@@ -371,11 +371,11 @@ cfg.GoPools[co.UserGoPoolName] = config.GoPool{
 | escape budget 耗尽 | 不再启动 replacement，该 ID 保持被旧任务阻塞 | 告警并处置旧任务或进程，不自动扩大预算 |
 | UID 队列达到容量 | blocking submit 可能等待，nonblocking submit 可能拒绝 | 限制单 UID 流量，设置入口背压和超时 |
 | backend 进程退出 | 在途任务和内存队列丢失 | command 幂等，必要时使用持久有序队列 |
-| 节点加入或离开 | UID 可能映射到新节点，旧节点仍有在途任务 | owner drain、epoch 和 fencing |
-| 一致性哈希查询失败 | 当前随机降级 | 监控并重试，框架应改成 fail-closed |
+| 节点加入或离开 | UID 可能映射到新节点；registration/hop fencing 不会停止旧节点已进入 handler 的任务或业务存储写入 | per-UID owner drain，并在状态层校验 epoch/version |
+| 一致性哈希查询失败 | Stateful route fail-closed 并返回原始查询错误 | 监控并按业务策略重试，不要改为随机节点 |
 | gRPC 入站 | 绕过 keyed executor | 不依赖串行，或在 server interceptor/handler 前补统一 dispatch |
 | session 从 SID 切换到 UID | 两个 lane 可能短暂并行 | 绑定协议加屏障，客户端等待绑定响应 |
-| RPC 重试或消息重投 | 同一 command 可能执行多次 | request ID 去重或状态版本校验 |
+| RPC 重试或消息重投 | 稳定 idempotency key 在配置的 store 范围内去重；Cluster Builder 默认 Redis store 可跨进程 replay，直接构造的服务仍默认内存 | 对业务副作用做事务内 request ID/version 校验；completion 前崩溃仍可能重放 |
 
 进程内队列不能恢复崩溃前尚未执行的任务。需要 durable ordering 的业务应把 UID 作为消息分区 key，使用持久有序日志，再由单个 consumer owner 提交到本地 lane。
 
@@ -416,10 +416,10 @@ cfg.GoPools[co.UserGoPoolName] = config.GoPool{
 框架只有完成以下改造后，才能把承诺从稳态 UID 串行提升为故障场景下的全局单写者：
 
 1. 所有入站 transport、后台入口和系统回调统一经过一个 key dispatcher，gRPC 不能直接调用业务服务。
-2. 有 key 的 stateful route 在哈希或绑定查询失败时 fail-closed，不随机降级。
+2. 有 key 的 stateful route 在哈希或绑定查询失败时 fail-closed，不随机降级。当前默认路由已满足这一点。
 3. 明确一致性策略。严格顺序的 pool 禁止 running escape；允许 escape 的业务写入必须校验 fencing token 或状态版本。
-4. backend owner 交接包含 drain、epoch 和 fencing。新 owner 生效后，存储拒绝旧 owner 的迟到写入。
-5. command 携带 request ID；需要跨生产者顺序时再携带 sequence，并在状态层去重和校验版本。
+4. backend owner 交接包含 per-UID drain、epoch 和 fencing。当前 server registration 和 RPC hop 已有 epoch；仍需让新 owner 生效后由存储拒绝旧 owner 的迟到写入。
+5. command 携带 request ID；Worker/RPC 已支持稳定 idempotency key，Cluster Builder 默认使用 Redis store，且 handler 可读取 opaque command identity。Redis completion 与业务存储之间仍有 at-least-once 窗口，需要跨生产者顺序时再携带 sequence，并在业务事务内持久去重和校验版本。
 6. session 从 SID key 切换到 UID key 时执行队列迁移或 drain/activate 屏障。
 7. 根据 UID 基数选择 64 位/string key 或固定 hash shard，避免 CRC32 碰撞和 owner 数无界增长。
 
@@ -427,7 +427,7 @@ cfg.GoPools[co.UserGoPoolName] = config.GoPool{
 
 ## 后续 source-complete 验证目标
 
-下列项目是完整一致性声明所需的目标矩阵，不代表当前分支已经全部通过。当前批次的实际测试证据记录在 {doc}`testing` 及对应提交说明中；尤其 gRPC parity、跨节点 owner epoch 和持久 command 恢复仍未实现。
+下列项目是完整一致性声明所需的目标矩阵，不代表当前分支已经全部通过。当前批次的实际测试证据记录在 {doc}`testing` 及对应提交说明中；尤其 gRPC keyed-dispatch parity、per-UID owner handoff/drain、业务存储写入 fencing 和持久 command 恢复仍未实现。跨节点 server registration epoch 与逐 hop RPC admission fencing 已实现。
 
 ### 单元测试
 

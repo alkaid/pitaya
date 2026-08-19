@@ -2,6 +2,7 @@ package groups
 
 import (
 	"context"
+	"sort"
 	"sync"
 	"time"
 
@@ -76,8 +77,11 @@ func (c *MemoryGroupService) GroupCreateWithTTL(ctx context.Context, groupName s
 
 // GroupMembers returns all member's UID in given group
 func (c *MemoryGroupService) GroupMembers(ctx context.Context, groupName string) ([]string, error) {
-	memoryGroupsMu.Lock()
-	defer memoryGroupsMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	memoryGroupsMu.RLock()
+	defer memoryGroupsMu.RUnlock()
 
 	mg, ok := memoryGroups[groupName]
 	if !ok {
@@ -90,10 +94,53 @@ func (c *MemoryGroupService) GroupMembers(ctx context.Context, groupName string)
 	return uids, nil
 }
 
+// GroupMembersPage returns one bounded page ordered by UID.
+func (c *MemoryGroupService) GroupMembersPage(ctx context.Context, groupName string, options MemberPageOptions) (MemberPage, error) {
+	if err := ctx.Err(); err != nil {
+		return MemberPage{}, err
+	}
+	options, err := normalizeMemberPageOptions(options)
+	if err != nil {
+		return MemberPage{}, err
+	}
+	cursor, err := decodeMemberCursor(options.Cursor)
+	if err != nil {
+		return MemberPage{}, err
+	}
+
+	memoryGroupsMu.RLock()
+	mg, ok := memoryGroups[groupName]
+	if !ok {
+		memoryGroupsMu.RUnlock()
+		return MemberPage{}, constants.ErrGroupNotFound
+	}
+	start := 0
+	if cursor != "" {
+		start = sort.Search(len(mg.Uids), func(i int) bool { return mg.Uids[i] > cursor })
+	}
+	end := min(start+options.Limit, len(mg.Uids))
+	page := MemberPage{Members: append([]string(nil), mg.Uids[start:end]...)}
+	hasMore := end < len(mg.Uids)
+	memoryGroupsMu.RUnlock()
+	if err := ctx.Err(); err != nil {
+		return MemberPage{}, err
+	}
+	if hasMore && len(page.Members) > 0 {
+		page.NextCursor = encodeMemberCursor(page.Members[len(page.Members)-1])
+	}
+	if err := validateBuiltInMemberPage(options, page); err != nil {
+		return MemberPage{}, err
+	}
+	return page, nil
+}
+
 // GroupContainsMember check whether an UID is contained in given group or not
 func (c *MemoryGroupService) GroupContainsMember(ctx context.Context, groupName, uid string) (bool, error) {
-	memoryGroupsMu.Lock()
-	defer memoryGroupsMu.Unlock()
+	if uid == "" {
+		return false, constants.ErrEmptyUID
+	}
+	memoryGroupsMu.RLock()
+	defer memoryGroupsMu.RUnlock()
 
 	mg, ok := memoryGroups[groupName]
 	if !ok {
@@ -106,6 +153,9 @@ func (c *MemoryGroupService) GroupContainsMember(ctx context.Context, groupName,
 
 // GroupAddMember adds UID to group
 func (c *MemoryGroupService) GroupAddMember(ctx context.Context, groupName, uid string) error {
+	if uid == "" {
+		return constants.ErrEmptyUID
+	}
 	memoryGroupsMu.Lock()
 	defer memoryGroupsMu.Unlock()
 
@@ -114,18 +164,23 @@ func (c *MemoryGroupService) GroupAddMember(ctx context.Context, groupName, uid 
 		return constants.ErrGroupNotFound
 	}
 
-	_, contains := elementIndex(mg.Uids, uid)
+	index, contains := elementIndex(mg.Uids, uid)
 	if contains {
 		return constants.ErrMemberAlreadyExists
 	}
 
-	mg.Uids = append(mg.Uids, uid)
+	mg.Uids = append(mg.Uids, "")
+	copy(mg.Uids[index+1:], mg.Uids[index:])
+	mg.Uids[index] = uid
 	memoryGroups[groupName] = mg
 	return nil
 }
 
 // GroupRemoveMember removes specific UID from group
 func (c *MemoryGroupService) GroupRemoveMember(ctx context.Context, groupName, uid string) error {
+	if uid == "" {
+		return constants.ErrEmptyUID
+	}
 	memoryGroupsMu.Lock()
 	defer memoryGroupsMu.Unlock()
 
@@ -135,7 +190,8 @@ func (c *MemoryGroupService) GroupRemoveMember(ctx context.Context, groupName, u
 	}
 	index, contains := elementIndex(mg.Uids, uid)
 	if contains {
-		mg.Uids[index] = mg.Uids[len(mg.Uids)-1]
+		copy(mg.Uids[index:], mg.Uids[index+1:])
+		mg.Uids[len(mg.Uids)-1] = ""
 		mg.Uids = mg.Uids[:len(mg.Uids)-1]
 		memoryGroups[groupName] = mg
 		return nil
@@ -174,8 +230,8 @@ func (c *MemoryGroupService) GroupDelete(ctx context.Context, groupName string) 
 
 // GroupCountMembers get current member amount in group
 func (c *MemoryGroupService) GroupCountMembers(ctx context.Context, groupName string) (int, error) {
-	memoryGroupsMu.Lock()
-	defer memoryGroupsMu.Unlock()
+	memoryGroupsMu.RLock()
+	defer memoryGroupsMu.RUnlock()
 
 	mg, ok := memoryGroups[groupName]
 	if !ok {

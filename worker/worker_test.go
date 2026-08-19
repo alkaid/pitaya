@@ -3,19 +3,40 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/alkaid/ants/v2"
+	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/constants"
+	pcontext "github.com/alkaid/pitaya/v2/context"
 	workers "github.com/alkaid/pitaya/v2/internal/workers"
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/worker/mocks"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
+	"google.golang.org/protobuf/proto"
 )
+
+func TestNewWorkerRejectsUnreadableTLSBeforeConfiguringRuntime(t *testing.T) {
+	workerConfig := config.NewDefaultPitayaConfig().Worker
+	secretPath := filepath.Join(t.TempDir(), "tenant-secret-ca.pem")
+	workerConfig.Redis.TLS = config.TLSConfig{Enabled: true, CAFile: secretPath}
+	previousConfig := workers.Config
+
+	worker, err := NewWorker(workerConfig, workerConfig.Retry)
+	require.Error(t, err)
+	assert.Nil(t, worker)
+	assert.Contains(t, err.Error(), "pitaya.worker.redis.tls.cafile")
+	assert.NotContains(t, err.Error(), secretPath)
+	assert.Same(t, previousConfig, workers.Config)
+	assert.NotContains(t, fmt.Sprint(err), secretPath)
+}
 
 const workerSubmissionErrorHelperEnv = "PITAYA_TEST_WORKER_SUBMISSION_ERROR"
 
@@ -24,6 +45,23 @@ type legacyWorkerStarter interface {
 }
 
 var _ legacyWorkerStarter = (*Worker)(nil)
+
+type capturingRPCJob struct {
+	ctx context.Context
+}
+
+func (j *capturingRPCJob) ServerDiscovery(string, map[string]interface{}) (string, error) {
+	return "server-1", nil
+}
+
+func (j *capturingRPCJob) RPC(ctx context.Context, _, _ string, _, _ proto.Message) error {
+	j.ctx = ctx
+	return nil
+}
+
+func (j *capturingRPCJob) GetArgReply(string) (proto.Message, proto.Message, error) {
+	return &protos.BindMsg{}, &protos.BindMsg{}, nil
+}
 
 func TestStartPropagatesSubmissionError(t *testing.T) {
 	if os.Getenv(workerSubmissionErrorHelperEnv) != "1" {
@@ -114,7 +152,6 @@ func TestParsedRPCJob(t *testing.T) {
 		testErr    = errors.New("error")
 		route      = "server.svc.method"
 		serverID   = "serverid"
-		ctx        = context.Background()
 	)
 
 	tables := map[string]struct {
@@ -214,7 +251,7 @@ func TestParsedRPCJob(t *testing.T) {
 					ServerDiscovery(route, map[string]interface{}{"stack": "a"}).
 					Return(serverID, nil)
 				mockRPCJob.EXPECT().
-					RPC(ctx, serverID, route, &protos.BindMsg{}, &protos.BindMsg{Uid: "string"}).
+					RPC(gomock.Any(), serverID, route, &protos.BindMsg{}, &protos.BindMsg{Uid: "string"}).
 					Return(testErr)
 			},
 			assert: func(f func(*workers.Msg), m *workers.Msg) {
@@ -241,7 +278,7 @@ func TestParsedRPCJob(t *testing.T) {
 					ServerDiscovery(route, map[string]interface{}{"stack": "a"}).
 					Return(serverID, nil)
 				mockRPCJob.EXPECT().
-					RPC(ctx, serverID, route, &protos.BindMsg{}, &protos.BindMsg{Uid: "string"})
+					RPC(gomock.Any(), serverID, route, &protos.BindMsg{}, &protos.BindMsg{Uid: "string"})
 			},
 			assert: func(f func(*workers.Msg), m *workers.Msg) {
 				assert.NotPanics(t, func() { f(m) })
@@ -261,4 +298,20 @@ func TestParsedRPCJob(t *testing.T) {
 			table.assert(worker.parsedRPCJob(mockRPCJob), table.arg)
 		})
 	}
+}
+
+func TestParsedRPCJobPropagatesStableJobIDAsIdempotencyKey(t *testing.T) {
+	msg, err := workers.NewMsg(`{
+		"jid": "job-stable-123",
+		"args": {
+			"route": "server.svc.method",
+			"arg": {"uid": "user-1"},
+			"metadata": {}
+		}
+	}`)
+	assert.NoError(t, err)
+
+	job := &capturingRPCJob{}
+	assert.NotPanics(t, func() { (&Worker{}).parsedRPCJob(job)(msg) })
+	assert.Equal(t, "job-stable-123", pcontext.GetFromPropagateCtx(job.ctx, constants.IdempotencyKey))
 }

@@ -73,6 +73,18 @@ func GetLoggerFromCtx(ctx context.Context) *zap.Logger {
 	return l
 }
 
+// LogRecoveredPanic records a recovered panic without invoking methods on the
+// recovered value. Logging is best-effort because custom Zap cores are allowed
+// to panic and must not escape a recovery boundary.
+func LogRecoveredPanic(log *zap.Logger, message string, recovered any, fields ...zap.Field) {
+	defer func() { _ = recover() }()
+	if log == nil {
+		return
+	}
+	fields = append(fields, zap.String("panic_type", fmt.Sprintf("%T", recovered)))
+	log.Error(message, fields...)
+}
+
 // SafeCall 安全调用方法,会 recover() 并打印 runtime error
 //
 // @param onRecovered panic恢复后的回调
@@ -83,7 +95,7 @@ func SafeCall(onRecovered func(rec any), method func()) {
 			// Try to use logger from context here to help trace error cause
 			stackTrace := debug.Stack()
 			stackTraceAsRawStringLiteral := strconv.Quote(string(stackTrace))
-			logger.Zap.DPanic("panic - pitaya method", zap.Any("panicData", rec), zap.String("stack", stackTraceAsRawStringLiteral))
+			LogRecoveredPanic(logger.Zap, "panic - pitaya method", rec, zap.String("stack", stackTraceAsRawStringLiteral))
 			if onRecovered == nil {
 				return
 			}
@@ -101,12 +113,18 @@ func Pcall(method reflect.Method, args []reflect.Value) (rets interface{}, err e
 			stackTrace := debug.Stack()
 			stackTraceAsRawStringLiteral := strconv.Quote(string(stackTrace))
 			log := getLoggerFromArgs(args)
-			log.DPanic("panic - pitaya/dispatch", zap.String("methodName", method.Name), zap.Any("panicData", rec), zap.String("stack", stackTraceAsRawStringLiteral))
+			LogRecoveredPanic(
+				log,
+				"panic - pitaya/dispatch",
+				rec,
+				zap.String("methodName", method.Name),
+				zap.String("stack", stackTraceAsRawStringLiteral),
+			)
 
 			if s, ok := rec.(string); ok {
 				err = errors.New(s)
 			} else {
-				err = fmt.Errorf("rpc call internal error - %s: %v", method.Name, rec)
+				err = fmt.Errorf("rpc call internal error - %s", method.Name)
 			}
 		}
 	}()
@@ -246,13 +264,23 @@ func CtxWithDefaultLogger(ctx context.Context, route, userID string) context.Con
 
 // GetContextFromRequest gets the context from a request
 func GetContextFromRequest(req *protos.Request, serverID string, uid string) (context.Context, error) {
-	ctx, err := pcontext.Decode(req.GetMetadata())
+	return GetContextFromRequestContext(context.Background(), req, serverID, uid)
+}
+
+// GetContextFromRequestContext decodes propagated request metadata while
+// retaining the transport context's cancellation and deadline.
+func GetContextFromRequestContext(parent context.Context, req *protos.Request, serverID string, uid string) (context.Context, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	decoded, err := pcontext.Decode(req.GetMetadata())
 	if err != nil {
 		return nil, err
 	}
-	if ctx == nil {
+	if decoded == nil {
 		return nil, errors.WithStack(constants.ErrNoContextFound)
 	}
+	ctx := context.WithValue(parent, constants.PropagateCtxKey, pcontext.ToMap(decoded))
 
 	requestID := pcontext.GetFromPropagateCtx(ctx, constants.RequestIDKey)
 	if rID, ok := requestID.(string); !ok || (ok && rID == "") {

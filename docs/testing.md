@@ -21,6 +21,12 @@ testing-server process tree relies on Linux parent-death signaling. The standalo
 NATS lane fails before starting Docker on other platforms; `make verify` reaches
 that check after its Redis integration lane.
 
+Linux/amd64 is the supported runtime and full verification platform. The Tests
+workflow also runs `make compile-platform TARGET_GOOS=<darwin|windows>` for
+Darwin/amd64 and Windows/amd64 with `CGO_ENABLED=0`. These lanes compile all
+root, CLI, and xk6 packages without executing their test binaries; they are not
+claims of runtime, Docker, external-service, signal, or production support.
+
 ## Fast source gate
 
 ```sh
@@ -84,13 +90,23 @@ make test-distribution
 The Redis integration harness starts only the digest-pinned Redis service in a
 unique Compose project. It uses a dynamic literal IPv4 loopback port, health-based
 readiness, bounded client timeouts, and a short-lived sentinel written from
-inside the container. The tagged test refuses to write until that sentinel
-matches and its UUID session key is absent, then exercises the public session
-pool and Redis cache APIs and checks the exact five-field hash. Cleanup deletes
-only that confirmed-owned key and removes only the harness's project and volumes.
-Missing configuration, an invalid address, a zero-match test, a skipped test, or
-failed teardown is an error. The Tests workflow runs this lane only on `main`
-pushes and manual dispatches.
+inside the container. It compiles separate tagged session and service test
+binaries and requires each inventory to contain its exact named test.
+
+The session test refuses to write until the sentinel matches and its UUID key is
+absent, then exercises the public session pool and Redis cache APIs and checks the
+exact five-field hash and TTL repair paths. The service test uses two independent
+Redis clients to cover command coalescing, completed replay, fingerprint conflict,
+heartbeat renewal, waiter cancellation, result expiry, stale-owner completion
+fencing, live callback overlap after lease loss, abrupt process takeover, and the
+at-least-once window between a business write and completion CAS. Every service
+key is unique, checked absent before use, and deleted exactly during cleanup.
+
+Both binaries must publish their own exact completion proof after successful
+cleanup. Missing configuration, an invalid address or sentinel, a zero-match
+inventory, a skipped or empty test, a mismatched proof, or failed teardown is an
+error. The harness removes only its owned Compose project and volumes. The Tests
+workflow runs this lane on pull requests, `main` pushes, and manual dispatches.
 
 The NATS E2E script creates a unique Compose project, binds dynamically selected
 loopback ports, waits for health and application readiness, and owns cleanup for
@@ -115,9 +131,11 @@ make coverage-gate \
 ```
 
 `make coverage` keeps the reporting workflow available on an uncommitted
-working tree. The regression gate requires `make coverage-stamped`, which runs
-the same root tests with committed root and coverage-verifier sources, then
-atomically writes `<profile>.meta.json`. The sidecar binds the exact profile bytes to the checked
+working tree. Both coverage commands instrument every root-module package with
+`-coverpkg=./...`, so behavior exercised through another package is credited to
+the production package it reaches. The regression gate requires
+`make coverage-stamped`, which runs the same root tests with committed root and
+coverage-verifier sources, then atomically writes `<profile>.meta.json`. The sidecar binds the exact profile bytes to the checked
 out commit and the policy platform; failed generation removes the prior
 sidecar. `check` rejects a changed profile, a different checkout, symbolic or
 equal diff endpoints, and a policy baseline that is not an ancestor of the

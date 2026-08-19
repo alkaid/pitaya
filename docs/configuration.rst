@@ -34,6 +34,159 @@ Forwarded chains are limited to 4 KiB and 32 addresses. Invalid or oversized
 chains are ignored as a whole and fall back to the socket peer. See
 :doc:`security` for deployment constraints and examples.
 
+Infrastructure TLS and Authentication
+=====================================
+
+Client TLS is available at each of these prefixes:
+
+* ``pitaya.cluster.rpc.client.nats.tls``
+* ``pitaya.cluster.rpc.server.nats.tls``
+* ``pitaya.cluster.sd.etcd.tls``
+* ``pitaya.groups.etcd.tls``
+* ``pitaya.modules.bindingstorage.etcd.tls``
+* ``pitaya.storage.redis.tls``
+* ``pitaya.worker.redis.tls``
+
+Every prefix accepts the same five fields. TLS is disabled by default and file
+changes require a process restart.
+
+.. list-table::
+  :widths: 25 10 10 45
+  :header-rows: 1
+  :stub-columns: 1
+
+  * - Configuration suffix
+    - Default value
+    - Type
+    - Description
+  * - enabled
+    - false
+    - bool
+    - Enables client TLS; configuring another TLS field while this is false is rejected
+  * - cafile
+    - ""
+    - string
+    - PEM CA bundle; an empty value uses the system root store
+  * - certfile
+    - ""
+    - string
+    - PEM client certificate; must be configured together with ``keyfile``
+  * - keyfile
+    - ""
+    - string
+    - Private key for ``certfile``; must be configured together with it
+  * - servername
+    - ""
+    - string
+    - Optional TLS server-name override used for certificate verification
+
+TLS requires version 1.2 or newer. Certificate material is loaded when the
+owning client is constructed; unreadable or invalid files fail startup without
+falling back to plaintext.
+
+NATS authentication is configured below both
+``pitaya.cluster.rpc.client.nats.auth`` and
+``pitaya.cluster.rpc.server.nats.auth``. Select at most one complete mode per
+connection; empty fields retain anonymous access. Credentials in NATS URL
+userinfo are rejected.
+
+.. list-table::
+  :widths: 25 10 10 45
+  :header-rows: 1
+  :stub-columns: 1
+
+  * - Configuration suffix
+    - Default value
+    - Type
+    - Description
+  * - username
+    - ""
+    - string
+    - Username mode; must be configured together with ``password``
+  * - password
+    - ""
+    - string
+    - Password paired with ``username``
+  * - token
+    - ""
+    - string
+    - Token authentication mode
+  * - credentialsfile
+    - ""
+    - string
+    - NATS credentials file authentication mode; changes require restart
+
+Session Redis authentication uses the following fields. Its TLS prefix is
+``pitaya.storage.redis.tls`` as listed above.
+
+.. list-table::
+  :widths: 25 10 10 45
+  :header-rows: 1
+  :stub-columns: 1
+
+  * - Configuration
+    - Default value
+    - Type
+    - Description
+  * - pitaya.storage.redis.username
+    - ""
+    - string
+    - Redis ACL username; requires ``pitaya.storage.redis.password``
+  * - pitaya.storage.redis.password
+    - ""
+    - string
+    - Redis password; may be used alone for the default Redis user
+
+RPC Idempotency
+===============
+
+Cluster builders use the session Redis connection for the default durable RPC
+idempotency store. Direct ``RemoteService`` construction retains a bounded
+in-memory store unless the application injects another implementation.
+
+.. list-table::
+  :widths: 32 14 12 42
+  :header-rows: 1
+  :stub-columns: 1
+
+  * - Configuration
+    - Default value
+    - Type
+    - Description
+  * - pitaya.cluster.rpc.idempotency.enabled
+    - true
+    - bool
+    - Enables the Redis-backed store for Cluster builders; false selects the process-local fallback
+  * - pitaya.cluster.rpc.idempotency.keyprefix
+    - pitaya:rpc:idempotency:
+    - string
+    - Redis key prefix shared by every server participating in the same command scope
+  * - pitaya.cluster.rpc.idempotency.resultttl
+    - 15m
+    - time.Duration
+    - Retention period for a completed response or error
+  * - pitaya.cluster.rpc.idempotency.leasettl
+    - 30s
+    - time.Duration
+    - Running-owner lease; expiry permits another process to execute the command
+  * - pitaya.cluster.rpc.idempotency.heartbeatinterval
+    - 10s
+    - time.Duration
+    - Interval between running-owner lease renewals
+  * - pitaya.cluster.rpc.idempotency.pollinterval
+    - 25ms
+    - time.Duration
+    - Maximum wait between checks while another process owns the command
+  * - pitaya.cluster.rpc.idempotency.operationtimeout
+    - 3s
+    - time.Duration
+    - Timeout for each Redis claim, renewal, or completion operation
+
+All durations must be positive. ``heartbeatinterval + operationtimeout`` must
+be less than ``leasettl``. The store provides cross-process replay but cannot
+atomically commit an unrelated business database; see :doc:`migration-v2-ak`
+and :doc:`security` for failure and ACL requirements.
+
 Service Discovery
 =================
 
@@ -127,7 +280,7 @@ The configurations only need to be set if the RPC Service is enabled with the gi
   * - pitaya.cluster.rpc.fanout_concurrency
     - 32
     - int
-    - Maximum RPCs started concurrently by each fanout call; non-positive values use 32, and concurrent calls have independent budgets
+    - Maximum RPCs started concurrently by each fanout call; must be positive, and concurrent calls have independent budgets
   * - pitaya.cluster.rpc.server.nats.buffer.messages
     - 75
     - int
@@ -181,9 +334,9 @@ The configurations only need to be set if the RPC Service is enabled with the gi
     - int
     - The port that the gRPC server listens to
   * - pitaya.cluster.rpc.server.nats.services
-    - 30
+    - 1
     - int
-    - Number of goroutines processing messages at the remote service for the nats RPC service
+    - Compatibility field; must be 1 so the ordered dispatcher admits messages before keyed execution
   * - pitaya.worker.redis.url
     - localhost:6379
     - string
@@ -192,10 +345,14 @@ The configurations only need to be set if the RPC Service is enabled with the gi
     - 10
     - string
     - Number of connections to keep with Redis
+  * - pitaya.worker.redis.username
+    - ""
+    - string
+    - Redis ACL username; requires ``pitaya.worker.redis.password`` and uses two-argument AUTH
   * - pitaya.worker.redis.password
     - ""
     - string
-    - Redis password to connect to pitaya workers redis
+    - Redis password; may be used alone for the default Redis user
   * - pitaya.worker.concurrency
     - 1
     - int
@@ -440,6 +597,14 @@ peer authentication, keyed dispatch parity, or transport security; see
     - 5s
     - time.Time
     - Timeout to establish the etcd connection
+  * - pitaya.modules.bindingstorage.etcd.user
+    - ""
+    - string
+    - etcd username; must be configured together with ``pass``
+  * - pitaya.modules.bindingstorage.etcd.pass
+    - ""
+    - string
+    - etcd password; must be configured together with ``user``
   * - pitaya.modules.bindingstorage.etcd.leasettl
     - 1h
     - time.Time
@@ -490,6 +655,14 @@ These configurations are used for group services implementations.
     - 5s
     - time.Time
     - Timeout to establish the etcd group connection
+  * - pitaya.groups.etcd.user
+    - ""
+    - string
+    - etcd username; must be configured together with ``pass``
+  * - pitaya.groups.etcd.pass
+    - ""
+    - string
+    - etcd password; must be configured together with ``user``
   * - pitaya.groups.etcd.transactiontimeout
     - 5s
     - time.Duration

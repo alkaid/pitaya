@@ -81,6 +81,9 @@ func (r *Router) defaultRoute(
 	for _, v := range servers {
 		srvList = append(srvList, v)
 	}
+	if len(srvList) == 0 {
+		return nil, constants.ErrNoServersAvailableOfType
+	}
 	server := srvList[rand.IntN(len(srvList))]
 	var err error
 	if session != nil {
@@ -100,13 +103,12 @@ func (r *Router) defaultRoute(
 			} else if session.GetFrontendID() != "" && session.GetFrontendSessionID() > 0 {
 				svId, err = r.serviceDiscovery.GetConsistentHashNode(svType, fmt.Sprintf("%s-%d", session.GetFrontendID(), session.GetFrontendSessionID()))
 			} else {
-				logW.Debug("normal backend route request try consist hash failed,change by random")
-				return server, nil
+				return nil, fmt.Errorf("%w: server type %s", constants.ErrStatefulRouteKeyNotFound, svType)
 			}
-			// 获取不到hash node则随机路由
+			// A stateful route must never fall back to a random owner.
 			if err != nil {
-				logW.Error("route by consist hash error,will route random", zap.Error(err), zap.String("svID", server.ID))
-				return server, nil
+				logW.Error("route by consistent hash failed", zap.Error(err), zap.String("svType", svType))
+				return nil, errors.WithStack(err)
 			}
 		}
 		if svId != "" {

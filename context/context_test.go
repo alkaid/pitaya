@@ -28,10 +28,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/helpers"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var update = flag.Bool("update", false, "update .golden files")
@@ -209,5 +209,25 @@ func TestDecodeFailsIfBadEncodedData(t *testing.T) {
 func TestDecodeWithEmptyData(t *testing.T) {
 	decoded, err := Decode([]byte(""))
 	assert.Nil(t, err)
+	assert.Nil(t, decoded)
+}
+
+func TestMetricTagsSurviveEncodeDecode(t *testing.T) {
+	want := map[string]string{"region": "eu", "transport": "nats"}
+	ctx := AddToPropagateCtx(context.Background(), constants.MetricTagsKey, want)
+
+	encoded, err := Encode(ctx)
+	require.NoError(t, err)
+	decoded, err := Decode(encoded)
+	require.NoError(t, err)
+
+	assert.Equal(t, want, GetFromPropagateCtx(decoded, constants.MetricTagsKey))
+}
+
+func TestDecodeRejectsNonStringMetricTags(t *testing.T) {
+	decoded, err := Decode([]byte(`{"metric-tags":{"attempt":2}}`))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `metric tag "attempt" must be a string`)
 	assert.Nil(t, decoded)
 }

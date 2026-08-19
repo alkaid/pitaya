@@ -19,9 +19,12 @@ compose_file=$repo_root/examples/testing/docker-compose.yml
 tmpdir=
 project_name=
 owner_file=
-test_binary=
-proof_path=
-proof_expected=
+session_test_binary=
+service_test_binary=
+session_proof_path=
+service_proof_path=
+session_proof_expected=
+service_proof_expected=
 compose=()
 bounded_timeout=("$timeout_command" --signal=TERM --kill-after=5s)
 compose_attempted=0
@@ -135,10 +138,14 @@ chmod 700 "$tmpdir"
 nonce=$(printf '%s' "${tmpdir##*.}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
 project_name="pitaya-integration-${nonce}-$$"
 owner_file=$tmpdir/compose.owner
-test_binary=$tmpdir/session-integration.test
-proof_path=$tmpdir/test.proof
-proof_expected=$tmpdir/test.proof.expected
-inventory_output=$tmpdir/test.inventory
+session_test_binary=$tmpdir/session-integration.test
+service_test_binary=$tmpdir/service-integration.test
+session_proof_path=$tmpdir/session-test.proof
+service_proof_path=$tmpdir/service-test.proof
+session_proof_expected=$tmpdir/session-test.proof.expected
+service_proof_expected=$tmpdir/service-test.proof.expected
+session_inventory_output=$tmpdir/session-test.inventory
+service_inventory_output=$tmpdir/service-test.inventory
 project_output=$tmpdir/compose.project
 port_output=$tmpdir/redis.port
 sentinel_output=$tmpdir/redis.sentinel
@@ -155,14 +162,24 @@ random_uuid() {
 		"${hex:0:8}" "${hex:8:4}" "${hex:12:4}" "${hex:16:4}" "${hex:20:12}"
 }
 
-test_name=TestFlushFrontendDataRedisRoundTrip
+session_test_name=TestFlushFrontendDataRedisRoundTrip
+service_test_name=TestRedisIdempotencyStoreRedisIntegration
 run_active "${bounded_timeout[@]}" 5m env GOWORK=off GOFLAGS= \
-	go test -c -tags=integration -o "$test_binary" ./session
-run_active "${bounded_timeout[@]}" 10s "$test_binary" \
-	-test.list "^${test_name}$" >"$inventory_output"
-list_output=$(<"$inventory_output")
-if [[ $list_output != "$test_name" ]]; then
-	echo "integration test inventory mismatch: expected exactly $test_name" >&2
+	go test -c -tags=integration -o "$session_test_binary" ./session
+run_active "${bounded_timeout[@]}" 5m env GOWORK=off GOFLAGS= \
+	go test -c -tags=integration -o "$service_test_binary" ./service
+run_active "${bounded_timeout[@]}" 10s "$session_test_binary" \
+	-test.list "^${session_test_name}$" >"$session_inventory_output"
+session_list_output=$(<"$session_inventory_output")
+if [[ $session_list_output != "$session_test_name" ]]; then
+	echo "session integration test inventory mismatch: expected exactly $session_test_name" >&2
+	exit 1
+fi
+run_active "${bounded_timeout[@]}" 10s "$service_test_binary" \
+	-test.list "^${service_test_name}$" >"$service_inventory_output"
+service_list_output=$(<"$service_inventory_output")
+if [[ $service_list_output != "$service_test_name" ]]; then
+	echo "service integration test inventory mismatch: expected exactly $service_test_name" >&2
 	exit 1
 fi
 
@@ -194,8 +211,10 @@ owner_id=$(random_uuid)
 owner_key="pitaya:test:ownership:$owner_id"
 owner_token=$(random_uuid)
 session_uid=$(random_uuid)
-proof_token=$(random_uuid)
-printf '%s\n' "$proof_token" >"$proof_expected"
+session_proof_token=$(random_uuid)
+service_proof_token=$(random_uuid)
+printf '%s\n' "$session_proof_token" >"$session_proof_expected"
+printf '%s\n' "$service_proof_token" >"$service_proof_expected"
 
 run_active "${bounded_timeout[@]}" 10s "${compose[@]}" exec -T redis \
 	redis-cli --raw SET "$owner_key" "$owner_token" EX 120 NX >"$sentinel_output"
@@ -210,15 +229,35 @@ run_active "${bounded_timeout[@]}" 130s env \
 	PITAYA_INTEGRATION_REDIS_OWNER_KEY="$owner_key" \
 	PITAYA_INTEGRATION_REDIS_OWNER_TOKEN="$owner_token" \
 	PITAYA_INTEGRATION_SESSION_UID="$session_uid" \
-	PITAYA_INTEGRATION_PROOF_PATH="$proof_path" \
-	PITAYA_INTEGRATION_PROOF_TOKEN="$proof_token" \
-	"$test_binary" \
-		-test.run="^${test_name}$" \
+	PITAYA_INTEGRATION_PROOF_PATH="$session_proof_path" \
+	PITAYA_INTEGRATION_PROOF_TOKEN="$session_proof_token" \
+	"$session_test_binary" \
+		-test.run="^${session_test_name}$" \
 		-test.count=1 \
 		-test.timeout=2m \
 		-test.v
 
-if [[ ! -f $proof_path || -L $proof_path ]] || ! cmp -s "$proof_expected" "$proof_path"; then
-	echo "integration test did not publish the exact completion proof" >&2
+if [[ ! -f $session_proof_path || -L $session_proof_path ]] || \
+	! cmp -s "$session_proof_expected" "$session_proof_path"; then
+	echo "session integration test did not publish the exact completion proof" >&2
+	exit 1
+fi
+
+run_active "${bounded_timeout[@]}" 190s env \
+	PITAYA_REDIS_URL="redis://127.0.0.1:$redis_port" \
+	PITAYA_INTEGRATION_REDIS_ADDR="127.0.0.1:$redis_port" \
+	PITAYA_INTEGRATION_REDIS_OWNER_KEY="$owner_key" \
+	PITAYA_INTEGRATION_REDIS_OWNER_TOKEN="$owner_token" \
+	PITAYA_INTEGRATION_SERVICE_PROOF_PATH="$service_proof_path" \
+	PITAYA_INTEGRATION_SERVICE_PROOF_TOKEN="$service_proof_token" \
+	"$service_test_binary" \
+		-test.run="^${service_test_name}$" \
+		-test.count=1 \
+		-test.timeout=3m \
+		-test.v
+
+if [[ ! -f $service_proof_path || -L $service_proof_path ]] || \
+	! cmp -s "$service_proof_expected" "$service_proof_path"; then
+	echo "service integration test did not publish the exact completion proof" >&2
 	exit 1
 fi

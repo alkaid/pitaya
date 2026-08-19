@@ -29,11 +29,13 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/gomodule/redigo/redis"
 	"go.uber.org/zap"
 
 	"github.com/alkaid/pitaya/v2/co"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/constants"
+	pcontext "github.com/alkaid/pitaya/v2/context"
 	workers "github.com/alkaid/pitaya/v2/internal/workers"
 	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/logger/interfaces"
@@ -55,27 +57,41 @@ type Worker struct {
 }
 
 // NewWorker configures and returns a *Worker
-func NewWorker(config config.WorkerConfig, opts config.EnqueueOpts) (*Worker, error) {
+func NewWorker(workerConfig config.WorkerConfig, opts config.EnqueueOpts) (*Worker, error) {
 	hostname, err := os.Hostname()
 	if err != nil {
 		return nil, err
 	}
 
-	poolSize, err := strconv.Atoi(config.Redis.Pool)
+	poolSize, err := strconv.Atoi(workerConfig.Redis.Pool)
 	if err != nil {
 		return nil, err
 	}
+	clientTLS, err := config.LoadClientTLS("pitaya.worker.redis.tls", workerConfig.Redis.TLS)
+	if err != nil {
+		return nil, err
+	}
+	dialOptions := make([]redis.DialOption, 0, 2)
+	if clientTLS != nil {
+		dialOptions = append(
+			dialOptions,
+			redis.DialUseTLS(true),
+			redis.DialTLSConfig(clientTLS),
+		)
+	}
 
 	workers.Configure(workers.Options{
-		Address:   config.Redis.ServerURL,
-		Password:  config.Redis.Password,
-		Namespace: config.Namespace,
-		ProcessID: hostname,
-		PoolSize:  poolSize,
+		Address:     workerConfig.Redis.ServerURL,
+		Username:    workerConfig.Redis.Username,
+		Password:    workerConfig.Redis.Password,
+		Namespace:   workerConfig.Namespace,
+		ProcessID:   hostname,
+		PoolSize:    poolSize,
+		DialOptions: dialOptions,
 	})
 
 	return &Worker{
-		concurrency: config.Concurrency,
+		concurrency: workerConfig.Concurrency,
 		opts:        &opts,
 		quit:        workers.QuitAndReset,
 	}, nil
@@ -240,7 +256,7 @@ func (w *Worker) parsedRPCJob(rpcJob RPCJob) func(*workers.Msg) {
 			panic(err)
 		}
 
-		ctx := w.context()
+		ctx := pcontext.AddToPropagateCtx(w.context(), constants.IdempotencyKey, jobArg.Jid())
 
 		logger.Log.Debugf("executing rpc func to %s", rpcInfo.Route)
 		err = rpcJob.RPC(ctx, serverID, rpcInfo.Route, reply, arg)

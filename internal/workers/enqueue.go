@@ -39,14 +39,18 @@ type RetryOptions struct {
 	MaxRand  int `json:"max_rand"`
 }
 
-func generateJid() string {
+func generateJid() (string, error) {
+	return generateJidFrom(rand.Reader)
+}
+
+func generateJidFrom(reader io.Reader) (string, error) {
 	// Return 12 random bytes as 24 character hex
 	b := make([]byte, 12)
-	_, err := io.ReadFull(rand.Reader, b)
+	_, err := io.ReadFull(reader, b)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("generate worker job ID: %w", err)
 	}
-	return fmt.Sprintf("%x", b)
+	return fmt.Sprintf("%x", b), nil
 }
 
 func Enqueue(queue, class string, args interface{}) (string, error) {
@@ -72,12 +76,16 @@ func EnqueueWithOptions(queue, class string, args interface{}, opts EnqueueOptio
 	namespace := config.Namespace
 	access.RUnlock()
 
+	jid, err := generateJid()
+	if err != nil {
+		return "", err
+	}
 	now := nowToSecondsWithNanoPrecision()
 	data := EnqueueData{
 		Queue:          queue,
 		Class:          class,
 		Args:           args,
-		Jid:            generateJid(),
+		Jid:            jid,
 		EnqueuedAt:     now,
 		EnqueueOptions: opts,
 	}

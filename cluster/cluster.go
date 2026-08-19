@@ -56,8 +56,14 @@ type RPCClient interface {
 	SendKick(userID string, serverType string, kick *protos.KickMsg) error
 	// Deprecated:Use Fork instead
 	BroadcastSessionBind(uid string) error
+	// Call validates the concrete target's ownership and replaces hop-level
+	// fencing metadata before sending the request.
 	Call(ctx context.Context, rpcType protos.RPCType, route *route.Route, session session.Session, msg *message.Message, server *Server) (*protos.Response, error)
-	// Fork 广播给同类型实例
+	// Fork broadcasts to instances of the same server type.
+	//
+	// Deprecated: Use App.Fork or RemoteService.Fork so the framework can resolve
+	// concrete targets. Implementations must fail closed with
+	// constants.ErrRPCForkRequiresTargetResolution while owner fencing is active.
 	//  @param ctx
 	//  @param route
 	//  @param session
@@ -66,7 +72,9 @@ type RPCClient interface {
 	Fork(ctx context.Context, route *route.Route, session session.Session, msg *message.Message) error
 	// Publish @deprecated 通过nats直接发布消息,由于绕过了框架的路由系统，非期望行为，已废弃
 	//
-	// Deprecated:Use Call instead
+	// Deprecated: Use App.Publish or RemoteService.Publish so the framework can
+	// resolve concrete targets. Implementations must fail closed with
+	// constants.ErrRPCPublishRequiresTargetResolution while owner fencing is active.
 	//  @param ctx
 	//  @param rpcType
 	//  @param route

@@ -1482,3 +1482,8 @@ func TestIPVersion(t *testing.T) {
 		})
 	}
 }
+
+func TestClusterCacheKeepAliveIntervalIsAlwaysPositive(t *testing.T) {
+	assert.Equal(t, time.Nanosecond, clusterCacheKeepAliveInterval(time.Nanosecond))
+	assert.Equal(t, 10*time.Millisecond, clusterCacheKeepAliveInterval(100*time.Millisecond))
+}

@@ -212,7 +212,7 @@ func runGenerate(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("remove stale coverage profile: %w", err)
 	}
 
-	command := exec.Command("go", "test", "./...", "-count=1", "-coverprofile="+profile)
+	command := exec.Command("go", "test", "./...", "-count=1", "-coverpkg=./...", "-coverprofile="+profile)
 	command.Dir = repo
 	command.Env = replaceEnvironment(os.Environ(), map[string]string{
 		"GOARCH":  configured.CoveragePlatform.GOARCH,

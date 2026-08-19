@@ -24,9 +24,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/timer"
+	"github.com/stretchr/testify/assert"
 )
 
 type MyCond struct{}
@@ -71,6 +71,11 @@ func TestSetTimerPrecision(t *testing.T) {
 }
 
 func TestSetTimerBacklog(t *testing.T) {
+	originalManager := timer.Manager
+	timer.Manager = timer.NewTimerManager(16)
+	t.Cleanup(func() { timer.Manager = originalManager })
+
 	backlog := 1 << 4
 	SetTimerBacklog(backlog)
+	assert.Equal(t, backlog, cap(timer.Manager.ChCreatedTimer))
 }

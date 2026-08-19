@@ -16,6 +16,7 @@ import (
 	"github.com/alkaid/pitaya/v2/conn/codec"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
+	pcontext "github.com/alkaid/pitaya/v2/context"
 	"github.com/alkaid/pitaya/v2/pipeline"
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/route"
@@ -116,6 +117,62 @@ func newSubscriberServer(id, serverType, service, method string, fork bool) *clu
 	return server
 }
 
+func TestDoForkCrossTypeRoutesPerTargetWithOwnerEpoch(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	sd := clustermocks.NewMockServiceDiscovery(ctrl)
+	targets := map[string]*cluster.Server{
+		"gateway-1": {ID: "gateway-1", Type: "room"},
+		"room-b":    {ID: "room-b", Type: "room"},
+	}
+	targets["gateway-1"].SetOwnerEpoch(41)
+	targets["room-b"].SetOwnerEpoch(42)
+	sd.EXPECT().GetServersByType("room").Return(targets, nil)
+
+	var mu sync.Mutex
+	seen := make(map[string]string, len(targets))
+	var legacyForkCalled atomic.Bool
+	rpcClient := &fanoutRPCClient{
+		call: func(
+			ctx context.Context,
+			rpcType protos.RPCType,
+			calledRoute *route.Route,
+			_ session.Session,
+			msg *message.Message,
+			server *cluster.Server,
+		) (*protos.Response, error) {
+			assert.Equal(t, protos.RPCType_User, rpcType)
+			assert.Equal(t, "room.table.sync", calledRoute.String())
+			assert.Equal(t, message.Notify, msg.Type)
+			assert.Equal(t, "table.sync", msg.Route)
+			assert.Equal(t, server.ID, pcontext.GetFromPropagateCtx(ctx, constants.OwnerServerIDKey))
+
+			mu.Lock()
+			seen[server.ID] = pcontext.GetFromPropagateCtx(ctx, constants.OwnerEpochKey).(string)
+			mu.Unlock()
+			return &protos.Response{}, nil
+		},
+		fork: func(context.Context, *route.Route, session.Session, *message.Message) error {
+			legacyForkCalled.Store(true)
+			return errors.New("type-wide fork cannot carry a target owner epoch")
+		},
+	}
+	svc := NewRemoteService(
+		rpcClient, nil, sd, nil, nil, nil, nil,
+		&cluster.Server{ID: "gateway-1", Type: "gateway"}, nil, nil, nil, nil,
+	)
+
+	err := svc.DoFork(
+		context.Background(),
+		route.NewRoute("room", "table", "sync"),
+		nil,
+		nil,
+	)
+
+	require.NoError(t, err)
+	assert.False(t, legacyForkCalled.Load())
+	assert.Equal(t, map[string]string{"gateway-1": "41", "room-b": "42"}, seen)
+}
+
 func TestDoForkRequestIncludesAllTargetsWhenSelfIsAbsent(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	sd := clustermocks.NewMockServiceDiscovery(ctrl)
@@ -192,14 +249,16 @@ func TestDoForkRequestReturnsOneTarget(t *testing.T) {
 	target := &cluster.Server{ID: "target", Type: "room"}
 	sd.EXPECT().GetServersByType("room").Return(map[string]*cluster.Server{"target": target}, nil)
 
+	marker := make(chan any, 1)
 	rpcClient := &fanoutRPCClient{call: func(
-		_ context.Context,
+		ctx context.Context,
 		_ protos.RPCType,
 		_ *route.Route,
 		_ session.Session,
 		_ *message.Message,
 		server *cluster.Server,
 	) (*protos.Response, error) {
+		marker <- pcontext.GetFromPropagateCtx(ctx, constants.IdempotencyFanoutKey)
 		return &protos.Response{Data: []byte(server.ID)}, nil
 	}}
 	svc := NewRemoteService(
@@ -217,6 +276,7 @@ func TestDoForkRequestReturnsOneTarget(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, responses, 1)
 	assert.Equal(t, "target", string(responses[0].Data))
+	assert.Equal(t, "1", receiveFanoutValue(t, marker))
 }
 
 func TestDoForkRequestReturnsStablePartialResponsesAndJoinedErrors(t *testing.T) {
@@ -375,7 +435,8 @@ func TestDoForkRequestConvertsTargetPanicToError(t *testing.T) {
 
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "server a")
-	assert.ErrorContains(t, err, "fanout RPC panic: invalid propagated timeout")
+	assert.ErrorContains(t, err, errRemoteFanoutPanic.Error())
+	assert.NotContains(t, err.Error(), "invalid propagated timeout")
 	require.Len(t, responses, 1)
 	assert.Equal(t, "b", string(responses[0].Data))
 }
@@ -450,19 +511,19 @@ func TestDoForkRequestCancellationStopsNewCallsAndWaitsForStartedCalls(t *testin
 
 func TestRemoteServiceFanoutConcurrencyOption(t *testing.T) {
 	defaultService := NewRemoteService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
-	assert.Equal(t, constants.DefaultRPCFanoutConcurrency, defaultService.fanoutConcurrency)
+	assert.Equal(t, constants.DefaultRPCFanoutConcurrency, defaultService.fanout.concurrency)
 
 	configuredService := NewRemoteServiceWithOptions(
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 		WithFanoutConcurrency(7),
 	)
-	assert.Equal(t, 7, configuredService.fanoutConcurrency)
+	assert.Equal(t, 7, configuredService.fanout.concurrency)
 
 	nonPositiveService := NewRemoteServiceWithOptions(
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
 		WithFanoutConcurrency(0),
 	)
-	assert.Equal(t, constants.DefaultRPCFanoutConcurrency, nonPositiveService.fanoutConcurrency)
+	assert.Equal(t, constants.DefaultRPCFanoutConcurrency, nonPositiveService.fanout.concurrency)
 }
 
 func TestDoPublishPreservesRouteAndJoinsErrors(t *testing.T) {
@@ -470,25 +531,40 @@ func TestDoPublishPreservesRouteAndJoinsErrors(t *testing.T) {
 	sd := clustermocks.NewMockServiceDiscovery(ctrl)
 	alpha := newSubscriberServer("alpha-1", "alpha", "events", "refresh", true)
 	beta := newSubscriberServer("beta-1", "beta", "events", "refresh", true)
+	alpha.SetOwnerEpoch(51)
+	beta.SetOwnerEpoch(52)
 	sd.EXPECT().GetServerTypes().Return(map[string]*cluster.Server{
 		"beta":  beta,
 		"alpha": alpha,
 	})
+	sd.EXPECT().GetServersByType("alpha").Return(map[string]*cluster.Server{alpha.ID: alpha}, nil)
+	sd.EXPECT().GetServersByType("beta").Return(map[string]*cluster.Server{beta.ID: beta}, nil)
 
 	errAlpha := errors.New("alpha failed")
 	errBeta := errors.New("beta failed")
 	calledRoutes := make([]string, 0, 2)
-	rpcClient := &fanoutRPCClient{fork: func(
-		_ context.Context,
+	markers := make([]any, 0, 2)
+	owners := make([]string, 0, 2)
+	rpcClient := &fanoutRPCClient{call: func(
+		ctx context.Context,
+		_ protos.RPCType,
 		route *route.Route,
 		_ session.Session,
 		_ *message.Message,
-	) error {
+		server *cluster.Server,
+	) (*protos.Response, error) {
 		calledRoutes = append(calledRoutes, route.String())
+		markers = append(markers, pcontext.GetFromPropagateCtx(ctx, constants.IdempotencyFanoutKey))
+		owners = append(owners, fmt.Sprintf(
+			"%s:%s",
+			pcontext.GetFromPropagateCtx(ctx, constants.OwnerServerIDKey),
+			pcontext.GetFromPropagateCtx(ctx, constants.OwnerEpochKey),
+		))
 		if route.SvType == "alpha" {
-			return errAlpha
+			return nil, errAlpha
 		}
-		return errBeta
+		assert.Equal(t, beta, server)
+		return nil, errBeta
 	}}
 	svc := NewRemoteService(
 		rpcClient, nil, sd, nil, nil, nil, nil,
@@ -502,7 +578,83 @@ func TestDoPublishPreservesRouteAndJoinsErrors(t *testing.T) {
 	assert.ErrorIs(t, err, errAlpha)
 	assert.ErrorIs(t, err, errBeta)
 	assert.Equal(t, []string{"alpha.events.refresh", "beta.events.refresh"}, calledRoutes)
+	assert.Equal(t, []any{"1", "1"}, markers)
+	assert.Equal(t, []string{"alpha-1:51", "beta-1:52"}, owners)
 	assert.Equal(t, &route.Route{SvType: "original", Service: "events", Method: "refresh"}, originalRoute)
+}
+
+func TestNotifyAllReturnsStableJoinedTargetErrors(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	sd := clustermocks.NewMockServiceDiscovery(ctrl)
+	self := &cluster.Server{ID: "self", Type: "gateway"}
+	alpha := &cluster.Server{ID: "alpha-1", Type: "alpha"}
+	beta := &cluster.Server{ID: "beta-1", Type: "beta"}
+	gamma := &cluster.Server{ID: "gamma-1", Type: "gamma"}
+	sd.EXPECT().GetServerTypes().Return(map[string]*cluster.Server{
+		"gamma":   gamma,
+		"gateway": self,
+		"beta":    beta,
+		"alpha":   alpha,
+	})
+	sd.EXPECT().GetServersByType("alpha").Return(map[string]*cluster.Server{alpha.ID: alpha}, nil)
+	sd.EXPECT().GetServersByType("beta").Return(map[string]*cluster.Server{beta.ID: beta}, nil)
+	sd.EXPECT().GetServersByType("gamma").Return(map[string]*cluster.Server{gamma.ID: gamma}, nil)
+
+	errAlpha := errors.New("alpha failed")
+	errBeta := errors.New("beta failed")
+	started := make(chan string, 3)
+	release := map[string]chan struct{}{
+		alpha.ID: make(chan struct{}),
+		beta.ID:  make(chan struct{}),
+		gamma.ID: make(chan struct{}),
+	}
+	rpcClient := &fanoutRPCClient{call: func(
+		_ context.Context,
+		_ protos.RPCType,
+		_ *route.Route,
+		_ session.Session,
+		_ *message.Message,
+		server *cluster.Server,
+	) (*protos.Response, error) {
+		started <- server.ID
+		<-release[server.ID]
+		switch server.ID {
+		case alpha.ID:
+			return nil, errAlpha
+		case beta.ID:
+			return nil, errBeta
+		default:
+			return &protos.Response{}, nil
+		}
+	}}
+	rpcRouter := router.New()
+	rpcRouter.SetServiceDiscovery(sd)
+	svc := NewRemoteService(
+		rpcClient, nil, sd, nil, nil, rpcRouter, nil,
+		self, nil, nil, nil, nil,
+	)
+
+	result := make(chan error, 1)
+	go func() {
+		result <- svc.NotifyAll(
+			context.Background(),
+			route.NewRoute("", "events", "refresh"),
+			nil,
+			nil,
+		)
+	}()
+	for range release {
+		receiveFanoutValue(t, started)
+	}
+	close(release[beta.ID])
+	close(release[gamma.ID])
+	close(release[alpha.ID])
+
+	err := receiveFanoutValue(t, result)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errAlpha)
+	assert.ErrorIs(t, err, errBeta)
+	assert.Equal(t, "server alpha-1: alpha failed\nserver beta-1: beta failed", err.Error())
 }
 
 func TestPublishZeroTargetsIgnoreCanceledContext(t *testing.T) {

@@ -1,6 +1,7 @@
 package pitaya
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/alkaid/pitaya/v2/acceptor"
@@ -41,6 +42,7 @@ type Builder struct {
 	Router            *router.Router
 	RPCClient         cluster.RPCClient
 	RPCServer         cluster.RPCServer
+	IdempotencyStore  service.IdempotencyStore
 	MetricsReporters  []metrics.Reporter
 	Server            *cluster.Server
 	ServerMode        ServerMode
@@ -102,6 +104,7 @@ func NewBuilder(isFrontend bool,
 	serverMetadata map[string]string,
 	config config.PitayaConfig,
 ) *Builder {
+	validateBuilderConfig(config, serverMode)
 	server := cluster.NewServer(util.NanoID(12), serverType, isFrontend, serverMetadata)
 	// The lifecycle signal is an event queue, not a broadcast channel. Keeping
 	// one pending event makes dependency failures observable even when they race
@@ -126,9 +129,17 @@ func NewBuilder(isFrontend bool,
 	// session 后端redis落地实例
 	var redisClient redis.Cmdable
 	if config.Storage.Redis.Type == "cluster" {
-		redisClient = redis.NewClusterClient(confPkg.ToRedisClusterOption(&config.Storage.Redis))
+		redisOptions, err := confPkg.NewRedisClusterOptions(&config.Storage.Redis)
+		if err != nil {
+			panic(fmt.Errorf("create session Redis options: %w", err))
+		}
+		redisClient = redis.NewClusterClient(redisOptions)
 	} else {
-		redisClient = redis.NewClient(confPkg.ToRedisNodeConfig(&config.Storage.Redis))
+		redisOptions, err := confPkg.NewRedisNodeOptions(&config.Storage.Redis)
+		if err != nil {
+			panic(fmt.Errorf("create session Redis options: %w", err))
+		}
+		redisClient = redis.NewClient(redisOptions)
 	}
 	sessionCache := session.NewRedisCache(redisClient, config.Session.CacheTTL)
 	sessionPool := session.NewSessionPool()
@@ -183,6 +194,7 @@ func NewBuilder(isFrontend bool,
 		Router:            router.New(),
 		RPCClient:         rpcClient,
 		RPCServer:         rpcServer,
+		IdempotencyStore:  nil,
 		MetricsReporters:  metricsReporters,
 		Server:            server,
 		ServerMode:        serverMode,
@@ -212,6 +224,12 @@ func (builder *Builder) AddPostBuildHook(hook func(app Pitaya)) {
 
 // Build returns a valid App instance
 func (builder *Builder) Build() Pitaya {
+	validateBuilderConfig(builder.Config, builder.ServerMode)
+	for index, reporter := range builder.MetricsReporters {
+		if reporter == nil {
+			panic(fmt.Errorf("nil metrics reporter at index %d", index))
+		}
+	}
 	trustedProxies, err := netutil.ParseTrustedProxies(builder.Config.Acceptor.TrustedProxyCIDRs)
 	if err != nil {
 		panic(fmt.Errorf("invalid pitaya.acceptor.trustedproxycidrs: %w", err))
@@ -235,6 +253,7 @@ func (builder *Builder) Build() Pitaya {
 		}
 
 		builder.Router.SetServiceDiscovery(builder.ServiceDiscovery)
+		idempotencyStore := builder.resolveRPCIdempotencyStore()
 
 		remoteService = service.NewRemoteServiceWithOptions(
 			builder.RPCClient,
@@ -250,6 +269,7 @@ func (builder *Builder) Build() Pitaya {
 			builder.HandlerHooks,
 			handlerPool,
 			service.WithFanoutConcurrency(builder.Config.Cluster.RPC.FanoutConcurrency),
+			service.WithIdempotencyStore(idempotencyStore),
 		)
 
 		builder.RPCServer.SetPitayaServer(remoteService)
@@ -307,6 +327,46 @@ func (builder *Builder) Build() Pitaya {
 
 	app.conf = builder.conf
 	return app
+}
+
+func validateBuilderConfig(pitayaConfig config.PitayaConfig, serverMode ServerMode) {
+	var err error
+	switch serverMode {
+	case Standalone:
+		err = pitayaConfig.Validate()
+	case Cluster:
+		err = errors.Join(pitayaConfig.Validate(), pitayaConfig.ValidateCluster())
+	default:
+		err = fmt.Errorf("unknown server mode %d", serverMode)
+	}
+	if err != nil {
+		panic(fmt.Errorf("invalid pitaya config: %w", err))
+	}
+}
+
+func (builder *Builder) resolveRPCIdempotencyStore() service.IdempotencyStore {
+	if builder.IdempotencyStore != nil {
+		return builder.IdempotencyStore
+	}
+	idempotencyConfig := builder.Config.Cluster.RPC.Idempotency
+	if !idempotencyConfig.Enabled {
+		return nil
+	}
+	store, err := service.NewRedisIdempotencyStore(
+		builder.Redis,
+		service.RedisIdempotencyStoreOptions{
+			KeyPrefix:         idempotencyConfig.KeyPrefix,
+			ResultTTL:         idempotencyConfig.ResultTTL,
+			LeaseTTL:          idempotencyConfig.LeaseTTL,
+			HeartbeatInterval: idempotencyConfig.HeartbeatInterval,
+			PollInterval:      idempotencyConfig.PollInterval,
+			OperationTimeout:  idempotencyConfig.OperationTimeout,
+		},
+	)
+	if err != nil {
+		panic(fmt.Errorf("create Redis RPC idempotency store: %w", err))
+	}
+	return store
 }
 
 // NewDefaultApp returns a default pitaya app instance

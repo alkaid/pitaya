@@ -6,11 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"go.uber.org/zap"
-
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/constants"
-	"github.com/alkaid/pitaya/v2/logger"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/namespace"
@@ -20,6 +17,7 @@ var (
 	clientInstance     *clientv3.Client
 	transactionTimeout time.Duration
 	etcdOnce           sync.Once
+	etcdInitErr        error
 )
 
 // EtcdGroupService base ETCD struct solution
@@ -35,33 +33,46 @@ func NewEtcdGroupService(conf config.EtcdGroupServiceConfig, clientOrNil *client
 	return &EtcdGroupService{}, err
 }
 
-func initClientInstance(config config.EtcdGroupServiceConfig, clientOrNil *clientv3.Client) error {
-	var err error
+func initClientInstance(conf config.EtcdGroupServiceConfig, clientOrNil *clientv3.Client) error {
 	etcdOnce.Do(func() {
 		if clientOrNil != nil {
 			clientInstance = clientOrNil
 		} else {
-			clientInstance, err = createBaseClient(config)
+			clientInstance, etcdInitErr = createBaseClient(conf)
 		}
-		if err != nil {
-			logger.Zap.Fatal("error initializing singleton etcd client in groups", zap.Error(err))
+		if etcdInitErr != nil {
 			return
 		}
-		transactionTimeout = config.TransactionTimeout
+		transactionTimeout = conf.TransactionTimeout
 	})
-	return err
+	return etcdInitErr
 }
 
-func createBaseClient(config config.EtcdGroupServiceConfig) (*clientv3.Client, error) {
-	cli, err := clientv3.New(clientv3.Config{
-		Endpoints:   config.Endpoints,
-		DialTimeout: config.DialTimeout,
-	})
+func createBaseClient(conf config.EtcdGroupServiceConfig) (*clientv3.Client, error) {
+	clientConfig, err := buildEtcdGroupClientConfig(conf)
 	if err != nil {
 		return nil, err
 	}
-	cli.KV = namespace.NewKV(cli.KV, config.Prefix)
+	cli, err := clientv3.New(clientConfig)
+	if err != nil {
+		return nil, err
+	}
+	cli.KV = namespace.NewKV(cli.KV, conf.Prefix)
 	return cli, nil
+}
+
+func buildEtcdGroupClientConfig(conf config.EtcdGroupServiceConfig) (clientv3.Config, error) {
+	clientTLS, err := config.LoadClientTLS("pitaya.groups.etcd.tls", conf.TLS)
+	if err != nil {
+		return clientv3.Config{}, err
+	}
+	return clientv3.Config{
+		Endpoints:   conf.Endpoints,
+		DialTimeout: conf.DialTimeout,
+		Username:    conf.User,
+		Password:    conf.Pass,
+		TLS:         clientTLS,
+	}, nil
 }
 
 func groupKey(groupName string) string {
@@ -130,31 +141,88 @@ func (c *EtcdGroupService) GroupCreateWithTTL(ctx context.Context, groupName str
 
 // GroupMembers returns all member's UIDs
 func (c *EtcdGroupService) GroupMembers(ctx context.Context, groupName string) ([]string, error) {
+	members := make([]string, 0)
+	cursor := ""
+	for {
+		page, err := c.GroupMembersPage(ctx, groupName, MemberPageOptions{
+			Limit:  DefaultMemberPageSize,
+			Cursor: cursor,
+		})
+		if err != nil {
+			return nil, err
+		}
+		members = append(members, page.Members...)
+		if page.NextCursor == "" {
+			return members, nil
+		}
+		cursor = page.NextCursor
+	}
+}
+
+// GroupMembersPage returns one bounded page ordered by UID.
+func (c *EtcdGroupService) GroupMembersPage(ctx context.Context, groupName string, options MemberPageOptions) (MemberPage, error) {
+	options, err := normalizeMemberPageOptions(options)
+	if err != nil {
+		return MemberPage{}, err
+	}
+	cursor, err := decodeMemberCursor(options.Cursor)
+	if err != nil {
+		return MemberPage{}, err
+	}
+
 	prefix := memberKey(groupName, "")
+	start := prefix
+	if cursor != "" {
+		start = memberKey(groupName, cursor) + "\x00"
+	}
+	end := clientv3.GetPrefixRangeEnd(prefix)
 	ctxT, cancel := context.WithTimeout(ctx, transactionTimeout)
 	defer cancel()
 	etcdRes, err := clientInstance.Txn(ctxT).
 		If(clientv3.Compare(clientv3.CreateRevision(groupKey(groupName)), ">", 0)).
-		Then(clientv3.OpGet(prefix, clientv3.WithPrefix(), clientv3.WithKeysOnly())).
+		Then(clientv3.OpGet(
+			start,
+			clientv3.WithRange(end),
+			clientv3.WithKeysOnly(),
+			clientv3.WithSort(clientv3.SortByKey, clientv3.SortAscend),
+			clientv3.WithLimit(int64(options.Limit+1)),
+		)).
 		Commit()
 
 	if err != nil {
-		return nil, err
+		return MemberPage{}, err
 	}
 	if !etcdRes.Succeeded {
-		return nil, constants.ErrGroupNotFound
+		return MemberPage{}, constants.ErrGroupNotFound
 	}
 
 	getRes := etcdRes.Responses[0].GetResponseRange()
-	members := make([]string, getRes.GetCount())
-	for i, kv := range getRes.GetKvs() {
-		members[i] = string(kv.Key)[len(prefix):]
+	kvs := getRes.GetKvs()
+	hasMore := len(kvs) > options.Limit
+	if hasMore {
+		kvs = kvs[:options.Limit]
 	}
-	return members, nil
+	page := MemberPage{Members: make([]string, len(kvs))}
+	for i, kv := range kvs {
+		page.Members[i] = string(kv.Key)[len(prefix):]
+	}
+	if err := validateMemberUIDs(page.Members); err != nil {
+		return MemberPage{}, err
+	}
+	if hasMore && len(page.Members) > 0 {
+		page.NextCursor = encodeMemberCursor(page.Members[len(page.Members)-1])
+	}
+	if err := validateBuiltInMemberPage(options, page); err != nil {
+		return MemberPage{}, err
+	}
+	return page, nil
 }
 
 // GroupContainsMember checks whether a UID is contained in current group or not
 func (c *EtcdGroupService) GroupContainsMember(ctx context.Context, groupName, uid string) (bool, error) {
+	if uid == "" {
+		return false, constants.ErrEmptyUID
+	}
 	ctxT, cancel := context.WithTimeout(ctx, transactionTimeout)
 	defer cancel()
 	etcdRes, err := clientInstance.Txn(ctxT).
@@ -173,6 +241,9 @@ func (c *EtcdGroupService) GroupContainsMember(ctx context.Context, groupName, u
 
 // GroupAddMember adds UID to group
 func (c *EtcdGroupService) GroupAddMember(ctx context.Context, groupName, uid string) error {
+	if uid == "" {
+		return constants.ErrEmptyUID
+	}
 	var etcdRes *clientv3.TxnResponse
 	kv, err := getGroupKV(ctx, groupName)
 	if err != nil {
@@ -206,6 +277,9 @@ func (c *EtcdGroupService) GroupAddMember(ctx context.Context, groupName, uid st
 
 // GroupRemoveMember removes specified UID from group
 func (c *EtcdGroupService) GroupRemoveMember(ctx context.Context, groupName, uid string) error {
+	if uid == "" {
+		return constants.ErrEmptyUID
+	}
 	ctxT, cancel := context.WithTimeout(ctx, transactionTimeout)
 	defer cancel()
 	etcdRes, err := clientInstance.Txn(ctxT).

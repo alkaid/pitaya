@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
+	pcontext "github.com/alkaid/pitaya/v2/context"
 	"github.com/alkaid/pitaya/v2/helpers"
 	"github.com/alkaid/pitaya/v2/interfaces"
 	"github.com/alkaid/pitaya/v2/interfaces/mocks"
@@ -17,6 +19,7 @@ import (
 	"github.com/alkaid/pitaya/v2/route"
 	sessionmocks "github.com/alkaid/pitaya/v2/session/mocks"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 	"google.golang.org/grpc"
 )
@@ -31,6 +34,61 @@ func TestNewGRPCClient(t *testing.T) {
 	g, err := getRPCClient(c)
 	assert.NoError(t, err)
 	assert.NotNil(t, g)
+}
+
+func TestNewGRPCClientRejectsInvalidConfig(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*config.GRPCClientConfig)
+		want   string
+	}{
+		{
+			name:   "dial timeout",
+			mutate: func(cfg *config.GRPCClientConfig) { cfg.DialTimeout = 0 },
+			want:   "pitaya.cluster.rpc.client.grpc.dialtimeout",
+		},
+		{
+			name:   "request timeout",
+			mutate: func(cfg *config.GRPCClientConfig) { cfg.RequestTimeout = -time.Second },
+			want:   "pitaya.cluster.rpc.client.grpc.requesttimeout",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Client.Grpc
+			test.mutate(&cfg)
+			client, err := getRPCClient(cfg)
+			require.Error(t, err)
+			assert.Nil(t, client)
+			assert.Contains(t, err.Error(), test.want)
+		})
+	}
+}
+
+func TestGRPCClientUnsupportedOperationsAndLifecycle(t *testing.T) {
+	g, err := getRPCClient(config.NewDefaultPitayaConfig().Cluster.RPC.Client.Grpc)
+	require.NoError(t, err)
+	require.NoError(t, g.Init())
+
+	rt := route.NewRoute("room", "svc", "method")
+	responses, err := g.Publish(
+		context.Background(),
+		protos.RPCType_Sys,
+		rt,
+		nil,
+		&message.Message{Type: message.Notify},
+		0,
+	)
+	assert.Nil(t, responses)
+	assert.ErrorIs(t, err, constants.ErrNotImplemented)
+	assert.ErrorIs(t, g.Fork(context.Background(), rt, nil, &message.Message{}), constants.ErrNotImplemented)
+	assert.ErrorIs(t, g.Send("topic", []byte("payload")), constants.ErrNotImplemented)
+
+	g.ModifyServer(NewServer("new", "room", false), NewServer("old", "room", false))
+	g.AfterInit()
+	g.BeforeShutdown()
+	assert.NoError(t, g.Shutdown())
 }
 
 func TestCall(t *testing.T) {
@@ -80,6 +138,54 @@ func TestCall(t *testing.T) {
 
 	assert.NoError(t, err)
 	assert.NotNil(t, res)
+}
+
+func TestGRPCClientCallOwnsTargetFencingMetadata(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Client.Grpc
+	client, err := getRPCClient(cfg)
+	require.NoError(t, err)
+
+	ctrl := gomock.NewController(t)
+	mockPitayaClient := protosmocks.NewMockPitayaClient(ctrl)
+	target := NewServer("grpc-fenced", "room", false)
+	target.SetOwnerEpoch(42)
+	client.clientMap.Store(target.ID, &grpcClient{cli: mockPitayaClient, connected: true})
+
+	mockPitayaClient.EXPECT().Call(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, request *protos.Request, _ ...grpc.CallOption) (*protos.Response, error) {
+			requestCtx, decodeErr := pcontext.Decode(request.Metadata)
+			require.NoError(t, decodeErr)
+			assert.Equal(t, target.ID, pcontext.GetFromPropagateCtx(requestCtx, constants.OwnerServerIDKey))
+			assert.Equal(t, "42", pcontext.GetFromPropagateCtx(requestCtx, constants.OwnerEpochKey))
+			return &protos.Response{}, nil
+		},
+	)
+
+	ctx := pcontext.AddListToPropagateCtx(
+		context.Background(),
+		constants.OwnerServerIDKey, "stale-target",
+		constants.OwnerEpochKey, "1",
+	)
+	_, err = client.Call(
+		ctx,
+		protos.RPCType_User,
+		route.NewRoute(target.Type, "svc", "notify"),
+		nil,
+		&message.Message{Type: message.Notify},
+		target,
+	)
+	require.NoError(t, err)
+
+	target.InvalidateOwnerEpoch()
+	_, err = client.Call(
+		context.Background(),
+		protos.RPCType_User,
+		route.NewRoute(target.Type, "svc", "notify"),
+		nil,
+		&message.Message{Type: message.Notify},
+		target,
+	)
+	require.ErrorIs(t, err, constants.ErrStaleOwnerEpoch)
 }
 
 func TestBroadcastSessionBind(t *testing.T) {

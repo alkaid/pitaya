@@ -125,7 +125,9 @@ executor 应原样传播受控 task 的返回值，不要重新解释 handler �
 - 单一、明确的 `apierrors.Error` 保留应用状态。
 - 其他拒绝、panic、joined skip 和 executor 契约违约统一返回稳定的 500。
 
-这些状态描述接纳结果，不覆盖 task 已运行后的 handler 业务错误。
+TaskExecutor 或 task panic 的返回 error 只保留稳定 sentinel，不再拼接 panic
+值；依赖匹配 panic 文本的代码必须改用 `errors.Is`。这些状态描述接纳结果，
+不覆盖 task 已运行后的 handler 业务错误。
 
 ### 后端回调所有权
 
@@ -161,6 +163,8 @@ Worker 队列 runtime 已内置基于 `go-workers v1.2.1` 的兼容实现，不�
 该 runtime 使用进程级全局状态，同一进程只能由一个 Worker 或 App worker runtime 持有。不要在一个进程内启动多个彼此独立的 Worker 或 App；需要隔离多套 worker 时，应拆成独立进程。
 
 默认 Redis 连接的 connect、read 和 write timeout 固定为 5 秒，runtime context 取消也会中断 fetch 和 scheduler I/O。job 成功返回后，manager 才为该 job 启动独立的 5 秒确认窗口并执行 `LREM`；确认按 worker 并发，不会按任务数串行累加关闭时间。`Worker.Stop` 会等这些确认全部结束。Redis 在确认窗口内不可用时，job 保留在 in-progress list，下一次启动会按 at-least-once 语义重放。job panic 并启用 retry 时，只有 retry `ZADD` 成功或策略明确不再重试才会确认原 job；retry 入队失败时，原 job 同样留在 in-progress list。业务处理必须幂等。
+
+retry payload 的 `error_message` 现在只保存 recovered panic 的 Go 类型，不再调用或持久化 panic 值的 `Error`/`String` 文本。依赖该字段提取业务错误详情的消费者必须改用显式 job error/result 字段；panic 详情不属于稳定 wire contract。
 
 到期的 retry 和 scheduled job 通过单条 Lua `EVAL` 原子执行 `LPUSH` 和 `ZREM`，取消或响应不明确时不会把 job 留在两个命令之间。受限 Redis ACL 除旧命令集外，还要允许 `EVAL`、`ZSCORE`、`LPUSH` 和 `ZREM`；标准 Redis Cluster 还要求脚本涉及的 zset 与目标 queue 位于同一 hash slot。当前 key 格式没有 hash tag，无法满足该条件的集群部署不能启用 retry 或 scheduled job，应使用支持多 key 脚本的单实例或代理方案。
 
@@ -343,7 +347,7 @@ topology listener 与 leader listener 使用各自的 FIFO lane。同一 lane �
 
 `Init` 等待初始 topology callback 和首个已确认的非空 leader 状态，但 leader listener 自身在独立 lane 异步执行。`SyncServers` 会等待本次同步接纳的 topology callback，`SDListener` 不能同步调用它，否则会等待自己所在的 lane。
 
-正常关闭顺序必须是 `BeforeShutdown -> Shutdown`。`BeforeShutdown` 停止新 callback 接纳、取消 Flush、等待已接纳 callback drain，再 revoke lease。callback 不能同步调用 `BeforeShutdown`；callback 内可以调用 `Shutdown`，但这不等价于立即 revoke，注册可能继续存在到 lease TTL，默认最长约 60 秒。
+正常关闭顺序必须是 `BeforeShutdown -> Shutdown`。两者一进入就会立即使本地 owner epoch 失效，带旧 epoch 的新 RPC 会在 callback drain 或 lease revoke 完成前 fail-closed。`BeforeShutdown` 随后停止新 callback 接纳、取消 Flush、等待已接纳 callback drain，再 revoke lease。callback 不能同步调用 `BeforeShutdown`；callback 内可以调用 `Shutdown`，但这不等价于立即 revoke，注册可能继续存在到 lease TTL，默认最长约 60 秒。
 
 leader 候选会增加一次有界的线性 etcd read，用于核对当前 key、revision、value 和 lease。这增加启动及选主切换的 quorum RTT，不进入请求、Flush、keepalive 或普通 topology 热路径。部署仍要求每个活跃进程的 server ID 唯一；同 ID 多进程隔离不属于兼容承诺。
 
@@ -395,7 +399,124 @@ Shutdown 开始后不再接受新连接。SIGTERM drain 期间已经接纳的连
 
 Acceptor 在 ready 后意外返回错误或 nil 都会触发 App 停止。自定义 Acceptor 必须遵守同样的生命周期，否则 App 会一直等待。
 
+## 审计第二、第三阶段兼容性变化
+
+本节对应 `pitaya-code-audit-2026-08-19.md` 的 P1 和 P2 整改。这里列出的配置、返回错误、RPC 元数据和公共接口变化都可能影响现有应用；升级时不能只依赖编译通过。
+
+### Builder 配置改为 fail-fast
+
+`NewBuilder` 会在构造依赖前校验配置，`Builder.Build` 会再次校验可能被调用方修改过的 `Builder.Config`。任一校验失败都会以包含全部字段错误的 `invalid pitaya config` panic 终止构建，不再把非法值带到后台 goroutine 后才表现为忙等、索引越界或资源泄漏。
+
+以下值现在必须为正数：heartbeat、metrics period、session cache TTL、memory-group tick、启用后的 session drain timeout/period、启用后的 rate-limit interval/limit、handler dispatch 数、Worker concurrency/pool，以及 Cluster 模式下 RPC fanout、NATS connection/request timeout、NATS services/message/push buffer、etcd dial/heartbeat/sync/revoke/grant/retry interval 和 sync parallelism。etcd heartbeat TTL 还必须至少为 1 秒，因为 etcd lease API 以整秒接收 TTL；旧配置中的亚秒值会在 Build 阶段被拒绝。StatsD 启用时 `rate` 必须是有限数且位于 `(0, 1]`，NaN 和正负无穷值会在 Build 阶段被拒绝。buffer、Redis pool、GoPool buffer/escape budget 及部分可选 duration 只允许非负值。Prometheus、StatsD、Redis、Worker、NATS 和 etcd endpoint 的必需字段也会被验证。
+
+etcd 用户名和密码必须同时为空或同时配置；启用 election 时必须提供名称。NATS `maxreconnectionretries` 继续接受 `-1`（无限重试）和 `0`（不重试），etcd `grantlease.maxretries=0` 也继续表示零次重试。默认 Builder 只构造 NATS transport，因此 `ValidateCluster` 不校验未启用的 gRPC 子配置。导出的 `NewNatsRPCClient`、`NewNatsRPCServer`、`NewGRPCClient` 和 `NewGRPCServer` 各自校验实际使用的子配置并返回 error；直接构造 gRPC 时 dial/request timeout 必须为正，server port 必须位于 1..65535。NATS 旧 sentinel 现在会被带字段路径的错误包装；`errors.Is` 仍可识别，但依赖 `err == constants.ErrNats...` 的代码必须改用 `errors.Is`。自定义配置生成器应直接调用 `PitayaConfig.Validate`，Cluster 部署还应调用 `ValidateCluster`，并在进入 Builder 前处理错误。
+
+本批次为 NATS client/server 新增 TLS 和认证配置。TLS 默认关闭；生产集群必须显式启用，并选择 username/password、token 或 credentials file 中恰好一种认证方式。NATS URL 不再接受内嵌 userinfo，旧的 `nats://user:pass@host:4222` 必须改为普通 URL 加 `auth` 字段。TLS 最低版本为 1.2；`cafile` 为空时使用系统根证书，`certfile`/`keyfile` 可配置 client certificate。证书、credentials file 和相关配置只在 transport 构造时读取，轮换后必须重启进程。
+
+主 service-discovery etcd、groups etcd、compatibility binding etcd、session Redis 和 Worker Redis 也支持相同的 client TLS 配置。etcd 的 `user`/`pass` 必须成对设置；Redis 允许只设置 password 以认证默认 user，但显式 username 时必须同时提供 password，Worker 会发送 Redis 6 ACL 的双参数 `AUTH username password`。读取或解析证书/credentials 失败会在构造阶段 fail closed，不会静默退回明文连接。
+
+保留的 gRPC transport 仍不提供 TLS、peer authentication 或 mTLS，只能放在 loopback、受控 sidecar 网络或严格的双向网络 ACL 后。本批新增字段会改变多个 exported struct 的 unkeyed composite literal 形状，包括 NATS、etcd、Redis、Worker 和 groups/binding config；外部 `Type{value1, ...}` literal 可能不再编译，必须改为 keyed literal。Builder 的 `MetricsReporters` 也不再接受 nil 元素，`Build` 会指出对应下标并 panic。
+
+### Redis session hash 的原子 TTL
+
+导出的 `session.CacheInterface` 新增 `CacheTTL() time.Duration`。所有自定义 session cache、wrapper 和测试 mock 都必须实现该方法，否则升级后无法编译；返回值必须为正数，`SessionPool.SetClusterCache` 会对零或负 TTL 直接 panic。
+
+`RedisCache.Hset`、`Hsetnx` 和 `Hmset` 现在用单条 Lua `EVAL` 原子执行 hash 写入与 `PEXPIRE`。新 key 在写入成功时立即带 TTL；已有 key 每次 hash 写入都会续期。`NewRedisCache` 对零或负 TTL 直接 panic，小于 1ms 的正 TTL 会提升到 Redis 可表达的 1ms。
+
+受限 Redis ACL 除既有 hash 命令外必须允许 `EVAL`，以及脚本内的 `HSET`、`HSETNX` 和 `PEXPIRE`。这组脚本只访问一个 key，兼容标准 Redis Cluster 的单 slot 约束。
+
+### Timer 执行与关闭语义
+
+全局 `TimerManager` 现在只有一个调度 owner；多个 handler dispatcher 只作为 standby，不会并发推进同一批 timer。`NewTimer` 和 `NewCountTimer` 保持源码兼容，但默认回调策略明确为 `timer.ExecutionSerial`：慢回调会阻塞后续 tick，且关闭会等待已经开始的回调完成。等待串行回调期间，owner 仍排空 timer 创建/关闭 mutation，因此回调内批量创建超过 channel capacity 的 timer 不会自锁，也不会推进新的 tick。
+
+需要其他 overrun 行为时使用 `NewTimerWithPolicy` 或 `NewCountTimerWithPolicy`：
+
+- `ExecutionSerial`：不重入；回调由独立 goroutine 执行，owner 同步等待并只处理 timer mutation；
+- `ExecutionAsync`：每次到期都异步接纳，允许同一 timer 重叠；
+- `ExecutionSkipIfRunning`：已有回调运行时跳过本次到期，不消耗有限计数。
+
+nil callback、非正 interval 或未知 policy 现在 panic。`Condition.Check` 如果 panic，框架会记录错误并删除对应 timer，其他 timer 和 manager 会继续运行；依赖 condition panic 终止调度器或进程的代码必须改为显式故障信号。`TimerManager.Stats` 暴露 tick/callback lag 及各策略 overrun 计数；自定义 shutdown 必须取消 `Run` 的 context，并为业务回调设置自己的终止条件。
+
+兼容入口 `timer.Cron()` 现在也参与同一个 owner 协议。`Run` 或另一轮 `Cron` 已持有 owner 时，它会拒绝本次 tick 并立即返回，不再并发推进 timer；需要观察接纳结果的调用方改用新增的 `timer.TryCron() bool`。应用启用 `Run` 后不能再依赖外部 `Cron` 同时执行回调。`Run` 取消后会在等待异步回调时继续排空已接纳的 create/close mutation，但不会推进新 tick；回调仍必须响应自己的终止条件。
+
+`SetTimerBacklog` 现在会重建尚未使用的进程级 `timer.Manager`，并成为 `NewTimerManager(0)` 的默认容量。它必须在 `Run`、`Cron` 或任何进程级 timer 创建/增删 API 之前调用；Manager 一旦使用，再修改 backlog 会 panic。过去在运行中调用但实际不生效的代码必须移到应用初始化最前端。
+
+### NATS、NotifyAll 和 fanout 错误
+
+NATS client/server 会在断连时降为 not-ready，重连后恢复；最终连接关闭会取消 lifecycle context。`Shutdown` 冻结新操作并取消 client 侧在途 request wait。server 侧先关闭 subscription admission，再 drain 已接纳的 broker delivery；这些 delivery 的 lifecycle context 在处理完成前保持有效。排空成功后才停止 consumer、取消 lifecycle context、关闭连接并等待 transport callback 和已接纳工作结束；排空失败则进入强制取消路径。bind、request、push 或 kick consumer 若 panic 或意外返回，server 会立即降为 not-ready、停止其余 consumer，并触发 App die signal，不再以部分消息泵失效的状态继续宣告可用。Shutdown 开始后及连接不可用时，`Send`、`Call` 以及未启用 owner fencing 的低层 `Publish`/`Fork` 返回 `constants.ErrRPCClientNotInitialized`；fenced `Publish`/`Fork` 的 target-resolution 错误优先，见下文。调用方不能再假定 client shutdown 是 no-op。
+
+NATS request task 会在 transport 边界恢复业务 panic，并把 panic、`nil,error` 或 `nil,nil` 的非法返回规范化为可序列化的 HTTP 500 status response；panic 细节只写服务端日志。带 idempotency key 的 panic 结果也会缓存非 nil error response，因此同 key 重试会及时收到相同错误，而不再持续 timeout 到去重 TTL 结束。依赖 panic 造成无响应超时的调用方必须改为处理显式 500 response。
+
+gRPC unary transport 同样会在边界恢复 handler panic，记录服务端堆栈，并只向客户端返回不包含 panic 细节的 `Internal` status。gRPC server shutdown 会停止新 admission，并最多等待 5 秒让已接纳 RPC 完成；超时后调用强制 `Stop`。业务 handler 若可能长时间阻塞，必须响应请求 context 或实现更短的业务 deadline，不能再假定框架会无限等待。
+
+`RemoteService.NotifyAll` 不再忽略逐目标错误或恒返回 nil。目标快照按稳定顺序执行，解析失败、RPC 失败、panic 和 context 取消会用 `errors.Join` 聚合返回。所有调用方都必须检查该错误；一次非 nil 返回可能表示其他目标已经成功，不能直接无条件重放整批副作用。
+
+remote fanout 的并发所有权已收拢到单个 executor，默认上限为 `constants.DefaultRPCFanoutConcurrency`，Builder 使用 `pitaya.cluster.rpc.fanout_concurrency`。结果和目标错误采用稳定顺序，但仍是部分成功语义。
+
+`RemoteService.DoFork` 不再在目标类型不同于本机类型时调用一次 type-wide `RPCClient.Fork`。它现在始终从 service discovery 取得目标快照，并对每个具体实例执行 `RPCClient.Call`，从而为每一 hop 写入该实例的 owner epoch。该调用会等待所有已开始的目标调用，并用 `errors.Join` 返回带 server ID 的目标错误；依赖 broker publish 立即返回、只实现 `Fork` 而未正确实现 `Call` 的自定义 transport，或依赖同 ID 不同类型实例被当成本机排除的代码必须调整。
+
+直接调用导出的 `RPCClient.Call` 时，内置 NATS 和 gRPC client 现在会自行验证目标 ownership，并覆盖当前 hop 的 owner metadata。目标 ownership 已失效时会在发送前返回 `constants.ErrStaleOwnerEpoch`；有效的非零 epoch 会替换继承自上一 hop 的值，有效的 epoch `0` 会清除旧值以保留未启用 fencing 的兼容路径。自定义 transport 的 `Call` 实现也必须遵守同一契约，不能依赖上层调用方预先装饰 context。
+
+底层 `RPCClient.Publish` 和 `RPCClient.Fork` 均已弃用。只有本地 owner epoch 为有效的 `0` 时，NATS 实现才保留原有 type-wide publish 行为；owner fencing 活跃、epoch 非零或 ownership 已失效时，它们会在修改消息或发布前分别同步返回 `constants.ErrRPCPublishRequiresTargetResolution` 或 `constants.ErrRPCForkRequiresTargetResolution`。需要 fencing 的调用方必须改用 `App.Publish`/`RemoteService.Publish` 或 `App.Fork`/`RemoteService.Fork`，由框架解析每个具体目标并附带对应 token。
+
+### 指标标签、Reporter 和 Logger reload
+
+Prometheus reporter 对缺失、多余或未知 label、负 counter 和未注册 histogram 返回 error，不再通过 `Vec.With` panic。多个 reporter 的失败由 `errors.Join` 聚合；无返回值的框架 metrics helper 会记录 reporter error，遇到 nil reporter 也只记录错误而不 panic。直接调用 `Reporter` 的应用应传播其 error。
+
+`AddMetricTagsToPropagateCtx` 会复制传入 map。跨 RPC metric tags 必须是 `map[string]string` 语义；解码到非字符串 value 会使 context decode 失败。框架保留的 `route`、`status`、`type` 和 `code` 最后写入，业务传播标签不能覆盖这些维度。框架不会替业务标签实施 cardinality allowlist；只能传播受控的低基数值，禁止把 UID、request ID、原始错误文本或其他无界值作为 label，否则 Prometheus/StatsD series 数仍可能失控。
+
+Logger 热重载不再替换已发布的 `*zap.Logger`/`*zap.SugaredLogger` facade。保存过 `logger.Zap`、`logger.Sugar` 或 `logger.Log` 的代码会继续收到新 core、level、development、DPanic 和 stacktrace 行为，不需要重新读取全局指针。
+
+### Stateful routing、owner fencing 与 RPC 幂等
+
+需要 session affinity 的 stateful route 在一致性哈希失败时不再随机选择节点。缺少 UID/frontend session key 时返回 `constants.ErrStatefulRouteKeyNotFound`；服务发现无法给出 hash owner 时原样返回错误。依赖旧随机降级的调用方必须改为在请求前建立稳定 routing key 或显式处理不可用。
+
+etcd 服务发现使用 server registration key 的 `CreateRevision` 作为 owner epoch。新进程不能在旧 registration lease 仍有效时用相同 type/ID 覆盖它；初始化会返回 identity-owned 错误。只有旧 lease 失效、key 删除后才能接管，并获得新的 epoch。选择 etcd discovery 后，共享 server 会在 discovery 构造完成时立即进入 invalid 状态；因此即使 RPC module 先初始化，registration 提交前的无 token 请求也会 fail-closed。keepalive 丢失同样会立即使本地 epoch 失效，恢复 lease 和 registration 前 RPC admission 保持 fail-closed。出站 RPC 在目标 epoch 非零时传播 `constants.OwnerServerIDKey`（`rpc.owner-server-id`）和 `constants.OwnerEpochKey`（`rpc.owner-epoch`）；接收端本地 epoch 非零时，缺失、非法、ID 不匹配或 epoch 不相等都会返回 `constants.ErrStaleOwnerEpoch`。`RemoteService` 路由调用、backend `Session.SendRequestToFrontend` 使用的 remote agent，以及 cluster session 的定向 `SendRequest` 都会按具体目标替换这两个字段；目标 epoch 为 `0` 时会清除上一 hop 的字段。自定义 discovery 传给 `Server.SetOwnerEpoch` 的 generation 必须小于 `2^63`；最高位由框架保留为 invalid 标记，越界值会 fail-closed 而不会截断为 unfenced epoch。自定义 RPC transport 必须完整保留 propagate context 到目标入口，否则启用 etcd fencing 的请求会被拒绝。owner metadata 只属于当前 hop，入口验证后会在业务 handler 前移除；handler 发起下游 RPC 时由新目标重新写入，epoch=0 的目标不会继承上一跳 fence。非 etcd/无法提供 epoch 的 discovery 保持 epoch `0`，不声明 fencing 保证。
+
+Worker 现在用稳定的 Redis JID 写入 `constants.IdempotencyKey`（`rpc.idempotency-key`）。`RemoteService.Call` 对相同 key 和请求指纹合并并发执行、缓存响应和 error；同 key 不同请求或不同业务 metadata 返回 `constants.ErrIdempotencyConflict`。请求已经到达 handler 后产生的 transient error 也会在 result TTL 内复用，不会靠 Worker retry 再次执行副作用。
+
+Cluster Builder 默认启用新的 `RedisIdempotencyStore`，复用 `pitaya.storage.redis` 的连接、TLS 和 ACL 配置。默认 key prefix 为 `pitaya:rpc:idempotency:`，完成结果保留 15 分钟，running lease 为 30 秒，每 10 秒续租，等待者每 25 毫秒检查一次，每次 Redis 操作最多 3 秒。全部参与同一 RPC scope 的进程必须连接同一 Redis 并使用同一 prefix。生产 ACL 除 key 范围外必须允许 `EVAL`，以及脚本调用的 `EXISTS`、`HGET`、`HSET`、`HDEL`、`PTTL` 和 `PEXPIRE`。新增配置位于 `pitaya.cluster.rpc.idempotency.*`；所有 duration 必须为正，且 `heartbeatinterval + operationtimeout < leasettl`。
+
+运行 owner 由随机 token 和 TTL 标识；续租、完成写入和旧 owner fencing 都通过单 key Lua CAS 完成。进程在 handler 完成前退出时，lease 到期后另一个进程会接管。续租失败或 lease 到期只会 cooperative cancel 旧 handler 的 context；无法强制终止忽略 cancellation 或正在执行不可取消 I/O 的 callback，因此新 owner 可能在旧 callback 仍运行时开始。旧 owner 的 completion CAS 不能覆盖新结果，但该 CAS 只 fence Redis 完成记录，不能撤销或阻止旧 callback 的业务写入。已完成结果可跨进程 replay，同 key 不同 fingerprint 仍 fail-closed。调用返回 `constants.ErrIdempotencyLeaseLost` 时，当前执行者已不能证明自己仍拥有 key；返回 `constants.ErrIdempotencyCommitUnknown` 时，业务函数已经返回，但完成脚本的结果未知；Redis 中出现不完整或未知 schema 时返回 `constants.ErrIdempotencyStoreCorrupt`。这些失败都返回明确的非成功 RPC status，不会把原成功 payload 交给调用方。调用方应使用同一个 key 查询/retry 或执行业务侧 reconciliation，不能把 commit-unknown 当作“业务一定未执行”。
+
+该 Redis 状态机不能与任意业务数据库原子提交。进程在业务副作用完成后、Redis completion CAS 前退出时，lease 到期后的接管会再次执行，因此总体仍有明确的 at-least-once 窗口，不提供 exactly-once。需要事务级效果去重的 handler 可调用 `service.RPCIdempotencyInfoFromContext(ctx)` 取得 opaque `StoreKey` 和 `Fingerprint`，并在自己的状态事务内建立 unique/version 检查；该值只在当前本地 handler context 可见，不会自动传播到嵌套 RPC。每个嵌套业务命令仍须显式设置自己的稳定 idempotency key。
+
+直接通过 `NewRemoteService*` 构造的服务仍默认使用 `MemoryIdempotencyStore`：它仅进程内有效，默认 TTL 15 分钟、最多 10,000 项；容量全部被在途 key 占用时返回 `constants.ErrIdempotencyStoreFull`。Cluster Builder 可把 `pitaya.cluster.rpc.idempotency.enabled` 设为 false 以使用该进程内 fallback，或设置非 nil `Builder.IdempotencyStore` 覆盖默认 Redis store；显式 store 始终优先于 enabled 开关。默认 store 会在 `Build` 时读取当前 `Builder.Config` 和 `Builder.Redis`，因此构造 Builder 后、Build 前对 enabled、prefix 或 duration 的修改会生效。其他构造路径使用 `NewRemoteServiceWithOptions(..., service.WithIdempotencyStore(store))` 注入自定义实现。自定义 store 同样不能把 Redis 风格的完成记录误称为业务 exactly-once。
+
+idempotency key 必须是非空字符串且不超过 256 bytes；框架传给 store 的 key 是固定长度、带版本的 opaque hash，普通路由按 server type 作用域去重，fanout 则按目标 server ID 独立去重。自定义 store 不得解析或自行重组该 key。fanout 传输会新增内部 metadata `rpc.idempotency-fanout`；自定义 RPC transport 必须完整保留到目标入口。
+
+owner fencing、idempotency key 和 fanout marker 都是当前 RPC hop 的 admission metadata：目标完成验证和 store scope 计算后，会在进入业务 handler 前删除 `rpc.owner-server-id`、`rpc.owner-epoch`、`rpc.idempotency-key` 和 `rpc.idempotency-fanout`。handler 发起嵌套 RPC 时不会自动继承父命令的去重身份；每个需要去重的嵌套业务命令都必须显式附加独立、稳定的 idempotency key。否则嵌套调用按普通无 key 请求执行。新的 fanout 会由框架重新添加 marker。对没有 idempotency key 的普通 RPC，执行语义保持不变。新增 exported Builder 字段也意味着外部 unkeyed `Builder` literal 必须改成 keyed literal。
+
+### 群组分页广播 API
+
+`Pitaya` interface 新增以下方法，自定义 facade、fake 和生成 mock 必须同步 method set：
+
+```go
+GroupMembersPage(context.Context, string, groups.MemberPageOptions) (groups.MemberPage, error)
+GroupBroadcastWithOptions(context.Context, string, string, string, any, groups.BroadcastOptions) (groups.BroadcastResult, error)
+```
+
+`GroupMembersPage` 按 UID 字典序返回有界页面，cursor 是 opaque token，只能原样回传；默认 page size 256，允许 1..4096。内置 memory/etcd backend 原生分页，使用有界的 live keyset view，不保证一次多页遍历对应同一不可变快照：遍历期间删除成员不会造成重复，新增且排序位置不大于当前 cursor 的成员可能不会出现在本轮结果中。需要严格成员快照的业务应在应用层冻结名单或使用提供快照语义的自定义 backend。memory backend 现在在增删成员时维持字典序，分页只二分定位并复制当前页，因此直接调用 memory `GroupMembers` 的返回顺序也从历史插入顺序改为字典序。依赖旧顺序的调用方必须自行定义排序规则。
+
+自定义 `PagedGroupService` 返回的成员必须非空、严格递增且不超过请求 limit；非末页必须同时返回非空且前进的 cursor，多页 cursor 循环会被拒绝为 `constants.ErrGroupPageCursor`。只实现旧 `groups.GroupService` 的自定义 backend 会在一次完整 `GroupMembers` 或 `GroupBroadcastWithOptions` 操作开始时全量读取、校验并排序一个不可变快照，后续页面复用该快照，不会逐页重复全量读取和排序，但仍不具备后端内存上界；大群组实现必须提供原生 `PagedGroupService`。快照构建会周期检查 context cancellation。
+
+旧 `GroupBroadcast` 现在也通过分页和 UID 确定性分片执行。默认 page size 256、8 shards；`BroadcastOptions` 可设置 page size、1..64 shards、0..1,000,000 的 aggregate starts-per-second rate，以及用于恢复的 opaque `Cursor`。`BroadcastResult` 即使返回 error 也保留 `Attempted`、`Succeeded`、排序后的 `FailedUIDs` 和 `NextCursor`。用 `NextCursor` 作为下一次调用的 `Cursor` 可跳过已经完整完成的页面；页内取消会返回该页起点，因此恢复时最多重放一个页面，业务副作用仍必须幂等。
+
+NATS server 的 `pitaya.cluster.rpc.server.nats.services` 默认值从 30 改为 1，并且现在只接受 1。该字段过去声称控制多个 message processor，但运行时始终只有一个 dispatcher；并行 dispatcher 还会破坏同 key 请求进入 keyed executor 前的顺序。显式配置其他值的部署必须删除覆盖或改为 1；RPC handler 的并行度继续由 keyed executor 和对应 pool 配置控制。
+
+### 内部所有权和支持矩阵
+
+session backend map/generation/mutex、remote fanout worker、etcd callback queue 分别收拢到单一 owner 对象。公共 facade 保持不变，但依赖未导出字段、反射或 callback queue 时序的测试不再受支持。
+
+`Session.GetOnCloseCallbacks()`、`GetSubscriptions()` 和 `GetDataEncoded()` 现在返回防御性副本。修改 getter 返回的 slice 不再改变 Session 内部状态；应使用对应 setter 或受支持的 Session API。过去依赖共享 backing array 的代码虽然可能继续编译，但行为已经改变。
+
+Linux/amd64 仍是唯一完整 runtime 和 release-verification 平台。Darwin/amd64 与 Windows/amd64 新增 `CGO_ENABLED=0` compile-only CI；这只证明 root、CLI 和 xk6 当前可交叉编译，不代表外部服务、signal、Docker 或生产运行支持。
+
 ## 验证工具迁移
+
+### Redis integration
+
+`make test-integration` 不再只运行 session Redis round trip。harness 会在同一个隔离、digest-pinned Redis 上分别编译并运行 session 与 service tagged test binary，精确校验两个 test inventory 和两个独立 completion proof。service suite 覆盖跨进程 RPC idempotency replay、heartbeat、stale owner CAS、live callback overlap、子进程崩溃接管，以及业务写入后 completion 前退出所暴露的 at-least-once 窗口。自定义 CI wrapper 不能只筛选旧的 `TestFlushFrontendDataRedisRoundTrip`；应调用 `make test-integration` 并保留 harness 的 sentinel、proof、timeout 和 owned cleanup 契约。
 
 ### 基准测试工具
 

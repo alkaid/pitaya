@@ -43,6 +43,9 @@ type ETCDBindingStorage struct {
 	etcdEndpoints   []string
 	etcdPrefix      string
 	etcdDialTimeout time.Duration
+	etcdUser        string
+	etcdPass        string
+	etcdTLS         config.TLSConfig
 	leaseTTL        time.Duration
 	leaseID         clientv3.LeaseID
 	thisServer      *cluster.Server
@@ -60,6 +63,9 @@ func NewETCDBindingStorage(server *cluster.Server, sessionPool session.SessionPo
 	b.etcdDialTimeout = conf.DialTimeout
 	b.etcdEndpoints = conf.Endpoints
 	b.etcdPrefix = conf.Prefix
+	b.etcdUser = conf.User
+	b.etcdPass = conf.Pass
+	b.etcdTLS = conf.TLS
 	b.leaseTTL = conf.LeaseTTL
 	return b
 }
@@ -158,10 +164,11 @@ func (b *ETCDBindingStorage) Init() error {
 	var cli *clientv3.Client
 	var err error
 	if b.cli == nil {
-		cli, err = clientv3.New(clientv3.Config{
-			Endpoints:   b.etcdEndpoints,
-			DialTimeout: b.etcdDialTimeout,
-		})
+		clientConfig, loadErr := b.ownedClientConfig()
+		if loadErr != nil {
+			return loadErr
+		}
+		cli, err = clientv3.New(clientConfig)
 		if err != nil {
 			return err
 		}
@@ -180,6 +187,20 @@ func (b *ETCDBindingStorage) Init() error {
 	}
 
 	return nil
+}
+
+func (b *ETCDBindingStorage) ownedClientConfig() (clientv3.Config, error) {
+	clientTLS, err := config.LoadClientTLS("pitaya.modules.bindingstorage.etcd.tls", b.etcdTLS)
+	if err != nil {
+		return clientv3.Config{}, err
+	}
+	return clientv3.Config{
+		Endpoints:   b.etcdEndpoints,
+		DialTimeout: b.etcdDialTimeout,
+		Username:    b.etcdUser,
+		Password:    b.etcdPass,
+		TLS:         clientTLS,
+	}, nil
 }
 
 // Shutdown executes on shutdown and will clean etcd

@@ -21,10 +21,14 @@
 package cluster
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
+	"github.com/alkaid/pitaya/v2/constants"
+	pcontext "github.com/alkaid/pitaya/v2/context"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var svTestTables = []struct {
@@ -62,4 +66,64 @@ func TestAsJSONString(t *testing.T) {
 			assert.Equal(t, string(b), s.AsJSONString())
 		})
 	}
+}
+
+func TestServerOwnershipAndSubscriptions(t *testing.T) {
+	var nilServer *Server
+	assert.Zero(t, nilServer.OwnerEpoch())
+	nilServer.SetOwnerEpoch(99)
+
+	server := &Server{}
+	assert.Zero(t, server.OwnerEpoch())
+	server.SetOwnerEpoch(41)
+	assert.Equal(t, uint64(41), server.OwnerEpoch())
+	server.SetOwnerEpoch(42)
+	assert.Equal(t, uint64(42), server.OwnerEpoch())
+	epoch, valid := server.OwnerEpochSnapshot()
+	assert.Equal(t, uint64(42), epoch)
+	assert.True(t, valid)
+	server.InvalidateOwnerEpoch()
+	epoch, valid = server.OwnerEpochSnapshot()
+	assert.Equal(t, uint64(42), epoch)
+	assert.False(t, valid)
+	server.SetOwnerEpoch(43)
+	epoch, valid = server.OwnerEpochSnapshot()
+	assert.Equal(t, uint64(43), epoch)
+	assert.True(t, valid)
+	server.SetOwnerEpoch(ownerEpochInvalidBit)
+	epoch, valid = server.OwnerEpochSnapshot()
+	assert.Zero(t, epoch)
+	assert.False(t, valid)
+
+	server.fix()
+	require.NotNil(t, server.Metadata)
+	require.NotNil(t, server.Subscribe)
+	server.AddSubscribe("chat", "send", true)
+	assert.Equal(t, &SubscribeItem{Fork: true}, server.GetSubscribe("chat", "send"))
+	assert.Nil(t, server.GetSubscribe("chat", "missing"))
+}
+
+func TestServerWithOwnerFencingMetadataReplacesPriorHop(t *testing.T) {
+	_, err := withTargetOwnerFencingMetadata(context.Background(), nil)
+	require.ErrorIs(t, err, constants.ErrStaleOwnerEpoch)
+
+	target := &Server{ID: "room-2", Type: "room"}
+	target.SetOwnerEpoch(42)
+	ctx := pcontext.AddListToPropagateCtx(
+		context.Background(),
+		constants.OwnerServerIDKey, "room-1",
+		constants.OwnerEpochKey, "41",
+		"application-key", "preserved",
+	)
+
+	ctx = target.WithOwnerFencingMetadata(ctx)
+	assert.Equal(t, "room-2", pcontext.GetFromPropagateCtx(ctx, constants.OwnerServerIDKey))
+	assert.Equal(t, "42", pcontext.GetFromPropagateCtx(ctx, constants.OwnerEpochKey))
+	assert.Equal(t, "preserved", pcontext.GetFromPropagateCtx(ctx, "application-key"))
+
+	unfenced := &Server{ID: "local", Type: "local"}
+	ctx = unfenced.WithOwnerFencingMetadata(ctx)
+	assert.Nil(t, pcontext.GetFromPropagateCtx(ctx, constants.OwnerServerIDKey))
+	assert.Nil(t, pcontext.GetFromPropagateCtx(ctx, constants.OwnerEpochKey))
+	assert.Equal(t, "preserved", pcontext.GetFromPropagateCtx(ctx, "application-key"))
 }

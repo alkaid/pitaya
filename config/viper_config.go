@@ -104,6 +104,13 @@ func (c *Config) fillDefaultValues() {
 		"pitaya.buffer.handler.remoteprocess":                   pitayaConfig.Buffer.Handler.RemoteProcess,
 		"pitaya.cluster.info.region":                            pitayaConfig.Cluster.Info.Region,
 		"pitaya.cluster.rpc.fanout_concurrency":                 pitayaConfig.Cluster.RPC.FanoutConcurrency,
+		"pitaya.cluster.rpc.idempotency.enabled":                pitayaConfig.Cluster.RPC.Idempotency.Enabled,
+		"pitaya.cluster.rpc.idempotency.keyprefix":              pitayaConfig.Cluster.RPC.Idempotency.KeyPrefix,
+		"pitaya.cluster.rpc.idempotency.resultttl":              pitayaConfig.Cluster.RPC.Idempotency.ResultTTL,
+		"pitaya.cluster.rpc.idempotency.leasettl":               pitayaConfig.Cluster.RPC.Idempotency.LeaseTTL,
+		"pitaya.cluster.rpc.idempotency.heartbeatinterval":      pitayaConfig.Cluster.RPC.Idempotency.HeartbeatInterval,
+		"pitaya.cluster.rpc.idempotency.pollinterval":           pitayaConfig.Cluster.RPC.Idempotency.PollInterval,
+		"pitaya.cluster.rpc.idempotency.operationtimeout":       pitayaConfig.Cluster.RPC.Idempotency.OperationTimeout,
 		"pitaya.cluster.rpc.client.grpc.dialtimeout":            pitayaConfig.Cluster.RPC.Client.Grpc.DialTimeout,
 		"pitaya.cluster.rpc.client.grpc.requesttimeout":         pitayaConfig.Cluster.RPC.Client.Grpc.RequestTimeout,
 		"pitaya.cluster.rpc.client.grpc.lazyconnection":         pitayaConfig.Cluster.RPC.Client.Grpc.LazyConnection,
@@ -120,6 +127,8 @@ func (c *Config) fillDefaultValues() {
 		"pitaya.cluster.rpc.server.nats.buffer.push":            pitayaConfig.Cluster.RPC.Server.Nats.Buffer.Push,
 		"pitaya.cluster.sd.etcd.dialtimeout":                    pitayaConfig.Cluster.SD.Etcd.DialTimeout,
 		"pitaya.cluster.sd.etcd.endpoints":                      pitayaConfig.Cluster.SD.Etcd.Endpoints,
+		"pitaya.cluster.sd.etcd.user":                           pitayaConfig.Cluster.SD.Etcd.User,
+		"pitaya.cluster.sd.etcd.pass":                           pitayaConfig.Cluster.SD.Etcd.Pass,
 		"pitaya.cluster.sd.etcd.prefix":                         pitayaConfig.Cluster.SD.Etcd.Prefix,
 		"pitaya.cluster.sd.etcd.grantlease.maxretries":          pitayaConfig.Cluster.SD.Etcd.GrantLease.MaxRetries,
 		"pitaya.cluster.sd.etcd.grantlease.retryinterval":       pitayaConfig.Cluster.SD.Etcd.GrantLease.RetryInterval,
@@ -141,6 +150,8 @@ func (c *Config) fillDefaultValues() {
 		"pitaya.defaultpipelines.structvalidation.enabled": pitayaConfig.DefaultPipelines.StructValidation.Enabled,
 		"pitaya.groups.etcd.dialtimeout":                   pitayaConfig.Groups.Etcd.DialTimeout,
 		"pitaya.groups.etcd.endpoints":                     pitayaConfig.Groups.Etcd.Endpoints,
+		"pitaya.groups.etcd.user":                          pitayaConfig.Groups.Etcd.User,
+		"pitaya.groups.etcd.pass":                          pitayaConfig.Groups.Etcd.Pass,
 		"pitaya.groups.etcd.prefix":                        pitayaConfig.Groups.Etcd.Prefix,
 		"pitaya.groups.etcd.transactiontimeout":            pitayaConfig.Groups.Etcd.TransactionTimeout,
 		"pitaya.groups.memory.tickduration":                pitayaConfig.Groups.Memory.TickDuration,
@@ -158,6 +169,8 @@ func (c *Config) fillDefaultValues() {
 		"pitaya.metrics.statsd.rate":                       pitayaConfig.Metrics.Statsd.Rate,
 		"pitaya.modules.bindingstorage.etcd.dialtimeout":   pitayaConfig.Modules.BindingStorage.Etcd.DialTimeout,
 		"pitaya.modules.bindingstorage.etcd.endpoints":     pitayaConfig.Modules.BindingStorage.Etcd.Endpoints,
+		"pitaya.modules.bindingstorage.etcd.user":          pitayaConfig.Modules.BindingStorage.Etcd.User,
+		"pitaya.modules.bindingstorage.etcd.pass":          pitayaConfig.Modules.BindingStorage.Etcd.Pass,
 		"pitaya.modules.bindingstorage.etcd.leasettl":      pitayaConfig.Modules.BindingStorage.Etcd.LeaseTTL,
 		"pitaya.modules.bindingstorage.etcd.prefix":        pitayaConfig.Modules.BindingStorage.Etcd.Prefix,
 		"pitaya.conn.ratelimiting.limit":                   pitayaConfig.Conn.RateLimiting.Limit,
@@ -170,6 +183,8 @@ func (c *Config) fillDefaultValues() {
 		"pitaya.worker.concurrency":                        pitayaConfig.Worker.Concurrency,
 		"pitaya.worker.redis.pool":                         pitayaConfig.Worker.Redis.Pool,
 		"pitaya.worker.redis.url":                          pitayaConfig.Worker.Redis.ServerURL,
+		"pitaya.worker.redis.username":                     pitayaConfig.Worker.Redis.Username,
+		"pitaya.worker.redis.password":                     pitayaConfig.Worker.Redis.Password,
 		"pitaya.worker.retry.enabled":                      pitayaConfig.Worker.Retry.Enabled,
 		"pitaya.worker.retry.exponential":                  pitayaConfig.Worker.Retry.Exponential,
 		"pitaya.worker.retry.max":                          pitayaConfig.Worker.Retry.Max,
@@ -193,6 +208,29 @@ func (c *Config) fillDefaultValues() {
 		// "pitaya.confsource.etcd.dialtimeout": pitayaConfig.ConfSource.Etcd.DialTimeout,
 		// "pitaya.confsource.formatter":        pitayaConfig.ConfSource.Formatter,
 	}
+
+	addTLSDefaults := func(prefix string, tlsConfig TLSConfig) {
+		defaultsMap[prefix+".enabled"] = tlsConfig.Enabled
+		defaultsMap[prefix+".cafile"] = tlsConfig.CAFile
+		defaultsMap[prefix+".certfile"] = tlsConfig.CertFile
+		defaultsMap[prefix+".keyfile"] = tlsConfig.KeyFile
+		defaultsMap[prefix+".servername"] = tlsConfig.ServerName
+	}
+	addNatsAuthDefaults := func(prefix string, authConfig NatsAuthConfig) {
+		defaultsMap[prefix+".username"] = authConfig.Username
+		defaultsMap[prefix+".password"] = authConfig.Password
+		defaultsMap[prefix+".token"] = authConfig.Token
+		defaultsMap[prefix+".credentialsfile"] = authConfig.CredentialsFile
+	}
+	addTLSDefaults("pitaya.cluster.rpc.client.nats.tls", pitayaConfig.Cluster.RPC.Client.Nats.TLS)
+	addNatsAuthDefaults("pitaya.cluster.rpc.client.nats.auth", pitayaConfig.Cluster.RPC.Client.Nats.Auth)
+	addTLSDefaults("pitaya.cluster.rpc.server.nats.tls", pitayaConfig.Cluster.RPC.Server.Nats.TLS)
+	addNatsAuthDefaults("pitaya.cluster.rpc.server.nats.auth", pitayaConfig.Cluster.RPC.Server.Nats.Auth)
+	addTLSDefaults("pitaya.cluster.sd.etcd.tls", pitayaConfig.Cluster.SD.Etcd.TLS)
+	addTLSDefaults("pitaya.groups.etcd.tls", pitayaConfig.Groups.Etcd.TLS)
+	addTLSDefaults("pitaya.modules.bindingstorage.etcd.tls", pitayaConfig.Modules.BindingStorage.Etcd.TLS)
+	addTLSDefaults("pitaya.storage.redis.tls", pitayaConfig.Storage.Redis.TLS)
+	addTLSDefaults("pitaya.worker.redis.tls", pitayaConfig.Worker.Redis.TLS)
 
 	for param := range defaultsMap {
 		val := c.Get(param)

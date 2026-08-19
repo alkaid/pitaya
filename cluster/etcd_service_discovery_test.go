@@ -22,6 +22,7 @@ package cluster
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"os"
@@ -808,7 +809,12 @@ func (kv *cleanupBlockingKV) Txn(ctx context.Context) clientv3.Txn {
 	kv.txnCount++
 	txnCount := kv.txnCount
 	kv.lock.Unlock()
+	// Server registration now uses a fencing transaction before election work.
+	// This helper targets the subsequent campaign and cleanup transactions.
 	if txnCount == 1 {
+		return kv.KV.Txn(ctx)
+	}
+	if txnCount == 2 {
 		return &signalingTxn{
 			Txn:       kv.KV.Txn(ctx),
 			committed: kv.campaignCommitted,
@@ -915,12 +921,12 @@ func getEtcdSD(t *testing.T, config config.EtcdServiceDiscoveryConfig, server *S
 	t.Cleanup(func() {
 		require.NoError(t, etcdSD.Shutdown())
 		select {
-		case <-etcdSD.callbackDrained:
+		case <-etcdSD.watch.callbacks.drainedSignal():
 		case <-time.After(5 * time.Second):
 			t.Error("timed out waiting for callback dispatcher cleanup")
 		}
 		select {
-		case <-etcdSD.leaderCallbackDrained:
+		case <-etcdSD.election.callbacks.drainedSignal():
 		case <-time.After(5 * time.Second):
 			t.Error("timed out waiting for leader callback dispatcher cleanup")
 		}
@@ -962,6 +968,24 @@ func TestNewEtcdServiceDiscovery(t *testing.T) {
 	}
 }
 
+func TestNewEtcdServiceDiscoveryInvalidatesOwnerBeforeInit(t *testing.T) {
+	server := NewServer("startup-fence", "room", false)
+	_, validBefore := server.OwnerEpochSnapshot()
+	require.True(t, validBefore)
+
+	discovery, err := NewEtcdServiceDiscovery(
+		config.NewDefaultPitayaConfig().Cluster.SD.Etcd,
+		server,
+		nil,
+	)
+	require.NoError(t, err)
+	require.NotNil(t, discovery)
+
+	epoch, validAfter := server.OwnerEpochSnapshot()
+	assert.Zero(t, epoch)
+	assert.False(t, validAfter)
+}
+
 func TestNewEtcdServiceDiscoveryRejectsInvalidIdentity(t *testing.T) {
 	cfg := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
 	tests := []struct {
@@ -981,6 +1005,53 @@ func TestNewEtcdServiceDiscoveryRejectsInvalidIdentity(t *testing.T) {
 			assert.Nil(t, sd)
 		})
 	}
+}
+
+func TestEtcdServiceDiscoveryReadViewsAndAppDieSignal(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
+	self := NewServer("self-1", "connector", true, nil)
+	sd := getEtcdSD(t, cfg, self, nil)
+
+	assert.Same(t, self, sd.GetSelfServer())
+	frontend, err := sd.GetAnyFrontend()
+	require.Error(t, err)
+	assert.Nil(t, frontend)
+
+	backend := NewServer("room-1", "room", false, nil)
+	otherFrontend := NewServer("connector-2", "connector", true, nil)
+	sd.watch.byID.Store(backend.ID, backend)
+	sd.watch.byID.Store(otherFrontend.ID, otherFrontend)
+	frontend, err = sd.GetAnyFrontend()
+	require.NoError(t, err)
+	assert.Same(t, otherFrontend, frontend)
+
+	sd.watch.byTypeMu.Lock()
+	sd.watch.byType[backend.Type] = map[string]*Server{backend.ID: backend}
+	sd.watch.byType["empty"] = map[string]*Server{}
+	sd.watch.byTypeMu.Unlock()
+	types := sd.GetServerTypes()
+	require.Len(t, types, 1)
+	assert.Same(t, backend, types[backend.Type])
+	delete(types, backend.Type)
+	assert.Same(t, backend, sd.GetServerTypes()[backend.Type], "returned map must not alias discovery state")
+
+	die := make(chan bool, 1)
+	sd.lifecycle.appDieChan = die
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	sd.signalAppDie(canceled)
+	select {
+	case <-die:
+		t.Fatal("canceled discovery context must not terminate the app")
+	default:
+	}
+	sd.signalAppDie(context.Background())
+	select {
+	case <-die:
+	case <-time.After(time.Second):
+		t.Fatal("live discovery context did not signal app termination")
+	}
+	sd.AfterInit()
 }
 
 func TestEtcdInjectedClientRemainsCallerOwned(t *testing.T) {
@@ -1023,12 +1094,12 @@ func TestEtcdSDBootstrapLease(t *testing.T) {
 			c, cli := helpers.GetTestEtcd(t)
 			t.Cleanup(func() { c.Terminate(t) })
 			e := getEtcdSD(t, config, table.server, cli)
-			e.lifecycleLock.Lock()
-			e.lifecycleState = etcdLifecycleInitializing
-			e.lifecycleLock.Unlock()
-			err := e.grantLease(e.leaseCtx)
+			e.lifecycle.mu.Lock()
+			e.lifecycle.state = etcdLifecycleInitializing
+			e.lifecycle.mu.Unlock()
+			err := e.grantLease(e.lease.ctx)
 			assert.NoError(t, err)
-			assert.NotZero(t, e.leaseID.Load())
+			assert.NotZero(t, e.lease.id.Load())
 		})
 	}
 }
@@ -1041,7 +1112,7 @@ func TestEtcdSDBootstrapLeaseError(t *testing.T) {
 			t.Cleanup(func() { c.Terminate(t) })
 			e := getEtcdSD(t, config, table.server, cli)
 			e.etcdDialTimeout = -time.Nanosecond
-			err := e.grantLease(e.leaseCtx)
+			err := e.grantLease(e.lease.ctx)
 			assert.ErrorIs(t, err, context.DeadlineExceeded)
 		})
 	}
@@ -1061,7 +1132,7 @@ func TestEtcdSDBootstrapServer(t *testing.T) {
 			assert.NoError(t, err)
 			assert.NotNil(t, v)
 			assert.Equal(t, 1, len(v.Kvs))
-			generatedSv, ok := e.serverMapByID.Load(table.server.ID)
+			generatedSv, ok := e.watch.byID.Load(table.server.ID)
 			assert.True(t, ok)
 			assert.Equal(t, table.server, generatedSv)
 			val := v.Kvs[0]
@@ -1082,8 +1153,8 @@ func TestEtcdSDDeleteServer(t *testing.T) {
 			err := e.bootstrapServer(table.server)
 			assert.NoError(t, err)
 			e.deleteServer(table.server.ID)
-			e.serverMapByID.Delete(table.server.ID)
-			generatedSv, ok := e.serverMapByID.Load(table.server.ID)
+			e.watch.byID.Delete(table.server.ID)
+			generatedSv, ok := e.watch.byID.Load(table.server.ID)
 			assert.False(t, ok)
 			assert.Nil(t, generatedSv)
 			_, err = e.GetServersByType(table.server.Type)
@@ -1287,9 +1358,16 @@ func TestEtcdSDGetServers(t *testing.T) {
 				e.bootstrapServer(server)
 			}
 			serverList := e.GetServers()
-			var checkList []*Server
-			checkList = append(table.servers, self)
-			assert.ElementsMatch(t, checkList, serverList)
+			expectedJSON := make([]string, 0, len(table.servers)+1)
+			for _, server := range append(table.servers, self) {
+				expectedJSON = append(expectedJSON, server.AsJSONString())
+			}
+			actualJSON := make([]string, 0, len(serverList))
+			for _, server := range serverList {
+				actualJSON = append(actualJSON, server.AsJSONString())
+				assert.NotZero(t, server.OwnerEpoch())
+			}
+			assert.ElementsMatch(t, expectedJSON, actualJSON)
 		})
 	}
 }
@@ -1305,13 +1383,13 @@ func TestEtcdSDInit(t *testing.T) {
 			// should set running
 			assert.True(t, e.Running())
 			// should have a leaseid
-			assert.NotZero(t, e.leaseID.Load())
+			assert.NotZero(t, e.lease.id.Load())
 			// should register the server
 			sv, err := e.GetServer(table.server.ID)
 			assert.NoError(t, err)
 			assert.Equal(t, table.server, sv)
 			// Init completes the first server snapshot before returning.
-			assert.NotZero(t, e.lastSyncUnixNano.Load())
+			assert.NotZero(t, e.watch.lastSync.Load())
 		})
 	}
 }
@@ -1470,6 +1548,50 @@ func TestEtcdSDConcurrentInitSharesOneResult(t *testing.T) {
 	factoryLock.Unlock()
 }
 
+func TestEtcdSDOwnedClientConfigIncludesTLSAndAuth(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
+	cfg.User = "etcd-user"
+	cfg.Pass = "etcd-password"
+	cfg.TLS.Enabled = true
+	cfg.TLS.ServerName = "etcd.internal"
+	sd := getEtcdSD(t, cfg, NewServer("frontend-self", "frontend", true, nil), nil)
+
+	var captured clientv3.Config
+	sd.newEtcdClient = func(clientConfig clientv3.Config) (*clientv3.Client, error) {
+		captured = clientConfig
+		return nil, nil
+	}
+
+	client, err := sd.newOwnedClient()
+	require.NoError(t, err)
+	assert.Nil(t, client)
+	assert.Equal(t, cfg.Endpoints, captured.Endpoints)
+	assert.Equal(t, cfg.DialTimeout, captured.DialTimeout)
+	assert.Equal(t, cfg.User, captured.Username)
+	assert.Equal(t, cfg.Pass, captured.Password)
+	require.NotNil(t, captured.TLS)
+	assert.Equal(t, uint16(tls.VersionTLS12), captured.TLS.MinVersion)
+	assert.Equal(t, cfg.TLS.ServerName, captured.TLS.ServerName)
+}
+
+func TestEtcdSDInvalidTLSPreventsClientCreation(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
+	cfg.TLS.ServerName = "etcd.internal"
+	sd := getEtcdSD(t, cfg, NewServer("frontend-self", "frontend", true, nil), nil)
+	factoryCalled := false
+	sd.newEtcdClient = func(clientv3.Config) (*clientv3.Client, error) {
+		factoryCalled = true
+		return nil, nil
+	}
+
+	client, err := sd.newOwnedClient()
+
+	assert.Nil(t, client)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pitaya.cluster.sd.etcd.tls.enabled")
+	assert.False(t, factoryCalled)
+}
+
 func TestEtcdSDShutdownRejectsLateOwnedClientPublication(t *testing.T) {
 	cfg := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
 	embedded, source := helpers.GetTestEtcd(t)
@@ -1499,9 +1621,9 @@ func TestEtcdSDShutdownRejectsLateOwnedClientPublication(t *testing.T) {
 	shutdownResult := make(chan error, 1)
 	go func() { shutdownResult <- sd.Shutdown() }()
 	helpers.ShouldEventuallyReturn(t, func() etcdLifecycleState {
-		sd.lifecycleLock.Lock()
-		defer sd.lifecycleLock.Unlock()
-		return sd.lifecycleState
+		sd.lifecycle.mu.Lock()
+		defer sd.lifecycle.mu.Unlock()
+		return sd.lifecycle.state
 	}, etcdLifecycleStopping)
 	release()
 
@@ -1512,11 +1634,11 @@ func TestEtcdSDShutdownRejectsLateOwnedClientPublication(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("owned client candidate remained open after losing publication race")
 	}
-	sd.lifecycleLock.Lock()
+	sd.lifecycle.mu.Lock()
 	assert.Nil(t, sd.cli)
 	assert.False(t, sd.ownsClient)
-	assert.Equal(t, etcdLifecycleStopped, sd.lifecycleState)
-	sd.lifecycleLock.Unlock()
+	assert.Equal(t, etcdLifecycleStopped, sd.lifecycle.state)
+	sd.lifecycle.mu.Unlock()
 }
 
 func TestEtcdSDShutdownBeforeInitPreventsClientCreation(t *testing.T) {
@@ -1560,9 +1682,7 @@ func TestEtcdSDSyncServersWaitsForConcurrentCallback(t *testing.T) {
 	result := make(chan error, 1)
 	go func() { result <- sd.SyncServers(true) }()
 	helpers.ShouldEventuallyReturn(t, func() int {
-		sd.callbackLock.Lock()
-		defer sd.callbackLock.Unlock()
-		return len(sd.callbackQueue)
+		return sd.watch.callbacks.snapshot().queued
 	}, 1)
 
 	select {
@@ -1714,9 +1834,7 @@ func TestEtcdSDLeaderQueueBackpressureAllowsListenerStateRead(t *testing.T) {
 		published <- sd.notifyLeaderChange(1, "frontend-other", false)
 	}()
 	helpers.ShouldEventuallyReturn(t, func() int {
-		sd.leaderCallbackLock.Lock()
-		defer sd.leaderCallbackLock.Unlock()
-		return sd.leaderCallbackWaiters
+		return sd.election.callbacks.snapshot().waiters
 	}, 1)
 
 	release()
@@ -1772,9 +1890,7 @@ func TestEtcdSDLeaderQueueStopWakesSaturatedPublisher(t *testing.T) {
 		published <- sd.notifyLeaderChange(1, "frontend-other", false)
 	}()
 	helpers.ShouldEventuallyReturn(t, func() int {
-		sd.leaderCallbackLock.Lock()
-		defer sd.leaderCallbackLock.Unlock()
-		return sd.leaderCallbackWaiters
+		return sd.election.callbacks.snapshot().waiters
 	}, 1)
 	select {
 	case accepted := <-published:
@@ -1792,7 +1908,7 @@ func TestEtcdSDLeaderQueueStopWakesSaturatedPublisher(t *testing.T) {
 	release()
 	<-blockerDone
 	select {
-	case <-sd.leaderCallbackDrained:
+	case <-sd.election.callbacks.drainedSignal():
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out draining saturated leader callback queue")
 	}
@@ -1825,9 +1941,7 @@ func TestEtcdSDCallbackQueueAppliesBackpressure(t *testing.T) {
 		extraEnqueued <- enqueueResult{done: done, accepted: accepted}
 	}()
 	helpers.ShouldEventuallyReturn(t, func() int {
-		sd.callbackLock.Lock()
-		defer sd.callbackLock.Unlock()
-		return sd.callbackWaiters
+		return sd.watch.callbacks.snapshot().waiters
 	}, 1)
 
 	select {
@@ -1880,9 +1994,7 @@ func TestEtcdSDCallbackQueueSeparatesProducerAndConsumerWakeups(t *testing.T) {
 		}()
 	}
 	helpers.ShouldEventuallyReturn(t, func() int {
-		sd.callbackLock.Lock()
-		defer sd.callbackLock.Unlock()
-		return sd.callbackWaiters
+		return sd.watch.callbacks.snapshot().waiters
 	}, producerCount)
 
 	release()
@@ -1966,7 +2078,7 @@ func TestEtcdSDSyncServersWaitsForDrainWhenBarrierIsRejected(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() { result <- sd.SyncServers(true) }()
-	helpers.ShouldEventuallyReturn(t, sd.callbackBarrierWaiters.Load, int32(1), 10*time.Millisecond, 5*time.Second)
+	helpers.ShouldEventuallyReturn(t, sd.watch.callbacks.barrierWaiterCount, int32(1), 10*time.Millisecond, 5*time.Second)
 	select {
 	case err := <-result:
 		t.Fatalf("SyncServers returned before accepted callbacks drained: %v", err)
@@ -2051,7 +2163,7 @@ func TestEtcdSDWatchEventsApplyMonotonicServerRevisions(t *testing.T) {
 		server, err = sd.GetServer("room-1")
 		require.NoError(t, err)
 		assert.Equal(t, "recovered", server.Metadata["version"])
-		assert.Equal(t, revision, sd.serverRevisions["room-1"])
+		assert.Equal(t, revision, sd.watch.revisions["room-1"])
 	}
 
 	recoveryRevision := int64(23 + len(malformedPayloads))
@@ -2128,7 +2240,7 @@ func TestEtcdSDSnapshotPrunesRevisionTombstones(t *testing.T) {
 		Header: etcdserverpb.ResponseHeader{Revision: liveRevision},
 		Events: events,
 	})
-	require.Len(t, sd.serverRevisions, tombstoneCount+1)
+	require.Len(t, sd.watch.revisions, tombstoneCount+1)
 
 	snapshotRevision := int64(tombstoneCount + 100)
 	_, _ = sd.applyServerSnapshot(&etcdServerSnapshot{
@@ -2136,9 +2248,9 @@ func TestEtcdSDSnapshotPrunesRevisionTombstones(t *testing.T) {
 		serverIDs: map[string]struct{}{live.ID: {}},
 	}, false)
 
-	assert.Equal(t, snapshotRevision, sd.serverRevisionFloor)
-	require.Len(t, sd.serverRevisions, 1)
-	assert.Equal(t, liveRevision, sd.serverRevisions[live.ID])
+	assert.Equal(t, snapshotRevision, sd.watch.revisionFloor)
+	require.Len(t, sd.watch.revisions, 1)
+	assert.Equal(t, liveRevision, sd.watch.revisions[live.ID])
 
 	stale := NewServer("gone-0000", "room", false, map[string]string{"version": "stale"})
 	sd.applyEtcdWatchResponse(clientv3.WatchResponse{
@@ -2154,7 +2266,7 @@ func TestEtcdSDSnapshotPrunesRevisionTombstones(t *testing.T) {
 	})
 	_, err := sd.GetServer(stale.ID)
 	assert.ErrorIs(t, err, constants.ErrNoServerWithID)
-	assert.NotContains(t, sd.serverRevisions, stale.ID)
+	assert.NotContains(t, sd.watch.revisions, stale.ID)
 
 	fresh := NewServer(stale.ID, stale.Type, false, map[string]string{"version": "fresh"})
 	sd.applyEtcdWatchResponse(clientv3.WatchResponse{
@@ -2209,13 +2321,13 @@ func TestEtcdSDSnapshotPruneRetainsNewerWatchTombstone(t *testing.T) {
 	_, _ = sd.applyServerSnapshot(staleSnapshot, false)
 	_, err := sd.GetServer(server.ID)
 	assert.ErrorIs(t, err, constants.ErrNoServerWithID)
-	assert.Equal(t, int64(30), sd.serverRevisions[server.ID])
+	assert.Equal(t, int64(30), sd.watch.revisions[server.ID])
 
 	_, _ = sd.applyServerSnapshot(&etcdServerSnapshot{
 		revision:  40,
 		serverIDs: map[string]struct{}{},
 	}, false)
-	assert.NotContains(t, sd.serverRevisions, server.ID)
+	assert.NotContains(t, sd.watch.revisions, server.ID)
 
 	sd.applyEtcdWatchResponse(clientv3.WatchResponse{
 		Header: etcdserverpb.ResponseHeader{Revision: 40},
@@ -2261,8 +2373,8 @@ func TestEtcdSDWatchCheckpointUsesCompleteEventRevision(t *testing.T) {
 		Header:  etcdserverpb.ResponseHeader{Revision: 100},
 		Created: true,
 	})
-	assert.Equal(t, int64(10), sd.watchRevision)
-	assert.Equal(t, int64(10), sd.serverRevisionFloor)
+	assert.Equal(t, int64(10), sd.watch.watchRevision)
+	assert.Equal(t, int64(10), sd.watch.revisionFloor)
 
 	server := NewServer("room-1", "room", false, nil)
 	sd.applyEtcdWatchResponse(clientv3.WatchResponse{
@@ -2276,14 +2388,14 @@ func TestEtcdSDWatchCheckpointUsesCompleteEventRevision(t *testing.T) {
 			},
 		}},
 	})
-	assert.Equal(t, int64(20), sd.watchRevision)
-	assert.Equal(t, int64(20), sd.serverRevisionFloor)
+	assert.Equal(t, int64(20), sd.watch.watchRevision)
+	assert.Equal(t, int64(20), sd.watch.revisionFloor)
 
 	sd.applyEtcdWatchResponse(clientv3.WatchResponse{
 		Header: etcdserverpb.ResponseHeader{Revision: 25},
 	})
-	assert.Equal(t, int64(25), sd.watchRevision)
-	assert.Equal(t, int64(25), sd.serverRevisionFloor)
+	assert.Equal(t, int64(25), sd.watch.watchRevision)
+	assert.Equal(t, int64(25), sd.watch.revisionFloor)
 }
 
 func TestEtcdSDWatchCheckpointAdvancesBeforeFirstSnapshotWithoutGC(t *testing.T) {
@@ -2302,16 +2414,16 @@ func TestEtcdSDWatchCheckpointAdvancesBeforeFirstSnapshotWithoutGC(t *testing.T)
 			},
 		}},
 	})
-	assert.Equal(t, int64(20), sd.watchRevision)
-	assert.Zero(t, sd.serverRevisionFloor)
-	assert.Equal(t, int64(20), sd.serverRevisions[server.ID])
+	assert.Equal(t, int64(20), sd.watch.watchRevision)
+	assert.Zero(t, sd.watch.revisionFloor)
+	assert.Equal(t, int64(20), sd.watch.revisions[server.ID])
 
 	sd.applyEtcdWatchResponse(clientv3.WatchResponse{
 		Header: etcdserverpb.ResponseHeader{Revision: 25},
 	})
-	assert.Equal(t, int64(25), sd.watchRevision)
-	assert.Zero(t, sd.serverRevisionFloor)
-	assert.Equal(t, int64(20), sd.serverRevisions[server.ID])
+	assert.Equal(t, int64(25), sd.watch.watchRevision)
+	assert.Zero(t, sd.watch.revisionFloor)
+	assert.Equal(t, int64(20), sd.watch.revisions[server.ID])
 }
 
 func TestEtcdSDWatchPrunesRevisionTombstonesAfterBase(t *testing.T) {
@@ -2348,9 +2460,9 @@ func TestEtcdSDWatchPrunesRevisionTombstonesAfterBase(t *testing.T) {
 		Events: events,
 	})
 
-	assert.Equal(t, lastEventRevision, sd.watchRevision)
-	assert.Equal(t, lastEventRevision, sd.serverRevisionFloor)
-	assert.Empty(t, sd.serverRevisions)
+	assert.Equal(t, lastEventRevision, sd.watch.watchRevision)
+	assert.Equal(t, lastEventRevision, sd.watch.revisionFloor)
+	assert.Empty(t, sd.watch.revisions)
 }
 
 func TestEtcdSDWatchGCRejectsStaleSnapshotAndEvents(t *testing.T) {
@@ -2382,7 +2494,7 @@ func TestEtcdSDWatchGCRejectsStaleSnapshotAndEvents(t *testing.T) {
 			},
 		}},
 	})
-	assert.NotContains(t, sd.serverRevisions, server.ID)
+	assert.NotContains(t, sd.watch.revisions, server.ID)
 
 	_, _ = sd.applyServerSnapshot(staleSnapshot, false)
 	_, err := sd.GetServer(server.ID)
@@ -2458,8 +2570,8 @@ func TestEtcdSDInvalidWatchResponseDoesNotPartiallyAdvance(t *testing.T) {
 	})
 	_, err := sd.GetServer(server.ID)
 	assert.ErrorIs(t, err, constants.ErrNoServerWithID)
-	assert.Equal(t, int64(10), sd.watchRevision)
-	assert.Equal(t, int64(10), sd.serverRevisionFloor)
+	assert.Equal(t, int64(10), sd.watch.watchRevision)
+	assert.Equal(t, int64(10), sd.watch.revisionFloor)
 }
 
 func TestEtcdSDInvalidWatchResponseRecoversFromSnapshot(t *testing.T) {
@@ -2508,9 +2620,9 @@ func TestEtcdSDInvalidWatchResponseRecoversFromSnapshot(t *testing.T) {
 	}, true, 20*time.Millisecond, 5*time.Second)
 	_, err = sd.GetServer(bogus.ID)
 	assert.ErrorIs(t, err, constants.ErrNoServerWithID)
-	sd.syncServersLock.Lock()
-	revisionFloor := sd.serverRevisionFloor
-	sd.syncServersLock.Unlock()
+	sd.watch.reconcileMu.Lock()
+	revisionFloor := sd.watch.revisionFloor
+	sd.watch.reconcileMu.Unlock()
 	assert.Positive(t, revisionFloor)
 }
 
@@ -2554,9 +2666,9 @@ func TestEtcdSDKeysOnlySyncRepairsExistingServerRevision(t *testing.T) {
 			actual, getErr := sd.GetServer(server.ID)
 			require.NoError(t, getErr)
 			assert.Equal(t, "two", actual.Metadata["version"])
-			sd.syncServersLock.Lock()
-			assert.Equal(t, put.Header.Revision, sd.serverRevisions[server.ID])
-			sd.syncServersLock.Unlock()
+			sd.watch.reconcileMu.Lock()
+			assert.Equal(t, put.Header.Revision, sd.watch.revisions[server.ID])
+			sd.watch.reconcileMu.Unlock()
 		})
 	}
 
@@ -2585,10 +2697,10 @@ func TestEtcdSDWatchRecoversFromCompactedCheckpoint(t *testing.T) {
 	require.NoError(t, err)
 
 	sd.addServer(NewServer(server.ID, server.Type, false, map[string]string{"version": "stale"}))
-	sd.syncServersLock.Lock()
-	sd.serverRevisions[server.ID] = firstPut.Header.Revision
-	sd.watchRevision = firstPut.Header.Revision - 1
-	sd.syncServersLock.Unlock()
+	sd.watch.reconcileMu.Lock()
+	sd.watch.revisions[server.ID] = firstPut.Header.Revision
+	sd.watch.watchRevision = firstPut.Header.Revision - 1
+	sd.watch.reconcileMu.Unlock()
 
 	watchCtx, cancelWatch := context.WithCancel(context.Background())
 	watchDone := make(chan struct{})
@@ -2647,10 +2759,10 @@ func TestEtcdSDListenerCanShutdown(t *testing.T) {
 func TestEtcdSDLeaderListenerCanShutdown(t *testing.T) {
 	cfg := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
 	sd := getEtcdSD(t, cfg, NewServer("frontend-self", "frontend", true, nil), nil)
-	sd.lifecycleLock.Lock()
-	sd.lifecycleState = etcdLifecycleRunning
-	sd.lifecycleLock.Unlock()
-	sd.running.Store(true)
+	sd.lifecycle.mu.Lock()
+	sd.lifecycle.state = etcdLifecycleRunning
+	sd.lifecycle.mu.Unlock()
+	sd.lifecycle.running.Store(true)
 
 	result := make(chan error, 1)
 	sd.OnLeaderChange(func(string) {
@@ -2666,7 +2778,7 @@ func TestEtcdSDLeaderListenerCanShutdown(t *testing.T) {
 		t.Fatal("timed out waiting for service discovery shutdown from leader callback")
 	}
 	select {
-	case <-sd.leaderCallbackDrained:
+	case <-sd.election.callbacks.drainedSignal():
 	case <-time.After(5 * time.Second):
 		t.Fatal("leader callback dispatcher did not drain after shutdown")
 	}
@@ -2733,14 +2845,14 @@ func TestEtcdSDRenewFailureCancelsCandidateLease(t *testing.T) {
 	self := NewServer("frontend-self", "frontend", true, nil)
 	sd := getEtcdSD(t, cfg, self, cli)
 	require.NoError(t, sd.Init())
-	activeLeaseID := sd.leaseID.Load()
+	activeLeaseID := sd.lease.id.Load()
 
 	putErr := errors.New("candidate registration unavailable")
 	sd.cli.KV = &failingPutKV{KV: sd.cli.KV, err: putErr}
 	lease := &trackingLease{Lease: sd.cli.Lease}
 	sd.cli.Lease = lease
-	assert.ErrorIs(t, sd.renewLease(sd.lifecycleCtx, clientv3.LeaseID(activeLeaseID)), putErr)
-	assert.Equal(t, activeLeaseID, sd.leaseID.Load())
+	assert.ErrorIs(t, sd.renewLease(sd.lifecycle.ctx, clientv3.LeaseID(activeLeaseID)), putErr)
+	assert.Equal(t, activeLeaseID, sd.lease.id.Load())
 
 	candidateCtx := lease.lastContext()
 	require.NotNil(t, candidateCtx)
@@ -2763,7 +2875,7 @@ func TestEtcdSDRenewalStopsFlushWhenCandidateCannotBeFenced(t *testing.T) {
 	revokeErr := errors.New("ambiguous candidate revoke")
 	sd.cli.KV = &failingPutKV{KV: sd.cli.KV, err: transitionErr}
 	sd.cli.Lease = &failingRevokeLease{Lease: sd.cli.Lease, err: revokeErr}
-	err := sd.renewLease(sd.lifecycleCtx, clientv3.LeaseID(sd.leaseID.Load()))
+	err := sd.renewLease(sd.lifecycle.ctx, clientv3.LeaseID(sd.lease.id.Load()))
 	assert.ErrorIs(t, err, errEtcdCandidateLeaseUnfenced)
 	assert.ErrorIs(t, err, revokeErr)
 	assert.ErrorIs(t, sd.FlushServer2Cluster(self), context.Canceled)
@@ -2783,9 +2895,9 @@ func TestEtcdSDRenewalPreservesLastSuccessfulSelfPayload(t *testing.T) {
 	updatedSelf.Metadata = map[string]string{"status": "running", "capacity": "17"}
 	require.NoError(t, sd.FlushServer2Cluster(&updatedSelf))
 
-	oldLeaseID := clientv3.LeaseID(sd.leaseID.Load())
-	require.NoError(t, sd.renewLease(sd.lifecycleCtx, oldLeaseID))
-	newLeaseID := sd.leaseID.Load()
+	oldLeaseID := clientv3.LeaseID(sd.lease.id.Load())
+	require.NoError(t, sd.renewLease(sd.lifecycle.ctx, oldLeaseID))
+	newLeaseID := sd.lease.id.Load()
 	require.NotEqual(t, int64(oldLeaseID), newLeaseID)
 
 	response, err := sd.cli.Get(context.Background(), getKey(self.ID, self.Type))
@@ -2810,12 +2922,12 @@ func TestEtcdSDRenewalReconcilesCommittedPutAtDeadline(t *testing.T) {
 			self := NewServer("frontend-self", "frontend", true, nil)
 			sd := getEtcdSD(t, cfg, self, cli)
 			require.NoError(t, sd.Init())
-			sd.grantLeaseTimeout = time.Second
-			oldLeaseID := clientv3.LeaseID(sd.leaseID.Load())
+			sd.lease.grantTimeout = time.Second
+			oldLeaseID := clientv3.LeaseID(sd.lease.id.Load())
 			sd.cli.KV = &postCommitTimeoutPutKV{KV: sd.cli.KV, returnError: returnError}
 
-			require.NoError(t, sd.renewLease(sd.lifecycleCtx, oldLeaseID))
-			newLeaseID := sd.leaseID.Load()
+			require.NoError(t, sd.renewLease(sd.lifecycle.ctx, oldLeaseID))
+			newLeaseID := sd.lease.id.Load()
 			require.NotEqual(t, int64(oldLeaseID), newLeaseID)
 			response, err := sd.cli.Get(context.Background(), getKey(self.ID, self.Type))
 			require.NoError(t, err)
@@ -2832,7 +2944,7 @@ func TestEtcdSDRenewalFencesCandidateTransactionThatCommitsAfterReconciliation(t
 	self := NewServer("frontend-self", "frontend", true, map[string]string{"version": "published"})
 	sd := getEtcdSD(t, cfg, self, cli)
 	require.NoError(t, sd.Init())
-	oldLeaseID := clientv3.LeaseID(sd.leaseID.Load())
+	oldLeaseID := clientv3.LeaseID(sd.lease.id.Load())
 
 	ambiguousErr := errors.New("ambiguous candidate transaction")
 	deferred := &deferredMutationKV{
@@ -2843,7 +2955,7 @@ func TestEtcdSDRenewalFencesCandidateTransactionThatCommitsAfterReconciliation(t
 		result:  make(chan deferredMutationResult, 1),
 	}
 	sd.cli.KV = deferred
-	assert.ErrorIs(t, sd.renewLease(sd.lifecycleCtx, oldLeaseID), ambiguousErr)
+	assert.ErrorIs(t, sd.renewLease(sd.lifecycle.ctx, oldLeaseID), ambiguousErr)
 	select {
 	case <-deferred.started:
 	default:
@@ -2867,7 +2979,7 @@ func TestEtcdSDDelayedFlushCannotRebindRegistrationToOldLease(t *testing.T) {
 	self := NewServer("frontend-self", "frontend", true, map[string]string{"version": "published"})
 	sd := getEtcdSD(t, cfg, self, cli)
 	require.NoError(t, sd.Init())
-	oldLeaseID := clientv3.LeaseID(sd.leaseID.Load())
+	oldLeaseID := clientv3.LeaseID(sd.lease.id.Load())
 
 	ambiguousErr := errors.New("ambiguous flush transaction")
 	deferred := &deferredMutationKV{
@@ -2887,8 +2999,8 @@ func TestEtcdSDDelayedFlushCannotRebindRegistrationToOldLease(t *testing.T) {
 		t.Fatal("flush transaction was not captured")
 	}
 
-	require.NoError(t, sd.renewLease(sd.lifecycleCtx, oldLeaseID))
-	newLeaseID := sd.leaseID.Load()
+	require.NoError(t, sd.renewLease(sd.lifecycle.ctx, oldLeaseID))
+	newLeaseID := sd.lease.id.Load()
 	require.NotEqual(t, int64(oldLeaseID), newLeaseID)
 	close(deferred.release)
 	late := <-deferred.result
@@ -2910,7 +3022,7 @@ func TestEtcdSDRenewalSerializesFlushLeasePublication(t *testing.T) {
 	self := NewServer("frontend-self", "frontend", true, nil)
 	sd := getEtcdSD(t, cfg, self, cli)
 	require.NoError(t, sd.Init())
-	oldLeaseID := sd.leaseID.Load()
+	oldLeaseID := sd.lease.id.Load()
 
 	baseKV := sd.cli.KV
 	blockingKV := &postCommitBlockingPutKV{
@@ -2925,7 +3037,7 @@ func TestEtcdSDRenewalSerializesFlushLeasePublication(t *testing.T) {
 	t.Cleanup(release)
 
 	renewResult := make(chan error, 1)
-	go func() { renewResult <- sd.renewLease(sd.lifecycleCtx, clientv3.LeaseID(oldLeaseID)) }()
+	go func() { renewResult <- sd.renewLease(sd.lifecycle.ctx, clientv3.LeaseID(oldLeaseID)) }()
 	select {
 	case <-blockingKV.firstCommitted:
 	case <-time.After(5 * time.Second):
@@ -2959,12 +3071,151 @@ func TestEtcdSDRenewalSerializesFlushLeasePublication(t *testing.T) {
 		t.Fatal("FlushServer2Cluster did not finish")
 	}
 
-	newLeaseID := sd.leaseID.Load()
+	newLeaseID := sd.lease.id.Load()
 	require.NotEqual(t, oldLeaseID, newLeaseID)
 	response, err := baseKV.Get(context.Background(), getKey(self.ID, self.Type))
 	require.NoError(t, err)
 	require.Len(t, response.Kvs, 1)
 	assert.Equal(t, newLeaseID, response.Kvs[0].Lease)
+}
+
+func TestEtcdSDBeforeShutdownRevokesCommittedUnactivatedRenewalLease(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
+	embedded, cli := helpers.GetTestEtcd(t)
+	t.Cleanup(func() { embedded.Terminate(t) })
+	self := NewServer("frontend-self", "frontend", true, nil)
+	sd := getEtcdSD(t, cfg, self, cli)
+	sd.shutdownDelay = 0
+	require.NoError(t, sd.Init())
+	oldLeaseID := clientv3.LeaseID(sd.lease.id.Load())
+
+	baseKV := sd.cli.KV
+	blockingKV := &postCommitBlockingPutKV{
+		KV:             baseKV,
+		firstCommitted: make(chan struct{}),
+		secondStarted:  make(chan struct{}),
+		releaseFirst:   make(chan struct{}),
+	}
+	sd.cli.KV = blockingKV
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(blockingKV.releaseFirst) }) }
+	t.Cleanup(func() {
+		release()
+		_ = sd.Shutdown()
+	})
+
+	renewResult := make(chan error, 1)
+	go func() { renewResult <- sd.renewLease(sd.lifecycle.ctx, oldLeaseID) }()
+	select {
+	case <-blockingKV.firstCommitted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("candidate lease registration did not commit")
+	}
+	response, err := baseKV.Get(context.Background(), getKey(self.ID, self.Type))
+	require.NoError(t, err)
+	require.Len(t, response.Kvs, 1)
+	candidateLeaseID := clientv3.LeaseID(response.Kvs[0].Lease)
+	require.NotEqual(t, oldLeaseID, candidateLeaseID)
+
+	beforeShutdownDone := make(chan struct{})
+	go func() {
+		sd.BeforeShutdown()
+		close(beforeShutdownDone)
+	}()
+	helpers.ShouldEventuallyReturn(t, func() bool {
+		sd.lifecycle.mu.Lock()
+		defer sd.lifecycle.mu.Unlock()
+		return sd.lifecycle.state >= etcdLifecycleStopping
+	}, true, 10*time.Millisecond, 5*time.Second)
+	release()
+
+	select {
+	case renewErr := <-renewResult:
+		assert.ErrorIs(t, renewErr, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("lease renewal did not stop after shutdown began")
+	}
+	select {
+	case <-beforeShutdownDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("BeforeShutdown did not finish after renewal stopped")
+	}
+
+	response, err = baseKV.Get(context.Background(), getKey(self.ID, self.Type))
+	require.NoError(t, err)
+	assert.Empty(t, response.Kvs, "shutdown left the committed candidate registration behind")
+	ttl, err := cli.TimeToLive(context.Background(), candidateLeaseID)
+	require.NoError(t, err)
+	assert.Less(t, ttl.TTL, int64(0), "shutdown left the committed candidate lease granted")
+}
+
+func TestEtcdSDShutdownRevokesCommittedRenewalLeaseAfterLifecycleCancellation(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
+	embedded, cli := helpers.GetTestEtcd(t)
+	t.Cleanup(func() { embedded.Terminate(t) })
+	self := NewServer("frontend-self", "frontend", true, nil)
+	sd := getEtcdSD(t, cfg, self, cli)
+	require.NoError(t, sd.Init())
+	oldLeaseID := clientv3.LeaseID(sd.lease.id.Load())
+
+	baseKV := sd.cli.KV
+	blockingKV := &postCommitBlockingPutKV{
+		KV:             baseKV,
+		firstCommitted: make(chan struct{}),
+		secondStarted:  make(chan struct{}),
+		releaseFirst:   make(chan struct{}),
+	}
+	sd.cli.KV = blockingKV
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(blockingKV.releaseFirst) }) }
+	t.Cleanup(func() {
+		release()
+		_ = sd.Shutdown()
+	})
+
+	renewResult := make(chan error, 1)
+	require.True(t, sd.startLifecycleWorker(func() {
+		renewResult <- sd.renewLease(sd.lifecycle.ctx, oldLeaseID)
+	}))
+	select {
+	case <-blockingKV.firstCommitted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("candidate lease registration did not commit")
+	}
+	response, err := baseKV.Get(context.Background(), getKey(self.ID, self.Type))
+	require.NoError(t, err)
+	require.Len(t, response.Kvs, 1)
+	candidateLeaseID := clientv3.LeaseID(response.Kvs[0].Lease)
+	require.NotEqual(t, oldLeaseID, candidateLeaseID)
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- sd.Shutdown() }()
+	helpers.ShouldEventuallyReturn(t, func() bool {
+		sd.lifecycle.mu.Lock()
+		defer sd.lifecycle.mu.Unlock()
+		return sd.lifecycle.state >= etcdLifecycleStopping
+	}, true, 10*time.Millisecond, 5*time.Second)
+	release()
+
+	select {
+	case renewErr := <-renewResult:
+		assert.ErrorIs(t, renewErr, context.Canceled)
+	case <-time.After(5 * time.Second):
+		t.Fatal("lease renewal did not stop after shutdown canceled the lifecycle")
+	}
+	select {
+	case shutdownErr := <-shutdownDone:
+		require.NoError(t, shutdownErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown did not wait for candidate lease cleanup")
+	}
+
+	response, err = baseKV.Get(context.Background(), getKey(self.ID, self.Type))
+	require.NoError(t, err)
+	assert.Empty(t, response.Kvs, "shutdown left the committed candidate registration behind")
+	ttl, err := cli.TimeToLive(context.Background(), candidateLeaseID)
+	require.NoError(t, err)
+	assert.Less(t, ttl.TTL, int64(0), "shutdown left the committed candidate lease granted")
 }
 
 func TestEtcdSDConcurrentFlushesSharePublishedLease(t *testing.T) {
@@ -3071,17 +3322,17 @@ func TestEtcdSDRenewalUsesFinalConcurrentFlushCommit(t *testing.T) {
 		t.Fatal("first FlushServer2Cluster did not finish")
 	}
 
-	oldLeaseID := clientv3.LeaseID(sd.leaseID.Load())
+	oldLeaseID := clientv3.LeaseID(sd.lease.id.Load())
 	_, err := baseKV.Delete(context.Background(), getKey(self.ID, self.Type))
 	require.NoError(t, err)
-	require.NoError(t, sd.renewLease(sd.lifecycleCtx, oldLeaseID))
+	require.NoError(t, sd.renewLease(sd.lifecycle.ctx, oldLeaseID))
 	response, err := baseKV.Get(context.Background(), getKey(self.ID, self.Type))
 	require.NoError(t, err)
 	require.Len(t, response.Kvs, 1)
 	registered, err := parseServer(response.Kvs[0].Value)
 	require.NoError(t, err)
 	assert.Equal(t, "second", registered.Metadata["flush"])
-	assert.Equal(t, sd.leaseID.Load(), response.Kvs[0].Lease)
+	assert.Equal(t, sd.lease.id.Load(), response.Kvs[0].Lease)
 }
 
 func TestEtcdSDFlushKeepsHistoricalUnboundedRequestUntilShutdown(t *testing.T) {
@@ -3148,9 +3399,9 @@ func TestEtcdSDRenewalIsNotStarvedByBlockedFlush(t *testing.T) {
 		t.Fatal("FlushServer2Cluster did not enter its etcd Put")
 	}
 
-	oldLeaseID := clientv3.LeaseID(sd.leaseID.Load())
+	oldLeaseID := clientv3.LeaseID(sd.lease.id.Load())
 	renewalResult := make(chan error, 1)
-	go func() { renewalResult <- sd.renewLease(sd.lifecycleCtx, oldLeaseID) }()
+	go func() { renewalResult <- sd.renewLease(sd.lifecycle.ctx, oldLeaseID) }()
 	select {
 	case <-blockingKV.secondStarted:
 	case <-time.After(5 * time.Second):
@@ -3162,7 +3413,7 @@ func TestEtcdSDRenewalIsNotStarvedByBlockedFlush(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("lease renewal did not complete after crossing the publication gate")
 	}
-	assert.NotEqual(t, int64(oldLeaseID), sd.leaseID.Load())
+	assert.NotEqual(t, int64(oldLeaseID), sd.lease.id.Load())
 	release()
 	select {
 	case err := <-flushResult:
@@ -3175,10 +3426,10 @@ func TestEtcdSDRenewalIsNotStarvedByBlockedFlush(t *testing.T) {
 func TestEtcdSDLeaseActivationFailurePreservesPublishedLease(t *testing.T) {
 	cfg := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
 	sd := getEtcdSD(t, cfg, NewServer("frontend-self", "frontend", true, nil), nil)
-	sd.leaseID.Store(11)
-	sd.lifecycleLock.Lock()
-	sd.lifecycleState = etcdLifecycleStopping
-	sd.lifecycleLock.Unlock()
+	sd.lease.id.Store(11)
+	sd.lifecycle.mu.Lock()
+	sd.lifecycle.state = etcdLifecycleStopping
+	sd.lifecycle.mu.Unlock()
 	leaseCtx, cancelLease := context.WithCancel(context.Background())
 	t.Cleanup(cancelLease)
 
@@ -3193,7 +3444,7 @@ func TestEtcdSDLeaseActivationFailurePreservesPublishedLease(t *testing.T) {
 	releasePublication()
 	assert.False(t, published)
 	assert.ErrorIs(t, err, context.Canceled)
-	assert.Equal(t, int64(11), sd.leaseID.Load())
+	assert.Equal(t, int64(11), sd.lease.id.Load())
 }
 
 func TestEtcdSDRenewalDoesNotWaitForCallbackBackpressure(t *testing.T) {
@@ -3203,15 +3454,15 @@ func TestEtcdSDRenewalDoesNotWaitForCallbackBackpressure(t *testing.T) {
 	self := NewServer("frontend-self", "frontend", true, nil)
 	sd := getEtcdSD(t, cfg, self, cli)
 	sd.namespaceClient(sd.cli)
-	sd.lifecycleLock.Lock()
-	sd.lifecycleState = etcdLifecycleInitializing
-	sd.lifecycleLock.Unlock()
-	require.NoError(t, sd.grantLease(sd.leaseCtx))
-	sd.lifecycleLock.Lock()
-	sd.lifecycleState = etcdLifecycleRunning
-	sd.lifecycleLock.Unlock()
-	sd.running.Store(true)
-	require.NoError(t, sd.bootstrapServerWithLeaseContext(sd.lifecycleCtx, self, clientv3.LeaseID(sd.leaseID.Load())))
+	sd.lifecycle.mu.Lock()
+	sd.lifecycle.state = etcdLifecycleInitializing
+	sd.lifecycle.mu.Unlock()
+	require.NoError(t, sd.grantLease(sd.lease.ctx))
+	sd.lifecycle.mu.Lock()
+	sd.lifecycle.state = etcdLifecycleRunning
+	sd.lifecycle.mu.Unlock()
+	sd.lifecycle.running.Store(true)
+	require.NoError(t, sd.bootstrapServerWithLeaseContext(sd.lifecycle.ctx, self, clientv3.LeaseID(sd.lease.id.Load())))
 
 	remote := NewServer("room-1", "room", false, nil)
 	_, err := sd.cli.Put(context.Background(), getKey(remote.ID, remote.Type), remote.AsJSONString())
@@ -3233,7 +3484,7 @@ func TestEtcdSDRenewalDoesNotWaitForCallbackBackpressure(t *testing.T) {
 	}
 
 	renewResult := make(chan error, 1)
-	go func() { renewResult <- sd.renewLease(sd.lifecycleCtx, clientv3.LeaseID(sd.leaseID.Load())) }()
+	go func() { renewResult <- sd.renewLease(sd.lifecycle.ctx, clientv3.LeaseID(sd.lease.id.Load())) }()
 	select {
 	case err := <-renewResult:
 		require.NoError(t, err)
@@ -3256,7 +3507,7 @@ func TestEtcdBeforeShutdown(t *testing.T) {
 			assert.True(t, e.Running())
 			e.BeforeShutdown()
 			assert.True(t, e.Running())
-			_, err := cli.Revoke(context.TODO(), clientv3.LeaseID(e.leaseID.Load()))
+			_, err := cli.Revoke(context.TODO(), clientv3.LeaseID(e.lease.id.Load()))
 			assert.Error(t, err)
 		})
 	}
@@ -3341,10 +3592,14 @@ func TestEtcdBeforeShutdownWaitsForAcceptedCallbacks(t *testing.T) {
 		close(beforeShutdownDone)
 	}()
 	helpers.ShouldEventuallyReturn(t, func() bool {
-		sd.callbackLock.Lock()
-		defer sd.callbackLock.Unlock()
-		return sd.callbackStopping
+		return sd.watch.callbacks.snapshot().stopping
 	}, true)
+	ownerEpoch, ownerValid := sd.server.OwnerEpochSnapshot()
+	assert.False(t, ownerValid, "BeforeShutdown must fence RPC admission before callback drain")
+	assert.False(t, sd.publishSelfOwnerEpoch(ownerEpoch+1), "an in-flight renewal must not republish an owner epoch after shutdown starts")
+	republishedEpoch, ownerValid := sd.server.OwnerEpochSnapshot()
+	assert.Equal(t, ownerEpoch, republishedEpoch)
+	assert.False(t, ownerValid, "owner fencing must remain invalid throughout callback drain")
 	select {
 	case <-beforeShutdownDone:
 		t.Fatal("BeforeShutdown returned before accepted callbacks drained")
@@ -3387,6 +3642,8 @@ func TestEtcdBeforeShutdownDrainsAfterListenerShutdown(t *testing.T) {
 		t.Fatal("listener Shutdown did not return")
 	}
 	assert.False(t, sd.Running())
+	_, ownerValid := sd.server.OwnerEpochSnapshot()
+	assert.False(t, ownerValid, "reentrant Shutdown must immediately fence RPC admission")
 
 	beforeShutdownDone := make(chan struct{})
 	go func() {
@@ -3424,8 +3681,32 @@ func TestEtcdShutdown(t *testing.T) {
 			require.NoError(t, e.Shutdown())
 			require.NoError(t, e.Shutdown())
 			assert.False(t, e.Running())
+			ownerEpoch, ownerValid := e.server.OwnerEpochSnapshot()
+			assert.False(t, ownerValid)
+			assert.False(t, e.publishSelfOwnerEpoch(ownerEpoch+1))
 		})
 	}
+}
+
+func TestEtcdRevokeInvalidatesOwnerEpochOnFailure(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
+	embedded, cli := helpers.GetTestEtcd(t)
+	t.Cleanup(func() { embedded.Terminate(t) })
+	self := NewServer("frontend-self", "frontend", true, nil)
+	sd := getEtcdSD(t, cfg, self, cli)
+	require.NoError(t, sd.Init())
+	_, ownerValid := self.OwnerEpochSnapshot()
+	require.True(t, ownerValid)
+
+	revokeErr := errors.New("injected revoke failure")
+	originalLease := sd.cli.Lease
+	sd.cli.Lease = &failingRevokeLease{Lease: originalLease, err: revokeErr}
+	t.Cleanup(func() { sd.cli.Lease = originalLease })
+
+	err := sd.revoke()
+	assert.ErrorIs(t, err, revokeErr)
+	_, ownerValid = self.OwnerEpochSnapshot()
+	assert.False(t, ownerValid, "local RPC admission must fail closed even when etcd revoke fails")
 }
 
 func TestEtcdElectionInitPublishesStateBeforeAsyncCallback(t *testing.T) {
@@ -3437,7 +3718,7 @@ func TestEtcdElectionInitPublishesStateBeforeAsyncCallback(t *testing.T) {
 	t.Cleanup(func() { embedded.Terminate(t) })
 	self := NewServer("frontend-self", "frontend", true, nil)
 	sd := getEtcdSD(t, cfg, self, cli)
-	sd.reconnectBackOff = 10 * time.Millisecond
+	sd.election.reconnectDelay = 10 * time.Millisecond
 
 	callbackStarted := make(chan struct{})
 	releaseCallback := make(chan struct{})
@@ -3488,13 +3769,13 @@ func TestEtcdElectionReconnectAndShutdown(t *testing.T) {
 	t.Cleanup(func() { embedded.Terminate(t) })
 	self := NewServer("frontend-self", "frontend", true, nil)
 	sd := getEtcdSD(t, cfg, self, cli)
-	sd.reconnectBackOff = 10 * time.Millisecond
+	sd.election.reconnectDelay = 10 * time.Millisecond
 	require.NoError(t, sd.Init())
 	assert.True(t, sd.IsLeader(), "Init must publish the initial no-leader campaign result")
 
 	var previousLease clientv3.LeaseID
 	for attempt := 0; attempt < 2; attempt++ {
-		response, err := sd.cli.Get(context.Background(), sd.electionName+"/", clientv3.WithPrefix())
+		response, err := sd.cli.Get(context.Background(), sd.election.name+"/", clientv3.WithPrefix())
 		require.NoError(t, err)
 		require.Len(t, response.Kvs, 1)
 		leaseID := clientv3.LeaseID(response.Kvs[0].Lease)
@@ -3506,7 +3787,7 @@ func TestEtcdElectionReconnectAndShutdown(t *testing.T) {
 		require.NoError(t, err)
 
 		helpers.ShouldEventuallyReturn(t, func() bool {
-			current, err := sd.cli.Get(context.Background(), sd.electionName+"/", clientv3.WithPrefix())
+			current, err := sd.cli.Get(context.Background(), sd.election.name+"/", clientv3.WithPrefix())
 			return err == nil && len(current.Kvs) == 1 &&
 				clientv3.LeaseID(current.Kvs[0].Lease) != leaseID && sd.IsLeader()
 		}, true, 10*time.Millisecond, 5*time.Second)
@@ -3532,7 +3813,7 @@ func TestEtcdElectionObserveClosurePublishesOrderedGeneration(t *testing.T) {
 
 	leaderServer := NewServer("frontend-leader", "frontend", true, nil)
 	leader := getEtcdSD(t, cfg, leaderServer, newTestClientView(context.Background(), cli))
-	leader.reconnectBackOff = 10 * time.Millisecond
+	leader.election.reconnectDelay = 10 * time.Millisecond
 	require.NoError(t, leader.Init())
 	assert.True(t, leader.IsLeader())
 
@@ -3555,7 +3836,7 @@ func TestEtcdElectionObserveClosurePublishesOrderedGeneration(t *testing.T) {
 	followerClient.KV = campaignGate
 	followerClient.Watcher = closingWatcher
 	follower := getEtcdSD(t, cfg, followerServer, followerClient)
-	follower.reconnectBackOff = 10 * time.Millisecond
+	follower.election.reconnectDelay = 10 * time.Millisecond
 	type observation struct {
 		event string
 		state string
@@ -3587,13 +3868,13 @@ func TestEtcdElectionObserveClosurePublishesOrderedGeneration(t *testing.T) {
 		}
 	}
 	helpers.ShouldEventuallyReturn(t, func() bool {
-		response, getErr := follower.cli.Get(context.Background(), follower.electionName+"/", clientv3.WithPrefix())
+		response, getErr := follower.cli.Get(context.Background(), follower.election.name+"/", clientv3.WithPrefix())
 		if getErr != nil {
 			return false
 		}
 		for _, kv := range response.Kvs {
 			if string(kv.Value) == followerServer.ID {
-				return kv.Lease == follower.leaseID.Load()
+				return kv.Lease == follower.lease.id.Load()
 			}
 		}
 		return false
@@ -3610,7 +3891,7 @@ func TestEtcdElectionGenerationRetryPreservesLease(t *testing.T) {
 
 	leaderServer := NewServer("frontend-leader", "frontend", true, nil)
 	leader := getEtcdSD(t, cfg, leaderServer, newTestClientView(context.Background(), cli))
-	leader.reconnectBackOff = 10 * time.Millisecond
+	leader.election.reconnectDelay = 10 * time.Millisecond
 	require.NoError(t, leader.Init())
 
 	closingWatcher := &closeFirstElectionWatcher{
@@ -3636,9 +3917,9 @@ func TestEtcdElectionGenerationRetryPreservesLease(t *testing.T) {
 	followerClient.Lease = failingLease
 	followerClient.Watcher = closingWatcher
 	follower := getEtcdSD(t, cfg, followerServer, followerClient)
-	follower.reconnectBackOff = 10 * time.Millisecond
+	follower.election.reconnectDelay = 10 * time.Millisecond
 	require.NoError(t, follower.Init())
-	serviceLease := clientv3.LeaseID(follower.leaseID.Load())
+	serviceLease := clientv3.LeaseID(follower.lease.id.Load())
 	require.NotZero(t, serviceLease)
 
 	select {
@@ -3658,7 +3939,7 @@ func TestEtcdElectionGenerationRetryPreservesLease(t *testing.T) {
 	}
 
 	helpers.ShouldEventuallyReturn(t, func() bool {
-		response, getErr := follower.cli.Get(context.Background(), follower.electionName+"/", clientv3.WithPrefix())
+		response, getErr := follower.cli.Get(context.Background(), follower.election.name+"/", clientv3.WithPrefix())
 		if getErr != nil {
 			return false
 		}
@@ -3707,7 +3988,7 @@ func TestEtcdElectionCampaignLeaseFailureClassification(t *testing.T) {
 				ctx:      generationCtx,
 				cancel:   cancelGeneration,
 				session:  generationSession,
-				election: concurrency.NewElection(generationSession, sd.electionName),
+				election: concurrency.NewElection(generationSession, sd.election.name),
 			}
 			t.Cleanup(func() { sd.stopElectionGeneration(generation, false) })
 
@@ -3764,8 +4045,8 @@ func TestEtcdElectionResumeResignLeaseFailureClassification(t *testing.T) {
 			cfg := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
 			self := NewServer("frontend-"+strings.ReplaceAll(tt.name, " ", "-"), "frontend", true, nil)
 			sd := getEtcdSD(t, cfg, self, cli)
-			sd.resumeLeader = false
-			generationElection := concurrency.NewElection(generationSession, sd.electionName)
+			sd.election.resumeLeader = false
+			generationElection := concurrency.NewElection(generationSession, sd.election.name)
 			require.NoError(t, generationElection.Campaign(context.Background(), self.ID))
 			generationClient.KV = &failingPutKV{KV: cli.KV, err: tt.resignErr}
 			generation := &electionGeneration{
@@ -3816,26 +4097,26 @@ func TestEtcdElectionShutdownRevokesDetachedCandidateLease(t *testing.T) {
 
 	leader := getEtcdSD(t, cfg, NewServer("frontend-leader", "frontend", true, nil),
 		newTestClientView(context.Background(), cli))
-	leader.reconnectBackOff = 10 * time.Millisecond
+	leader.election.reconnectDelay = 10 * time.Millisecond
 	require.NoError(t, leader.Init())
 
 	followerServer := NewServer("frontend-follower", "frontend", true, nil)
 	follower := getEtcdSD(t, cfg, followerServer, newTestClientView(context.Background(), cli))
-	follower.reconnectBackOff = 10 * time.Millisecond
+	follower.election.reconnectDelay = 10 * time.Millisecond
 	require.NoError(t, follower.Init())
-	initialServiceLease := clientv3.LeaseID(follower.leaseID.Load())
+	initialServiceLease := clientv3.LeaseID(follower.lease.id.Load())
 	require.NotZero(t, initialServiceLease)
 	_, err := cli.Revoke(context.Background(), initialServiceLease)
 	require.NoError(t, err)
-	require.NoError(t, follower.renewLease(follower.lifecycleCtx, initialServiceLease))
+	require.NoError(t, follower.renewLease(follower.lifecycle.ctx, initialServiceLease))
 
 	var detachedElectionLease clientv3.LeaseID
 	helpers.ShouldEventuallyReturn(t, func() bool {
-		serviceLease := clientv3.LeaseID(follower.leaseID.Load())
+		serviceLease := clientv3.LeaseID(follower.lease.id.Load())
 		if serviceLease == 0 || serviceLease == initialServiceLease {
 			return false
 		}
-		response, getErr := follower.cli.Get(context.Background(), follower.electionName+"/", clientv3.WithPrefix())
+		response, getErr := follower.cli.Get(context.Background(), follower.election.name+"/", clientv3.WithPrefix())
 		if getErr != nil {
 			return false
 		}
@@ -3851,7 +4132,7 @@ func TestEtcdElectionShutdownRevokesDetachedCandidateLease(t *testing.T) {
 
 	follower.BeforeShutdown()
 	require.NoError(t, follower.Shutdown())
-	response, err := follower.cli.Get(context.Background(), follower.electionName+"/", clientv3.WithPrefix())
+	response, err := follower.cli.Get(context.Background(), follower.election.name+"/", clientv3.WithPrefix())
 	require.NoError(t, err)
 	for _, kv := range response.Kvs {
 		assert.NotEqual(t, followerServer.ID, string(kv.Value),
@@ -3890,9 +4171,9 @@ func TestEtcdElectionShutdownDoesNotRevokeBorrowedLease(t *testing.T) {
 	require.NoError(t, err)
 
 	participant := getEtcdSD(t, cfg, self, participantClient)
-	participant.reconnectBackOff = 10 * time.Millisecond
+	participant.election.reconnectDelay = 10 * time.Millisecond
 	require.NoError(t, participant.Init())
-	require.NotEqual(t, ownerSession.Lease(), clientv3.LeaseID(participant.leaseID.Load()))
+	require.NotEqual(t, ownerSession.Lease(), clientv3.LeaseID(participant.lease.id.Load()))
 	helpers.ShouldEventuallyReturn(t, participant.IsLeader, true, 10*time.Millisecond, 5*time.Second)
 
 	participant.BeforeShutdown()
@@ -3921,7 +4202,7 @@ func TestEtcdElectionCoordinatorRevokesPreservedLocalLeaseWhenStoppedDuringBacko
 	t.Cleanup(func() { embedded.Terminate(t) })
 
 	sd := getEtcdSD(t, cfg, NewServer("frontend-self", "frontend", true, nil), cli)
-	sd.reconnectBackOff = time.Minute
+	sd.election.reconnectDelay = time.Minute
 	electionCtx, cancelElection := context.WithCancel(context.Background())
 	t.Cleanup(cancelElection)
 	generation, err := sd.newElectionGeneration(electionCtx,
@@ -3944,9 +4225,9 @@ func TestEtcdElectionCoordinatorRevokesPreservedLocalLeaseWhenStoppedDuringBacko
 		close(done)
 	}()
 	helpers.ShouldEventuallyReturn(t, func() uint64 {
-		sd.leaderAdmissionLock.Lock()
-		defer sd.leaderAdmissionLock.Unlock()
-		return sd.leaderGeneration
+		sd.election.admissionMu.Lock()
+		defer sd.election.admissionMu.Unlock()
+		return sd.election.generation
 	}, uint64(2), 10*time.Millisecond, 5*time.Second)
 	cancelElection()
 	select {
@@ -3971,7 +4252,7 @@ func TestEtcdElectionCoordinatorRevokesPreservedLocalLeaseWhenStoppedDuringSessi
 	t.Cleanup(func() { embedded.Terminate(t) })
 
 	sd := getEtcdSD(t, cfg, NewServer("frontend-self", "frontend", true, nil), cli)
-	sd.reconnectBackOff = 100 * time.Millisecond
+	sd.election.reconnectDelay = 100 * time.Millisecond
 	releaseKeepAlive := make(chan struct{})
 	var releaseKeepAliveOnce sync.Once
 	releaseFailedKeepAlive := func() { releaseKeepAliveOnce.Do(func() { close(releaseKeepAlive) }) }
@@ -4034,7 +4315,7 @@ func TestEtcdElectionClearPrecedesDetachedLeaseRevoke(t *testing.T) {
 	cfg.Revoke.Timeout = 5 * time.Second
 	self := NewServer("frontend-self", "frontend", true, nil)
 	sd := getEtcdSD(t, cfg, self, cli)
-	sd.reconnectBackOff = 10 * time.Millisecond
+	sd.election.reconnectDelay = 10 * time.Millisecond
 
 	electionCtx, cancelElection := context.WithCancel(context.Background())
 	generation, err := sd.newElectionGeneration(electionCtx, electionLease{provenance: electionLeaseLocal}, 1)
@@ -4045,7 +4326,7 @@ func TestEtcdElectionClearPrecedesDetachedLeaseRevoke(t *testing.T) {
 	selfKey := generation.election.Key()
 	require.NotEmpty(t, selfKey)
 	// Re-enter through the reconnect path so the generation resumes the seeded key.
-	generation.election = concurrency.NewElection(generation.session, sd.electionName)
+	generation.election = concurrency.NewElection(generation.session, sd.election.name)
 	require.True(t, sd.activateLeaderGeneration(generation.token))
 
 	leaders := make(chan string, 3)
@@ -4127,13 +4408,11 @@ func TestEtcdElectionClearPrecedesDetachedLeaseRevoke(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for owned lease cleanup")
 	}
-	sd.leaderAdmissionLock.Lock()
-	generationWhileRevokeBlocked := sd.leaderGeneration
-	sd.leaderAdmissionLock.Unlock()
+	sd.election.admissionMu.Lock()
+	generationWhileRevokeBlocked := sd.election.generation
+	sd.election.admissionMu.Unlock()
 	require.Equal(t, uint64(2), generationWhileRevokeBlocked)
-	sd.leaderCallbackLock.Lock()
-	queuedWhileRevokeBlocked := len(sd.leaderCallbackQueue)
-	sd.leaderCallbackLock.Unlock()
+	queuedWhileRevokeBlocked := sd.election.callbacks.snapshot().queued
 	require.Equal(t, 1, queuedWhileRevokeBlocked, "clear was not admitted before remote cleanup")
 	assert.True(t, sd.IsLeader(), "blocked callback should retain the prior applied state")
 
@@ -4192,7 +4471,7 @@ func TestEtcdElectionCampaignShutdownUsesGenerationContext(t *testing.T) {
 
 	leaderClient := newTestClientView(context.Background(), cli)
 	leader := getEtcdSD(t, cfg, NewServer("frontend-leader", "frontend", true, nil), leaderClient)
-	leader.reconnectBackOff = 10 * time.Millisecond
+	leader.election.reconnectDelay = 10 * time.Millisecond
 	require.NoError(t, leader.Init())
 	helpers.ShouldEventuallyReturn(t, leader.IsLeader, true, 10*time.Millisecond, 5*time.Second)
 
@@ -4207,7 +4486,7 @@ func TestEtcdElectionCampaignShutdownUsesGenerationContext(t *testing.T) {
 	followerClient.KV = blocker
 	follower := getEtcdSD(t, cfg, NewServer("frontend-follower", "frontend", true, nil), followerClient)
 	t.Cleanup(func() { releaseOnce.Do(func() { close(blocker.releaseCleanup) }) })
-	follower.reconnectBackOff = 10 * time.Millisecond
+	follower.election.reconnectDelay = 10 * time.Millisecond
 	require.NoError(t, follower.Init())
 	assert.False(t, follower.IsLeader())
 
@@ -4275,7 +4554,7 @@ func TestEtcdElectionResumeKeepsPrefixBoundary(t *testing.T) {
 		ctx:      generationCtx,
 		cancel:   cancelGeneration,
 		session:  selfSession,
-		election: concurrency.NewElection(selfSession, sd.electionName),
+		election: concurrency.NewElection(selfSession, sd.election.name),
 	}
 	leaders := make(chan string, 1)
 	result := make(chan bool, 1)
@@ -4325,7 +4604,7 @@ func TestEtcdElectionResumedLeaderDeletionWithoutSuccessorRecampaigns(t *testing
 		ctx:      generationCtx,
 		cancel:   cancelGeneration,
 		session:  selfSession,
-		election: concurrency.NewElection(selfSession, sd.electionName),
+		election: concurrency.NewElection(selfSession, sd.election.name),
 	}
 	leaders := make(chan string, 3)
 	result := make(chan bool, 1)
@@ -4355,7 +4634,7 @@ func TestEtcdElectionResumedLeaderDeletionWithoutSuccessorRecampaigns(t *testing
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for resumed self publication")
 	}
-	response, err := cli.Get(context.Background(), sd.electionName+"/", clientv3.WithPrefix())
+	response, err := cli.Get(context.Background(), sd.election.name+"/", clientv3.WithPrefix())
 	require.NoError(t, err)
 	require.Len(t, response.Kvs, 1)
 	selfKey := string(response.Kvs[0].Key)
@@ -4374,7 +4653,7 @@ func TestEtcdElectionResumedLeaderDeletionWithoutSuccessorRecampaigns(t *testing
 		t.Fatal("leader deletion without a successor did not clear local state")
 	}
 	helpers.ShouldEventuallyReturn(t, func() bool {
-		response, getErr := cli.Get(context.Background(), sd.electionName+"/", clientv3.WithPrefix())
+		response, getErr := cli.Get(context.Background(), sd.election.name+"/", clientv3.WithPrefix())
 		if getErr != nil || len(response.Kvs) != 1 {
 			return false
 		}
@@ -4473,7 +4752,7 @@ func TestEtcdElectionDelayedObserveDoesNotResurrectDeletedLeader(t *testing.T) {
 		ctx:      generationCtx,
 		cancel:   cancelGeneration,
 		session:  generationSession,
-		election: concurrency.NewElection(generationSession, sd.electionName),
+		election: concurrency.NewElection(generationSession, sd.election.name),
 	}
 	leaders := make(chan string, 3)
 	result := make(chan bool, 1)
@@ -4635,7 +4914,7 @@ func TestEtcdElectionLeaderRecheckUsesBoundedSessionContext(t *testing.T) {
 				ctx:      generationCtx,
 				cancel:   cancelGeneration,
 				session:  generationSession,
-				election: concurrency.NewElection(generationSession, sd.electionName),
+				election: concurrency.NewElection(generationSession, sd.election.name),
 			}
 			type generationResult struct {
 				lease     clientv3.LeaseID
@@ -4721,14 +5000,14 @@ func TestEtcdElectionResumeDisabledRecampaigns(t *testing.T) {
 
 	cfg := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
 	sd := getEtcdSD(t, cfg, self, cli)
-	sd.resumeLeader = false
+	sd.election.resumeLeader = false
 	generationCtx, cancelGeneration := context.WithCancel(context.Background())
 	generation := &electionGeneration{
 		token:    1,
 		ctx:      generationCtx,
 		cancel:   cancelGeneration,
 		session:  selfSession,
-		election: concurrency.NewElection(selfSession, sd.electionName),
+		election: concurrency.NewElection(selfSession, sd.election.name),
 	}
 	leaders := make(chan string, 1)
 	result := make(chan bool, 1)
@@ -4811,7 +5090,7 @@ func TestEtcdElectionResumeSnapshotChangeRecampaigns(t *testing.T) {
 		ctx:      generationCtx,
 		cancel:   cancelGeneration,
 		session:  generationSession,
-		election: concurrency.NewElection(generationSession, sd.electionName),
+		election: concurrency.NewElection(generationSession, sd.election.name),
 	}
 	leaders := make(chan string, 2)
 	result := make(chan bool, 1)
@@ -4912,7 +5191,7 @@ func TestEtcdElectionObservedSelfRequiresGenerationLease(t *testing.T) {
 		ctx:      generationCtx,
 		cancel:   cancelGeneration,
 		session:  generationSession,
-		election: concurrency.NewElection(generationSession, sd.electionName),
+		election: concurrency.NewElection(generationSession, sd.election.name),
 	}
 	t.Cleanup(func() { sd.stopElectionGeneration(generation, false) })
 
@@ -5004,7 +5283,7 @@ func TestEtcdElectionForeignObservationBeforeCampaignResultRecampaigns(t *testin
 		ctx:      generationCtx,
 		cancel:   cancelGeneration,
 		session:  generationSession,
-		election: concurrency.NewElection(generationSession, sd.electionName),
+		election: concurrency.NewElection(generationSession, sd.election.name),
 	}
 	leaders := make(chan string, 3)
 	result := make(chan bool, 1)
@@ -5157,7 +5436,7 @@ func TestEtcdElectionCampaignResultBeforeObservationRecampaigns(t *testing.T) {
 		ctx:      generationCtx,
 		cancel:   cancelGeneration,
 		session:  generationSession,
-		election: concurrency.NewElection(generationSession, sd.electionName),
+		election: concurrency.NewElection(generationSession, sd.election.name),
 	}
 	leaders := make(chan string, 4)
 	result := make(chan bool, 1)
@@ -5313,7 +5592,7 @@ func TestEtcdElectionLeaderReplacementQueuesRecampaign(t *testing.T) {
 		ctx:      generationCtx,
 		cancel:   cancelGeneration,
 		session:  generationSession,
-		election: concurrency.NewElection(generationSession, sd.electionName),
+		election: concurrency.NewElection(generationSession, sd.election.name),
 	}
 	leaders := make(chan string, 3)
 	result := make(chan bool, 1)
@@ -5353,20 +5632,20 @@ func TestEtcdElectionLeaderReplacementQueuesRecampaign(t *testing.T) {
 	otherSession, err := concurrency.NewSession(cli, concurrency.WithTTL(3))
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, otherSession.Close()) })
-	otherElection := concurrency.NewElection(otherSession, sd.electionName)
+	otherElection := concurrency.NewElection(otherSession, sd.election.name)
 	otherCampaignDone := make(chan error, 1)
 	go func() {
 		otherCampaignDone <- otherElection.Campaign(context.Background(), "frontend-other")
 	}()
 	helpers.ShouldEventuallyReturn(t, func() int {
-		response, getErr := cli.Get(context.Background(), sd.electionName+"/", clientv3.WithPrefix())
+		response, getErr := cli.Get(context.Background(), sd.election.name+"/", clientv3.WithPrefix())
 		if getErr != nil {
 			return -1
 		}
 		return len(response.Kvs)
 	}, 2, 10*time.Millisecond, 5*time.Second)
 
-	response, err := cli.Get(context.Background(), sd.electionName+"/", clientv3.WithPrefix())
+	response, err := cli.Get(context.Background(), sd.election.name+"/", clientv3.WithPrefix())
 	require.NoError(t, err)
 	var selfKey string
 	for _, kv := range response.Kvs {
@@ -5398,7 +5677,7 @@ func TestEtcdElectionLeaderReplacementQueuesRecampaign(t *testing.T) {
 		t.Fatal("replacement leader did not queue a fresh campaign")
 	}
 	helpers.ShouldEventuallyReturn(t, func() bool {
-		response, getErr := cli.Get(context.Background(), sd.electionName+"/", clientv3.WithPrefix())
+		response, getErr := cli.Get(context.Background(), sd.election.name+"/", clientv3.WithPrefix())
 		if getErr != nil {
 			return false
 		}
@@ -5436,7 +5715,7 @@ func TestEtcdElectionLeaderCallbackCanShutdown(t *testing.T) {
 	t.Cleanup(func() { embedded.Terminate(t) })
 	self := NewServer("frontend-self", "frontend", true, nil)
 	sd := getEtcdSD(t, cfg, self, cli)
-	sd.reconnectBackOff = 10 * time.Millisecond
+	sd.election.reconnectDelay = 10 * time.Millisecond
 	require.NoError(t, sd.Init())
 	helpers.ShouldEventuallyReturn(t, sd.IsLeader, true, 10*time.Millisecond, 5*time.Second)
 
@@ -5446,7 +5725,7 @@ func TestEtcdElectionLeaderCallbackCanShutdown(t *testing.T) {
 			shutdownDone <- sd.Shutdown()
 		}
 	})
-	response, err := sd.cli.Get(context.Background(), sd.electionName+"/", clientv3.WithPrefix())
+	response, err := sd.cli.Get(context.Background(), sd.election.name+"/", clientv3.WithPrefix())
 	require.NoError(t, err)
 	require.Len(t, response.Kvs, 1)
 	_, err = cli.Revoke(context.Background(), clientv3.LeaseID(response.Kvs[0].Lease))
@@ -5477,7 +5756,8 @@ func TestEtcdWatchChangesAddNewServers(t *testing.T) {
 			assert.NoError(t, err)
 			ss, err := getServerFromEtcd(e.cli, newServer.Type, newServer.ID)
 			assert.NoError(t, err)
-			assert.Equal(t, newServer, ss)
+			assert.JSONEq(t, newServer.AsJSONString(), ss.AsJSONString())
+			assert.NotZero(t, ss.OwnerEpoch())
 			helpers.ShouldEventuallyReturn(t, func() int {
 				serversNow, _ := e.GetServersByType(table.server.Type)
 				return len(serversNow)
@@ -5503,7 +5783,8 @@ func TestEtcdWatchChangesDeleteServers(t *testing.T) {
 			assert.NoError(t, err)
 			ss, err := getServerFromEtcd(e.cli, newServer.Type, newServer.ID)
 			assert.NoError(t, err)
-			assert.Equal(t, newServer, ss)
+			assert.JSONEq(t, newServer.AsJSONString(), ss.AsJSONString())
+			assert.NotZero(t, ss.OwnerEpoch())
 			helpers.ShouldEventuallyReturn(t, func() int {
 				serversNow, _ := e.GetServersByType(table.server.Type)
 				return len(serversNow)
@@ -5733,4 +6014,129 @@ func TestNewParallelGetterPropagatesSubmissionError(t *testing.T) {
 	getter, err := newParallelGetter(context.Background(), nil, 5)
 	require.ErrorIs(t, err, ants.ErrPoolClosed)
 	assert.Nil(t, getter)
+}
+
+func TestVersionedServerOwnerEpochTracksCreateRevision(t *testing.T) {
+	embedded, cli := helpers.GetTestEtcd(t)
+	defer embedded.Terminate(t)
+
+	ctx := context.Background()
+	server := NewServer("owner-epoch-1", "game", false, map[string]string{"version": "one"})
+	key := getKey(server.ID, server.Type)
+	sd := &etcdServiceDiscovery{
+		cli:    cli,
+		server: server,
+		lifecycle: etcdLifecycleOwner{
+			ctx:   context.Background(),
+			state: etcdLifecycleInitializing,
+		},
+	}
+	require.NoError(t, sd.putServerValueWithLeaseContext(ctx, server.Type, server.ID, server.AsJSONString(), 0))
+
+	loaded, _, err := getVersionedServerFromEtcdContext(ctx, cli, server.Type, server.ID, 0)
+	require.NoError(t, err)
+	firstEpoch := loaded.OwnerEpoch()
+	assert.Equal(t, firstEpoch, server.OwnerEpoch())
+
+	server.Metadata["version"] = "two"
+	require.NoError(t, sd.putServerValueWithLeaseContext(ctx, server.Type, server.ID, server.AsJSONString(), 0))
+	loaded, _, err = getVersionedServerFromEtcdContext(ctx, cli, server.Type, server.ID, 0)
+	require.NoError(t, err)
+	assert.Equal(t, firstEpoch, loaded.OwnerEpoch(), "metadata updates must not advance the owner generation")
+	assert.Equal(t, firstEpoch, server.OwnerEpoch(), "the local fence must retain the key creation generation")
+
+	_, err = cli.Delete(ctx, key)
+	require.NoError(t, err)
+	require.NoError(t, sd.putServerValueWithLeaseContext(ctx, server.Type, server.ID, server.AsJSONString(), 0))
+	loaded, _, err = getVersionedServerFromEtcdContext(ctx, cli, server.Type, server.ID, 0)
+	require.NoError(t, err)
+	assert.Greater(t, loaded.OwnerEpoch(), firstEpoch, "delete/recreate must fence the previous owner generation")
+	assert.Equal(t, loaded.OwnerEpoch(), server.OwnerEpoch(), "the local fence must advance with key recreation")
+}
+
+func TestEtcdServerIdentityCannotBeTakenOverBeforeLeaseExpiry(t *testing.T) {
+	embedded, cli := helpers.GetTestEtcd(t)
+	defer embedded.Terminate(t)
+
+	ctx := context.Background()
+	firstLease, err := cli.Grant(ctx, 30)
+	require.NoError(t, err)
+	secondLease, err := cli.Grant(ctx, 30)
+	require.NoError(t, err)
+
+	first := NewServer("duplicate-owner", "game", false)
+	firstSD := &etcdServiceDiscovery{
+		cli:    cli,
+		server: first,
+		lifecycle: etcdLifecycleOwner{
+			ctx:   context.Background(),
+			state: etcdLifecycleInitializing,
+		},
+	}
+	require.NoError(t, firstSD.putServerValueWithLeaseContext(ctx, first.Type, first.ID, first.AsJSONString(), firstLease.ID))
+	firstEpoch := first.OwnerEpoch()
+	require.NotZero(t, firstEpoch)
+
+	replacement := NewServer(first.ID, first.Type, false)
+	replacementSD := &etcdServiceDiscovery{
+		cli:    cli,
+		server: replacement,
+		lifecycle: etcdLifecycleOwner{
+			ctx:   context.Background(),
+			state: etcdLifecycleInitializing,
+		},
+	}
+	err = replacementSD.putServerValueWithLeaseContext(ctx, replacement.Type, replacement.ID, replacement.AsJSONString(), secondLease.ID)
+	assert.ErrorIs(t, err, errEtcdServerIdentityOwned)
+	response, err := cli.Get(ctx, getKey(first.ID, first.Type))
+	require.NoError(t, err)
+	require.Len(t, response.Kvs, 1)
+	assert.Equal(t, int64(firstLease.ID), response.Kvs[0].Lease)
+	assert.Equal(t, firstEpoch, uint64(response.Kvs[0].CreateRevision))
+
+	_, err = cli.Revoke(ctx, firstLease.ID)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		response, getErr := cli.Get(ctx, getKey(first.ID, first.Type))
+		return getErr == nil && len(response.Kvs) == 0
+	}, 5*time.Second, 10*time.Millisecond)
+	require.NoError(t, replacementSD.putServerValueWithLeaseContext(ctx, replacement.Type, replacement.ID, replacement.AsJSONString(), secondLease.ID))
+	assert.Greater(t, replacement.OwnerEpoch(), firstEpoch)
+}
+
+func TestEtcdKeepaliveLossInvalidatesLocalOwnerEpoch(t *testing.T) {
+	server := NewServer("lease-loss-owner", "game", false)
+	server.SetOwnerEpoch(42)
+	sd := &etcdServiceDiscovery{server: server}
+	ctx, cancel := context.WithCancel(context.Background())
+	responses := make(chan *clientv3.LeaseKeepAliveResponse)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sd.watchLeaseChan(ctx, 1, responses)
+	}()
+	close(responses)
+
+	require.Eventually(t, func() bool {
+		_, valid := server.OwnerEpochSnapshot()
+		return !valid
+	}, time.Second, time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("lease watcher did not stop after cancellation")
+	}
+}
+
+func TestEtcdTopologyUpdateCannotAdoptReplacementOwnerEpoch(t *testing.T) {
+	local := NewServer("same-owner", "game", false)
+	local.SetOwnerEpoch(41)
+	cfg := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
+	sd := getEtcdSD(t, cfg, local, nil)
+	replacement := NewServer(local.ID, local.Type, false)
+	replacement.SetOwnerEpoch(99)
+
+	require.True(t, sd.applyServerAtRevision(replacement, 1))
+	assert.Equal(t, uint64(41), local.OwnerEpoch())
 }

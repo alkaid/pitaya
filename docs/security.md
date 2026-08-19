@@ -57,11 +57,41 @@ PROXY protocol on a TCP listener reachable by arbitrary clients.
 
 ## Cluster transports
 
-NATS credentials and subject ACLs are the supported boundary for cluster remotes,
-including `sys.*`. Give frontend and backend identities only the subjects they
-need, reject broad publish/subscribe wildcards where possible, rotate credentials,
-and keep the broker off public networks. Client identities must never receive
-cluster credentials.
+NATS credentials, TLS, and subject ACLs are the supported boundary for cluster
+remotes, including `sys.*`. TLS and authentication are disabled by default, so a
+production deployment must enable them explicitly for both the RPC client and
+server configurations. Give frontend and backend identities only the subjects
+they need, reject broad publish/subscribe wildcards where possible, rotate
+credentials, and keep the broker off public networks. Client identities must
+never receive cluster credentials.
+
+NATS supports exactly one authentication mode per connection: username/password,
+token, or a credentials file. Do not embed credentials in the NATS URL; URL
+userinfo is rejected. Client TLS uses TLS 1.2 or newer, system roots or a configured
+CA file, and an optional client certificate/key pair. Certificate and credentials
+files are loaded while the transport is constructed. Rotate them with a process
+restart; configuration reload does not replace a live connection.
+
+The owned clients for service-discovery etcd, group etcd, compatibility binding
+etcd, session Redis, and Worker Redis have the same opt-in client TLS controls.
+Configure etcd username/password as a pair. Redis password-only authentication is
+valid for the default user; when a username is set, a password is required and the
+Worker uses Redis ACL's two-argument authentication. Do not expose any of these
+dependencies publicly even when TLS is enabled. An unreadable or invalid CA,
+certificate, key, or credentials file fails startup rather than falling back to a
+plaintext connection.
+
+Cluster builders also use the session Redis connection for durable RPC
+idempotency by default. Restrict its configured key prefix and allow `EVAL`
+plus the script commands `EXISTS`, `HGET`, `HSET`, `HDEL`, `PTTL`, and
+`PEXPIRE`. Every server in one command scope must share that protected store;
+using isolated Redis instances silently reduces deduplication to each partition.
+Redis completion records do not make unrelated business-database effects
+exactly-once. Applications must still persist the command identity in the same
+transaction as sensitive state changes. Lease loss cancels the old handler
+context but cannot stop code that ignores cancellation; a successor may overlap
+that stale handler. The business transaction must make the stale or duplicate
+write harmless rather than relying on Redis result fencing alone.
 
 The retained gRPC RPC implementation does not authenticate peers or provide mTLS.
 It is not a supported business-traffic deployment path. If it must be enabled for

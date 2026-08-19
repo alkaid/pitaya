@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/alkaid/ants/v2"
 	"github.com/alkaid/goerrors/apierrors"
@@ -83,6 +84,10 @@ func (c *standaloneSessionCache) Hgetall(string) (map[string]string, error) {
 func (c *standaloneSessionCache) Hmset(_ string, fields map[string]string) error {
 	c.writes = fields
 	return nil
+}
+
+func (c *standaloneSessionCache) CacheTTL() time.Duration {
+	return time.Minute
 }
 
 func TestStandaloneFrontendBindSkipsClusterBroadcast(t *testing.T) {

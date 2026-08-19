@@ -22,6 +22,7 @@ package metrics
 
 import (
 	"context"
+	"fmt"
 	"runtime"
 	"strconv"
 	"time"
@@ -32,6 +33,7 @@ import (
 	"github.com/alkaid/pitaya/v2/constants"
 
 	pcontext "github.com/alkaid/pitaya/v2/context"
+	"go.uber.org/zap"
 )
 
 // ReportTimingFromCtx reports the latency from the context
@@ -45,24 +47,24 @@ func ReportTimingFromCtx(ctx context.Context, reporters []Reporter, typ string, 
 		status = "failed"
 	}
 	if len(reporters) > 0 {
-		startTime := pcontext.GetFromPropagateCtx(ctx, constants.StartTimeKey)
-		if startTime == nil {
+		startTime, ok := pcontext.GetFromPropagateCtx(ctx, constants.StartTimeKey).(int64)
+		if !ok {
 			return
 		}
-		route := pcontext.GetFromPropagateCtx(ctx, constants.RouteKey)
-		if route == nil {
-			logger.Zap.Error("route cannot be nil from context")
+		route, ok := pcontext.GetFromPropagateCtx(ctx, constants.RouteKey).(string)
+		if !ok {
+			logger.Zap.Error("route is missing or invalid in context")
 			return
 		}
-		elapsed := time.Since(time.Unix(0, startTime.(int64)))
+		elapsed := time.Since(time.Unix(0, startTime))
 		tags := getTags(ctx, map[string]string{
-			"route":  route.(string),
+			"route":  route,
 			"status": status,
 			"type":   typ,
 			"code":   strconv.Itoa(code),
 		})
 		for _, r := range reporters {
-			r.ReportSummary(ResponseTime, tags, float64(elapsed.Nanoseconds()))
+			reportSummary(r, ResponseTime, tags, float64(elapsed.Nanoseconds()))
 		}
 	}
 }
@@ -72,33 +74,39 @@ func ReportPoolGoDeadlines(ctx context.Context, poolName string, second int, rep
 		return
 	}
 	if len(reporters) > 0 {
-		route := pcontext.GetFromPropagateCtx(ctx, constants.RouteKey)
-		if route == nil {
+		route, ok := pcontext.GetFromPropagateCtx(ctx, constants.RouteKey).(string)
+		if !ok {
 			route = "nil"
 		}
 		tags := getTags(ctx, map[string]string{
-			"route":  route.(string),
+			"route":  route,
 			"second": strconv.Itoa(second),
 			"pool":   poolName,
 		})
 		for _, r := range reporters {
-			r.ReportCount(PoolGoDeadlines, tags, 1)
+			reportCount(r, PoolGoDeadlines, tags, 1)
 		}
 	}
 }
 
 // ReportMessageProcessDelayFromCtx reports the delay to process the messages
 func ReportMessageProcessDelayFromCtx(ctx context.Context, reporters []Reporter, typ string) {
-	if len(reporters) > 0 {
-		startTime := pcontext.GetFromPropagateCtx(ctx, constants.StartTimeKey)
-		elapsed := time.Since(time.Unix(0, startTime.(int64)))
-		route := pcontext.GetFromPropagateCtx(ctx, constants.RouteKey)
+	if ctx != nil && len(reporters) > 0 {
+		startTime, ok := pcontext.GetFromPropagateCtx(ctx, constants.StartTimeKey).(int64)
+		if !ok {
+			return
+		}
+		route, ok := pcontext.GetFromPropagateCtx(ctx, constants.RouteKey).(string)
+		if !ok {
+			return
+		}
+		elapsed := time.Since(time.Unix(0, startTime))
 		tags := getTags(ctx, map[string]string{
-			"route": route.(string),
+			"route": route,
 			"type":  typ,
 		})
 		for _, r := range reporters {
-			r.ReportSummary(ProcessDelay, tags, float64(elapsed.Nanoseconds()))
+			reportSummary(r, ProcessDelay, tags, float64(elapsed.Nanoseconds()))
 		}
 	}
 }
@@ -106,7 +114,7 @@ func ReportMessageProcessDelayFromCtx(ctx context.Context, reporters []Reporter,
 // ReportNumberOfConnectedClients reports the number of connected clients
 func ReportNumberOfConnectedClients(reporters []Reporter, number int64) {
 	for _, r := range reporters {
-		r.ReportGauge(ConnectedClients, map[string]string{}, float64(number))
+		reportGauge(r, ConnectedClients, map[string]string{}, float64(number))
 	}
 }
 
@@ -117,7 +125,7 @@ func ReportSysMetrics(reporters []Reporter, period time.Duration) {
 
 // ReportSysMetricsContext reports sys metrics until the context is canceled.
 func ReportSysMetricsContext(ctx context.Context, reporters []Reporter, period time.Duration) {
-	if ctx.Err() != nil {
+	if ctx == nil || ctx.Err() != nil || len(reporters) == 0 || period <= 0 {
 		return
 	}
 
@@ -150,9 +158,9 @@ func reportSysMetrics(reporters []Reporter) {
 		m := &runtime.MemStats{}
 		runtime.ReadMemStats(m)
 
-		r.ReportGauge(Goroutines, map[string]string{}, float64(num))
-		r.ReportGauge(HeapSize, map[string]string{}, float64(m.Alloc))
-		r.ReportGauge(HeapObjects, map[string]string{}, float64(m.HeapObjects))
+		reportGauge(r, Goroutines, map[string]string{}, float64(num))
+		reportGauge(r, HeapSize, map[string]string{}, float64(m.Alloc))
+		reportGauge(r, HeapObjects, map[string]string{}, float64(m.HeapObjects))
 	}
 }
 
@@ -160,28 +168,76 @@ func reportSysMetrics(reporters []Reporter) {
 // after exceeded rate limiting in a connection
 func ReportExceededRateLimiting(reporters []Reporter) {
 	for _, r := range reporters {
-		r.ReportCount(ExceededRateLimiting, map[string]string{}, 1)
+		reportCount(r, ExceededRateLimiting, map[string]string{}, 1)
 	}
+}
+
+func reportCount(reporter Reporter, metric string, tags map[string]string, value float64) {
+	if reporter == nil {
+		logReporterError(metric, reporter, errNilMetricsReporter)
+		return
+	}
+	logReporterError(metric, reporter, reporter.ReportCount(metric, tags, value))
+}
+
+func reportGauge(reporter Reporter, metric string, tags map[string]string, value float64) {
+	if reporter == nil {
+		logReporterError(metric, reporter, errNilMetricsReporter)
+		return
+	}
+	logReporterError(metric, reporter, reporter.ReportGauge(metric, tags, value))
+}
+
+func reportSummary(reporter Reporter, metric string, tags map[string]string, value float64) {
+	if reporter == nil {
+		logReporterError(metric, reporter, errNilMetricsReporter)
+		return
+	}
+	logReporterError(metric, reporter, reporter.ReportSummary(metric, tags, value))
+}
+
+func logReporterError(metric string, reporter Reporter, err error) {
+	if err == nil {
+		return
+	}
+	logger.Zap.Error(
+		"metrics reporter failed",
+		zap.String("metric", metric),
+		zap.String("reporter", fmt.Sprintf("%T", reporter)),
+		zap.Error(err),
+	)
 }
 
 func tagsFromContext(ctx context.Context) map[string]string {
 	val := pcontext.GetFromPropagateCtx(ctx, constants.MetricTagsKey)
-	if val == nil {
+	switch tags := val.(type) {
+	case map[string]string:
+		return tags
+	case map[string]any:
+		converted := make(map[string]string, len(tags))
+		for key, value := range tags {
+			stringValue, ok := value.(string)
+			if !ok {
+				return map[string]string{}
+			}
+			converted[key] = stringValue
+		}
+		return converted
+	default:
 		return map[string]string{}
 	}
-
-	tags, ok := val.(map[string]string)
-	if !ok {
-		return map[string]string{}
-	}
-
-	return tags
 }
 
 func getTags(ctx context.Context, tags map[string]string) map[string]string {
+	merged := make(map[string]string, len(tags))
 	for k, v := range tagsFromContext(ctx) {
-		tags[k] = v
+		merged[k] = v
+	}
+	// Framework-owned dimensions describe the operation actually observed and
+	// must not be forgeable through propagated application tags.
+	for k, v := range tags {
+		merged[k] = v
 	}
 
-	return tags
+	return merged
 }

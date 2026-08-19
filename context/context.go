@@ -23,11 +23,11 @@ package context
 import (
 	"context"
 	"encoding/json"
-
-	"github.com/pkg/errors"
-	"github.com/alkaid/pitaya/v2/logger"
+	"fmt"
 
 	"github.com/alkaid/pitaya/v2/constants"
+	"github.com/alkaid/pitaya/v2/logger"
+	"github.com/pkg/errors"
 )
 
 // AddToPropagateCtx adds a key and value that will be propagated through RPC calls
@@ -120,5 +120,32 @@ func Decode(m []byte) (context.Context, error) {
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
+	if rawTags, ok := mp[constants.MetricTagsKey]; ok {
+		tags, err := decodeMetricTags(rawTags)
+		if err != nil {
+			return nil, errors.WithStack(err)
+		}
+		mp[constants.MetricTagsKey] = tags
+	}
 	return FromMap(mp), nil
+}
+
+func decodeMetricTags(raw any) (map[string]string, error) {
+	if raw == nil {
+		return map[string]string{}, nil
+	}
+	tagValues, ok := raw.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("propagated metric tags must be an object, got %T", raw)
+	}
+
+	tags := make(map[string]string, len(tagValues))
+	for key, value := range tagValues {
+		stringValue, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf("propagated metric tag %q must be a string, got %T", key, value)
+		}
+		tags[key] = stringValue
+	}
+	return tags, nil
 }

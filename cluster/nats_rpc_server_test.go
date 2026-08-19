@@ -29,6 +29,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -122,6 +123,85 @@ func TestNormalizeTaskSubmissionError(t *testing.T) {
 			assert.NotContains(t, apierrors.FromError(got).Status.Message, test.err.Error())
 		})
 	}
+}
+
+func TestNatsRPCServerMarshalResponseNormalizesNil(t *testing.T) {
+	rpcServer := &NatsRPCServer{}
+
+	payload, err := rpcServer.marshalResponse(nil)
+
+	require.Error(t, err)
+	response := &protos.Response{}
+	require.NoError(t, proto.Unmarshal(payload, response))
+	require.NotNil(t, response.Status)
+	assert.Equal(t, int32(500), response.Status.Code)
+}
+
+func TestNatsRPCServerRepliesAfterCallPanicAndContinues(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, nil, nil)
+	require.NoError(t, err)
+
+	natsServer := helpers.GetTestNatsServer(t)
+	t.Cleanup(natsServer.Shutdown)
+	conn, err := setupNatsConn(fmt.Sprintf("nats://%s", natsServer.Addr()), nil)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	rpcServer.conn = conn
+
+	var calls atomic.Int32
+	rpcServer.SetPitayaServer(&pitayaServerStub{call: func(context.Context, *protos.Request) (*protos.Response, error) {
+		switch calls.Add(1) {
+		case 1:
+			panic("boom")
+		case 2:
+			return nil, errors.New("cached panic")
+		default:
+			return &protos.Response{Data: []byte("ok")}, nil
+		}
+	}})
+
+	reply := nats.NewInbox()
+	sub, err := conn.SubscribeSync(reply)
+	require.NoError(t, err)
+	require.NoError(t, conn.Flush())
+
+	processDone := make(chan struct{})
+	go func() {
+		defer close(processDone)
+		rpcServer.processMessages(0)
+	}()
+	t.Cleanup(func() {
+		close(rpcServer.GetUnhandledRequestsChannel())
+		<-processDone
+	})
+
+	send := func(id uint64) *protos.Response {
+		t.Helper()
+		rpcServer.GetUnhandledRequestsChannel() <- &protos.Request{
+			Metadata: []byte("{}"),
+			Msg: &protos.Msg{
+				Id:    id,
+				Type:  protos.MsgType_MsgRequest,
+				Route: "svc.method",
+				Reply: reply,
+			},
+		}
+		msg, err := sub.NextMsg(time.Second)
+		require.NoError(t, err)
+		response := &protos.Response{}
+		require.NoError(t, proto.Unmarshal(msg.Data, response))
+		return response
+	}
+
+	for _, id := range []uint64{1, 2} {
+		response := send(id)
+		require.NotNil(t, response.Status)
+		assert.Equal(t, int32(500), response.Status.Code)
+	}
+	response := send(3)
+	assert.Nil(t, response.Status)
+	assert.Equal(t, []byte("ok"), response.Data)
 }
 
 func TestNatsRPCServerPublishesSubmissionErrorResponse(t *testing.T) {
@@ -247,30 +327,73 @@ func TestNewNatsRPCServer(t *testing.T) {
 func TestNatsRPCServerConfigure(t *testing.T) {
 	t.Parallel()
 	tables := []struct {
-		natsConnect        string
-		messagesBufferSize int
-		pushBufferSize     int
-		err                error
+		name    string
+		mutate  func(*config.NatsRPCServerConfig)
+		want    string
+		wantErr error
 	}{
-		{"nats://localhost:2333", 10, 10, nil},
-		{"nats://localhost:2333", 10, 0, constants.ErrNatsPushBufferSizeZero},
-		{"nats://localhost:2333", 0, 10, constants.ErrNatsMessagesBufferSizeZero},
-		{"", 10, 10, constants.ErrNoNatsConnectionString},
+		{name: "valid"},
+		{
+			name:    "empty connect",
+			mutate:  func(cfg *config.NatsRPCServerConfig) { cfg.Connect = " \n" },
+			want:    "pitaya.cluster.rpc.server.nats.connect",
+			wantErr: constants.ErrNoNatsConnectionString,
+		},
+		{
+			name:   "connection timeout",
+			mutate: func(cfg *config.NatsRPCServerConfig) { cfg.ConnectionTimeout = 0 },
+			want:   "pitaya.cluster.rpc.server.nats.connectiontimeout",
+		},
+		{
+			name:   "request timeout",
+			mutate: func(cfg *config.NatsRPCServerConfig) { cfg.RequestTimeout = -time.Second },
+			want:   "pitaya.cluster.rpc.server.nats.requesttimeout",
+		},
+		{
+			name:   "reconnect retries",
+			mutate: func(cfg *config.NatsRPCServerConfig) { cfg.MaxReconnectionRetries = -2 },
+			want:   "pitaya.cluster.rpc.server.nats.maxreconnectionretries",
+		},
+		{
+			name:    "parallel services",
+			mutate:  func(cfg *config.NatsRPCServerConfig) { cfg.Services = 2 },
+			want:    "pitaya.cluster.rpc.server.nats.services",
+			wantErr: constants.ErrNatsRPCServicesUnsupported,
+		},
+		{
+			name:    "negative messages buffer",
+			mutate:  func(cfg *config.NatsRPCServerConfig) { cfg.Buffer.Messages = -1 },
+			want:    "pitaya.cluster.rpc.server.nats.buffer.messages",
+			wantErr: constants.ErrNatsMessagesBufferSizeZero,
+		},
+		{
+			name:    "zero push buffer",
+			mutate:  func(cfg *config.NatsRPCServerConfig) { cfg.Buffer.Push = 0 },
+			want:    "pitaya.cluster.rpc.server.nats.buffer.push",
+			wantErr: constants.ErrNatsPushBufferSizeZero,
+		},
 	}
 
 	for _, table := range tables {
-		t.Run(fmt.Sprintf("%s-%d-%d", table.natsConnect, table.messagesBufferSize, table.pushBufferSize), func(t *testing.T) {
+		t.Run(table.name, func(t *testing.T) {
 			cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
-			cfg.Connect = table.natsConnect
-			cfg.Buffer.Messages = table.messagesBufferSize
-			cfg.Buffer.Push = table.pushBufferSize
+			if table.mutate != nil {
+				table.mutate(&cfg)
+			}
 			rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, nil, nil)
-			assert.Equal(t, table.err, err)
-			if table.err == nil {
-				assert.Equal(t, table.messagesBufferSize, rpcServer.messagesBufferSize)
-				assert.Equal(t, table.messagesBufferSize, cap(rpcServer.subChan))
-				assert.Equal(t, table.messagesBufferSize, cap(rpcServer.bindingsChan))
-				assert.Equal(t, table.messagesBufferSize, cap(rpcServer.userKickCh))
+			if table.want == "" {
+				require.NoError(t, err)
+				assert.Equal(t, cfg.Buffer.Messages, rpcServer.messagesBufferSize)
+				assert.Equal(t, cfg.Buffer.Messages, cap(rpcServer.subChan))
+				assert.Equal(t, cfg.Buffer.Messages, cap(rpcServer.bindingsChan))
+				assert.Equal(t, cfg.Buffer.Messages, cap(rpcServer.userKickCh))
+				return
+			}
+			require.Error(t, err)
+			assert.Nil(t, rpcServer)
+			assert.Contains(t, err.Error(), table.want)
+			if table.wantErr != nil {
+				assert.ErrorIs(t, err, table.wantErr)
 			}
 		})
 	}
@@ -571,6 +694,7 @@ func TestNatsRPCServerHandleMessagesSignalsAppDieWhenSubscriptionChannelCloses(t
 		bindingsChan:   make(chan *nats.Msg),
 		unhandledReqCh: make(chan *protos.Request),
 	}
+	rpcServer.running.Store(true)
 
 	pumpDone := make(chan struct{})
 	go func() {
@@ -589,6 +713,7 @@ func TestNatsRPCServerHandleMessagesSignalsAppDieWhenSubscriptionChannelCloses(t
 	case <-time.After(time.Second):
 		t.Fatal("message pump did not return after its subscription channel closed")
 	}
+	assert.False(t, rpcServer.IsRunning(), "failed message pump remained ready")
 }
 
 func TestNatsRPCServerAddInboundSubscriptionDoesNotHoldInboundLock(t *testing.T) {
@@ -1307,6 +1432,65 @@ func TestNatsRPCServerInitShouldFailIfConnFails(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestNatsRPCServerTracksBrokerDisconnectRecoveryAndResumesPump(t *testing.T) {
+	port := helpers.GetFreePort(t)
+	currentServer := runTestNATSServerAtPort(t, port)
+	defer func() {
+		currentServer.Shutdown()
+		currentServer.WaitForShutdown()
+	}()
+
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	cfg.Connect = fmt.Sprintf("nats://127.0.0.1:%d", port)
+	cfg.MaxReconnectionRetries = 100
+	dieChan := make(chan bool, 1)
+	ctrl := gomock.NewController(t)
+	mockSessionPool := sessionmocks.NewMockSessionPool(ctrl)
+	rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, dieChan, mockSessionPool)
+	require.NoError(t, err)
+	mockSessionPool.EXPECT().OnSessionBind(newFuncPtrMatcher(rpcServer.onSessionBind))
+
+	called := make(chan struct{}, 1)
+	rpcServer.SetPitayaServer(&pitayaServerStub{call: func(context.Context, *protos.Request) (*protos.Response, error) {
+		called <- struct{}{}
+		return &protos.Response{}, nil
+	}})
+	require.NoError(t, rpcServer.Init())
+	defer func() { require.NoError(t, rpcServer.Shutdown()) }()
+	require.True(t, rpcServer.IsRunning())
+
+	currentServer.Shutdown()
+	currentServer.WaitForShutdown()
+	require.Eventually(t, func() bool {
+		return !rpcServer.IsRunning()
+	}, 3*time.Second, time.Millisecond, "server did not leave readiness after broker disconnect")
+
+	currentServer = runTestNATSServerAtPort(t, port)
+	require.Eventually(t, rpcServer.IsRunning, 5*time.Second, 5*time.Millisecond, "server did not recover readiness after broker restart")
+
+	payload, err := proto.Marshal(&protos.Request{
+		Type:     protos.RPCType_User,
+		Metadata: []byte("{}"),
+		Msg: &protos.Msg{
+			Type:  protos.MsgType_MsgNotify,
+			Route: "service.method",
+		},
+	})
+	require.NoError(t, err)
+	require.NoError(t, rpcServer.conn.Publish(getChannel(rpcServer.server.Type, rpcServer.server.ID), payload))
+	require.NoError(t, rpcServer.conn.Flush())
+	select {
+	case <-called:
+	case <-time.After(3 * time.Second):
+		t.Fatal("message pump did not resume after broker recovery")
+	}
+	select {
+	case <-dieChan:
+		t.Fatal("recoverable broker disconnect triggered the terminal supervisor")
+	default:
+	}
+}
+
 func TestNatsRPCServerInitPropagatesHandlerSubmissionError(t *testing.T) {
 	if os.Getenv(statelessSubmissionErrorHelperEnv) != "1" {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestNatsRPCServerInitPropagatesHandlerSubmissionError$")
@@ -1335,7 +1519,11 @@ func TestNatsRPCServerInitPropagatesHandlerSubmissionError(t *testing.T) {
 }
 
 func TestNatsRPCServerShutdownIsIdempotent(t *testing.T) {
-	rpcServer := &NatsRPCServer{stopChan: make(chan bool)}
+	rpcServer := &NatsRPCServer{
+		stopChan:   make(chan bool),
+		userPushCh: make(chan *protos.Push),
+		userKickCh: make(chan *protos.KickMsg),
+	}
 	var wg sync.WaitGroup
 	errs := make(chan error, 32)
 	for range 32 {
@@ -1349,6 +1537,121 @@ func TestNatsRPCServerShutdownIsIdempotent(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		require.NoError(t, err)
+	}
+	_, pushOpen := <-rpcServer.userPushCh
+	_, kickOpen := <-rpcServer.userKickCh
+	assert.False(t, pushOpen, "Shutdown left the push delivery channel open")
+	assert.False(t, kickOpen, "Shutdown left the kick delivery channel open")
+}
+
+func TestNatsRPCServerGracefulShutdownCancelsHandlerLifecycleAfterWait(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, nil, nil)
+	require.NoError(t, err)
+	rpcServer.handlerMu.Lock()
+	rpcServer.consumersStarted = true
+	rpcServer.handlerMu.Unlock()
+
+	handlerStarted := make(chan struct{})
+	releaseHandler := make(chan struct{})
+	require.NoError(t, rpcServer.startHandler(func() {
+		close(handlerStarted)
+		<-releaseHandler
+	}))
+	<-handlerStarted
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- rpcServer.Shutdown() }()
+	select {
+	case <-rpcServer.runtimeContext().Done():
+		t.Fatal("graceful Shutdown canceled the lifecycle while an accepted handler was running")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseHandler)
+	select {
+	case err := <-shutdownDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("graceful Shutdown did not return after the accepted handler exited")
+	}
+	select {
+	case <-rpcServer.runtimeContext().Done():
+	default:
+		t.Fatal("graceful Shutdown did not cancel the lifecycle after handlers exited")
+	}
+}
+
+func TestNatsRPCServerGracefulShutdownPreservesAcceptedDeliveryContext(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, nil, nil)
+	require.NoError(t, err)
+	rpcServer.handlerMu.Lock()
+	rpcServer.consumersStarted = true
+	rpcServer.handlerMu.Unlock()
+
+	deliveryStarted := make(chan struct{})
+	releaseDelivery := make(chan struct{})
+	deliveryResult := make(chan error, 1)
+	rpcServer.SetPitayaServer(&pitayaServerStub{
+		pushToUser: func(ctx context.Context, _ *protos.Push) (*protos.Response, error) {
+			close(deliveryStarted)
+			select {
+			case <-ctx.Done():
+				deliveryResult <- ctx.Err()
+			case <-releaseDelivery:
+				deliveryResult <- ctx.Err()
+			}
+			return &protos.Response{}, nil
+		},
+	})
+	require.NoError(t, rpcServer.startHandler(rpcServer.processPushes))
+	rpcServer.userPushCh <- &protos.Push{Uid: "accepted-user"}
+	<-deliveryStarted
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- rpcServer.Shutdown() }()
+	select {
+	case err := <-deliveryResult:
+		t.Fatalf("graceful Shutdown canceled an accepted delivery before it completed: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseDelivery)
+	require.NoError(t, <-deliveryResult)
+	select {
+	case err := <-shutdownDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("graceful Shutdown did not return after the accepted delivery completed")
+	}
+}
+
+func TestNatsRPCServerSupervisesUnexpectedConsumerExit(t *testing.T) {
+	tests := []struct {
+		name     string
+		consumer func()
+	}{
+		{name: "panic", consumer: func() { panic("boom") }},
+		{name: "return", consumer: func() {}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+			appDie := make(chan bool, 1)
+			rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, appDie, nil)
+			require.NoError(t, err)
+			rpcServer.running.Store(true)
+			t.Cleanup(func() { require.NoError(t, rpcServer.Shutdown()) })
+
+			require.NoError(t, rpcServer.startConsumer("test", test.consumer))
+			select {
+			case <-appDie:
+			case <-time.After(time.Second):
+				t.Fatal("unexpected consumer exit did not signal app shutdown")
+			}
+			assert.False(t, rpcServer.IsRunning())
+		})
 	}
 }
 

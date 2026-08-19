@@ -635,12 +635,19 @@ func (a *agentImpl) IPVersion() string {
 
 const ttlKeepAliveIntervalRate = 10
 
+func clusterCacheKeepAliveInterval(ttl time.Duration) time.Duration {
+	interval := ttl / ttlKeepAliveIntervalRate
+	if interval <= 0 {
+		return time.Nanosecond
+	}
+	return interval
+}
+
 // keepClusterCacheAlive redis缓存保活
-// 注意若cacheTTL配置变更减少到10倍以下会导致interval过大来不及expire.TODO 有时间再优化
 //
 //	@receiver a
 func (a *agentImpl) keepClusterCacheAlive() {
-	ticker := time.NewTicker(a.Session.GetClusterStorage().CacheTTL() / ttlKeepAliveIntervalRate)
+	ticker := time.NewTicker(clusterCacheKeepAliveInterval(a.Session.GetClusterStorage().CacheTTL()))
 
 	defer func() {
 		ticker.Stop()
@@ -710,12 +717,8 @@ func (a *agentImpl) heartbeatLoop(ticks <-chan time.Time) {
 
 func (a *agentImpl) onSessionClosed(s session.Session, callback map[string]string, reason ...session.CloseReason) {
 	defer func() {
-		if err := recover(); err != nil {
-			if err_, ok := err.(error); ok {
-				logger.Zap.Error("pitaya/onSessionClosed", zap.Error(err_))
-			} else {
-				logger.Zap.Error("pitaya/onSessionClosed", zap.Any("recover", err))
-			}
+		if recovered := recover(); recovered != nil {
+			util.LogRecoveredPanic(logger.Zap, "pitaya/onSessionClosed", recovered)
 		}
 	}()
 

@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -13,6 +12,7 @@ import (
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/route"
+	"github.com/alkaid/pitaya/v2/util"
 	"go.uber.org/zap"
 )
 
@@ -220,12 +220,13 @@ func (i *taskInvocation) result(executorErr error, returnedEarly bool) error {
 func invokeTaskExecutor(ctx context.Context, executor component.TaskExecutor, task component.Task) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			logger.Zap.Error(
+			util.LogRecoveredPanic(
+				logger.Zap,
 				"panic in pitaya task executor",
-				zap.Any("panic", recovered),
+				recovered,
 				zap.ByteString("stack", debug.Stack()),
 			)
-			err = fmt.Errorf("%w: %v", component.ErrTaskExecutorPanic, recovered)
+			err = component.ErrTaskExecutorPanic
 		}
 	}()
 	return executor.Execute(ctx, task)
@@ -235,12 +236,13 @@ func invokeTaskExecutor(ctx context.Context, executor component.TaskExecutor, ta
 func invokeComponentTask(ctx context.Context, task func(context.Context) error) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			logger.Zap.Error(
+			util.LogRecoveredPanic(
+				logger.Zap,
 				"panic in pitaya component task",
-				zap.Any("panic", recovered),
+				recovered,
 				zap.ByteString("stack", debug.Stack()),
 			)
-			err = fmt.Errorf("%w: %v", component.ErrTaskPanic, recovered)
+			err = component.ErrTaskPanic
 		}
 	}()
 	return task(ctx)

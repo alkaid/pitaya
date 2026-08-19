@@ -2,6 +2,7 @@ package groups
 
 import (
 	"context"
+	"sort"
 	"time"
 )
 
@@ -22,10 +23,6 @@ type (
 )
 
 func elementIndex(slice []string, element string) (int, bool) {
-	for i, sliceElement := range slice {
-		if element == sliceElement {
-			return i, true
-		}
-	}
-	return 0, false
+	index := sort.SearchStrings(slice, element)
+	return index, index < len(slice) && slice[index] == element
 }

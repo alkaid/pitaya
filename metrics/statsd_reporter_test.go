@@ -26,7 +26,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/DataDog/datadog-go/statsd"
 	"github.com/alkaid/pitaya/v2/config"
+	"github.com/alkaid/pitaya/v2/constants"
 	metricsmocks "github.com/alkaid/pitaya/v2/metrics/mocks"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -44,6 +46,30 @@ func TestNewStatsdReporter(t *testing.T) {
 	assert.Equal(t, mockClient, sr.client)
 	assert.Equal(t, float64(cfg.Statsd.Rate), sr.rate)
 	assert.Equal(t, "svType", sr.serverType)
+}
+
+func TestNewStatsdReporterCreatesAndConfiguresClient(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Metrics
+	cfg.Statsd.Host = "127.0.0.1:8125"
+	cfg.Statsd.Prefix = "pitaya-test."
+
+	reporter, err := NewStatsdReporter(cfg, "frontend")
+	assert.NoError(t, err)
+	client, ok := reporter.client.(*statsd.Client)
+	if !ok {
+		t.Fatalf("statsd client = %T, want *statsd.Client", reporter.client)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	assert.Equal(t, cfg.Statsd.Prefix, client.Namespace)
+}
+
+func TestNewStatsdReporterReturnsClientConstructionError(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Metrics
+	cfg.Statsd.Host = "invalid address"
+
+	reporter, err := NewStatsdReporter(cfg, "frontend")
+	assert.Error(t, err)
+	assert.Nil(t, reporter)
 }
 
 func TestReportLatency(t *testing.T) {
@@ -190,4 +216,10 @@ func TestReportGaugeError(t *testing.T) {
 
 	err = sr.ReportGauge("123", map[string]string{}, float64(123.1))
 	assert.Equal(t, expectedError, err)
+}
+
+func TestReportHistogramIsNotImplemented(t *testing.T) {
+	reporter := &StatsdReporter{}
+	err := reporter.ReportHistogram("latency", map[string]string{"route": "match.join"}, 1)
+	assert.ErrorIs(t, err, constants.ErrNotImplemented)
 }

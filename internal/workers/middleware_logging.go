@@ -21,7 +21,7 @@ func (l *MiddlewareLogging) Call(queue string, message *Msg, next func() bool) (
 
 			buf := make([]byte, 4096)
 			buf = buf[:runtime.Stack(buf, false)]
-			Logger.Errorf("%s error: %v\n%s", prefix, e, buf)
+			Logger.Errorf("%s panic_type=%T\n%s", prefix, e, buf)
 
 			panic(e)
 		}

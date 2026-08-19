@@ -21,14 +21,25 @@
 package groups
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/alkaid/pitaya/v2/config"
+	"github.com/alkaid/pitaya/v2/constants"
+	"github.com/stretchr/testify/assert"
 )
 
 var memoryGroupService *MemoryGroupService
+
+func memoryGroupServiceForTest(t *testing.T) *MemoryGroupService {
+	t.Helper()
+	memoryGroupsMu.Lock()
+	memoryGroups = make(map[string]*MemoryGroup)
+	memoryGroupsMu.Unlock()
+	return memoryGroupService
+}
 
 func TestMain(m *testing.M) {
 	mconfig := *&config.NewDefaultPitayaConfig().Groups.Memory
@@ -39,45 +50,93 @@ func TestMain(m *testing.M) {
 }
 
 func TestMemoryCreateDuplicatedGroup(t *testing.T) {
-	testCreateDuplicatedGroup(memoryGroupService, t)
+	testCreateDuplicatedGroup(memoryGroupServiceForTest(t), t)
 }
 
 func TestMemoryCreateGroup(t *testing.T) {
-	testCreateGroup(memoryGroupService, t)
+	testCreateGroup(memoryGroupServiceForTest(t), t)
 }
 
 func TestMemoryCreateGroupWithTTL(t *testing.T) {
-	testCreateGroupWithTTL(memoryGroupService, t)
+	testCreateGroupWithTTL(memoryGroupServiceForTest(t), t)
 }
 
 func TestMemoryGroupAddMember(t *testing.T) {
-	testGroupAddMember(memoryGroupService, t)
+	testGroupAddMember(memoryGroupServiceForTest(t), t)
 }
 
 func TestMemoryGroupAddDuplicatedMember(t *testing.T) {
-	testGroupAddDuplicatedMember(memoryGroupService, t)
+	testGroupAddDuplicatedMember(memoryGroupServiceForTest(t), t)
 }
 
 func TestMemoryGroupContainsMember(t *testing.T) {
-	testGroupContainsMember(memoryGroupService, t)
+	testGroupContainsMember(memoryGroupServiceForTest(t), t)
 }
 
 func TestMemoryRemove(t *testing.T) {
-	testRemove(memoryGroupService, t)
+	testRemove(memoryGroupServiceForTest(t), t)
 }
 
 func TestMemoryDelete(t *testing.T) {
-	testDelete(memoryGroupService, t)
+	testDelete(memoryGroupServiceForTest(t), t)
 }
 
 func TestMemoryRemoveAll(t *testing.T) {
-	testRemoveAll(memoryGroupService, t)
+	testRemoveAll(memoryGroupServiceForTest(t), t)
 }
 
 func TestMemoryCount(t *testing.T) {
-	testCount(memoryGroupService, t)
+	testCount(memoryGroupServiceForTest(t), t)
 }
 
 func TestMemoryMembers(t *testing.T) {
-	testMembers(memoryGroupService, t)
+	testMembers(memoryGroupServiceForTest(t), t)
+}
+
+func TestMemoryMembersPage(t *testing.T) {
+	testMembersPage(memoryGroupServiceForTest(t), t)
+}
+
+func TestMemoryEmptyUIDRejected(t *testing.T) {
+	testEmptyUIDRejected(memoryGroupServiceForTest(t), t)
+}
+
+func TestMemoryMembersPageRejectsStoredEmptyUID(t *testing.T) {
+	memoryGroupServiceForTest(t)
+	groupName := "testMemoryMembersPageRejectsStoredEmptyUID"
+	memoryGroupsMu.Lock()
+	memoryGroups[groupName] = &MemoryGroup{Uids: []string{"", "b"}}
+	memoryGroupsMu.Unlock()
+	t.Cleanup(func() {
+		memoryGroupsMu.Lock()
+		delete(memoryGroups, groupName)
+		memoryGroupsMu.Unlock()
+	})
+
+	page, err := memoryGroupService.GroupMembersPage(
+		context.Background(),
+		groupName,
+		MemberPageOptions{Limit: 1},
+	)
+	assert.ErrorIs(t, err, constants.ErrEmptyUID)
+	assert.Empty(t, page)
+}
+
+func TestMemoryMembersStaySortedAcrossAddAndRemove(t *testing.T) {
+	groupService := memoryGroupServiceForTest(t)
+	ctx := context.Background()
+	const groupName = "testMemoryMembersStaySortedAcrossAddAndRemove"
+	assert.NoError(t, groupService.GroupCreate(ctx, groupName))
+	for _, uid := range []string{"c", "a", "b"} {
+		assert.NoError(t, groupService.GroupAddMember(ctx, groupName, uid))
+	}
+
+	members, err := groupService.GroupMembers(ctx, groupName)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"a", "b", "c"}, members)
+
+	assert.NoError(t, groupService.GroupRemoveMember(ctx, groupName, "b"))
+	members, err = groupService.GroupMembers(ctx, groupName)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"a", "c"}, members)
 }

@@ -145,6 +145,41 @@ jobs:
     - name: Compile root, CLI, and xk6 packages
       run: make compile
 
+  compile-platforms:
+    name: Compile-only (${{ matrix.goos }}/amd64)
+    needs: module-verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        goos:
+        - darwin
+        - windows
+    steps:
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Set up Go
+      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version-file: go.mod
+        cache-dependency-path: |
+          go.sum
+          tools/go.sum
+          pitaya-cli/go.sum
+          xk6-pitaya/go.sum
+    - name: Download and verify source modules
+      run: |
+        for module in . pitaya-cli xk6-pitaya; do
+          (
+            cd "$module"
+            GOWORK=off go mod download
+            GOWORK=off go mod verify
+          )
+        done
+    - name: Cross-compile all modules
+      run: make compile-platform TARGET_GOOS=${{ matrix.goos }} TARGET_GOARCH=amd64
+
   unit:
     name: Unit Test
     needs: compile
@@ -171,7 +206,7 @@ jobs:
 
   race:
     name: Targeted Race
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
     needs: compile
     runs-on: ubuntu-24.04
     # Leave setup and failure-diagnostic headroom beyond go test's 10m timeout.
@@ -197,7 +232,7 @@ jobs:
 
   integration:
     name: Redis Integration
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
     needs: compile
     runs-on: ubuntu-24.04
     # Leave setup, bounded diagnostics, and teardown headroom beyond the harness.
@@ -218,7 +253,7 @@ jobs:
       run: |
         GOWORK=off go mod download
         GOWORK=off go mod verify
-    - name: Run the isolated Redis integration test
+    - name: Run the isolated Redis integration suites
       run: make test-integration
 
   vet:
@@ -523,7 +558,7 @@ jobs:
 
   e2e-nats:
     name: NATS End to End
-    if: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:

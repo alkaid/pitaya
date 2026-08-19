@@ -21,14 +21,48 @@
 package cluster
 
 import (
+	"bytes"
 	"fmt"
+	"os"
 	"sync"
 
+	"github.com/alkaid/pitaya/v2/config"
 	"go.uber.org/zap"
 
 	"github.com/alkaid/pitaya/v2/logger"
 	nats "github.com/nats-io/nats.go"
 )
+
+func buildNATSConnectionOptions(path string, tlsConfig config.TLSConfig, auth config.NatsAuthConfig) ([]nats.Option, error) {
+	clientTLS, err := config.LoadClientTLS(path+".tls", tlsConfig)
+	if err != nil {
+		return nil, err
+	}
+	if err := auth.Validate(path + ".auth"); err != nil {
+		return nil, err
+	}
+
+	options := make([]nats.Option, 0, 2)
+	if clientTLS != nil {
+		options = append(options, nats.Secure(clientTLS))
+	}
+	switch {
+	case auth.Username != "":
+		options = append(options, nats.UserInfo(auth.Username, auth.Password))
+	case auth.Token != "":
+		options = append(options, nats.Token(auth.Token))
+	case auth.CredentialsFile != "":
+		credentials, readErr := os.ReadFile(auth.CredentialsFile)
+		if readErr != nil {
+			return nil, fmt.Errorf("%s.auth.credentialsfile could not be read", path)
+		}
+		if len(bytes.TrimSpace(credentials)) == 0 {
+			return nil, fmt.Errorf("%s.auth.credentialsfile must not be empty", path)
+		}
+		options = append(options, nats.UserCredentialBytes(credentials))
+	}
+	return options, nil
+}
 
 func getChannel(serverType, serverID string) string {
 	return fmt.Sprintf("pitaya/servers/%s/%s", serverType, serverID)
@@ -54,10 +88,35 @@ func setupNatsConn(connectString string, appDieChan chan bool, options ...nats.O
 	return nc, err
 }
 
+type natsConnLifecycleCallbacks struct {
+	disconnected func(error)
+	reconnected  func(*nats.Conn)
+	closed       func(*nats.Conn)
+	closing      func() bool
+}
+
 func setupTrackedNatsConn(
 	connectString string,
 	appDieChan chan bool,
 	terminalCallback func(),
+	options ...nats.Option,
+) (*nats.Conn, <-chan struct{}, error) {
+	return setupTrackedNatsConnWithLifecycle(
+		connectString,
+		appDieChan,
+		natsConnLifecycleCallbacks{closed: func(*nats.Conn) {
+			if terminalCallback != nil {
+				terminalCallback()
+			}
+		}},
+		options...,
+	)
+}
+
+func setupTrackedNatsConnWithLifecycle(
+	connectString string,
+	appDieChan chan bool,
+	callbacks natsConnLifecycleCallbacks,
 	options ...nats.Option,
 ) (*nats.Conn, <-chan struct{}, error) {
 	terminalCallbackDone := make(chan struct{})
@@ -66,20 +125,32 @@ func setupTrackedNatsConn(
 		options,
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
 			logger.Zap.Warn("disconnected from nats!", zap.Error(err))
+			if callbacks.disconnected != nil {
+				callbacks.disconnected(err)
+			}
 		}),
 		nats.ReconnectHandler(func(nc *nats.Conn) {
 			logger.Log.Warnf("reconnected to nats server %s with address %s in cluster %s!", nc.ConnectedServerName(), nc.ConnectedAddr(), nc.ConnectedClusterName())
+			if callbacks.reconnected != nil {
+				callbacks.reconnected(nc)
+			}
 		}),
 		nats.ClosedHandler(func(nc *nats.Conn) {
 			defer terminalCallbackOnce.Do(func() {
 				close(terminalCallbackDone)
 			})
-			if terminalCallback != nil {
-				terminalCallback()
+			expectedClose := callbacks.closing != nil && callbacks.closing()
+			if callbacks.closed != nil {
+				callbacks.closed(nc)
 			}
 			err := nc.LastError()
+			if expectedClose {
+				logger.Log.Debug("nats connection closed during shutdown")
+				return
+			}
 			if err == nil {
 				logger.Log.Warn("nats connection closed with no error.")
+				signalAppDie(appDieChan)
 				return
 			}
 

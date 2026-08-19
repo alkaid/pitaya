@@ -27,6 +27,7 @@ import (
 	"math/rand"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/alkaid/goerrors/apierrors"
 	agentmocks "github.com/alkaid/pitaya/v2/agent/mocks"
@@ -47,6 +48,7 @@ import (
 	sessionmocks "github.com/alkaid/pitaya/v2/session/mocks"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 	"google.golang.org/protobuf/proto"
 )
@@ -162,6 +164,49 @@ func TestRemoteServiceAddRemoteBindingListener(t *testing.T) {
 
 	svc.AddRemoteBindingListener(mockBindingListener)
 	assert.Equal(t, mockBindingListener, svc.remoteBindingListeners[0])
+}
+
+func TestRemoteServiceStateOwnersHaveIndependentLocksAndSnapshots(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	listener := clustermocks.NewMockRemoteBindingListener(ctrl)
+	svc := &RemoteService{
+		remoteRegistryOwner: newRemoteRegistryOwner(),
+		remoteListenerOwner: remoteListenerOwner{},
+	}
+
+	svc.remoteRegistryOwner.mu.Lock()
+	listenerAdded := make(chan struct{})
+	go func() {
+		svc.AddRemoteBindingListener(listener)
+		close(listenerAdded)
+	}()
+	select {
+	case <-listenerAdded:
+	case <-time.After(time.Second):
+		svc.remoteRegistryOwner.mu.Unlock()
+		t.Fatal("listener publication waited on the registry owner")
+	}
+	svc.remoteRegistryOwner.mu.Unlock()
+
+	snapshot := svc.GetRemoteBindingListener()
+	require.Len(t, snapshot, 1)
+	snapshot[0] = nil
+	require.Same(t, listener, svc.GetRemoteBindingListener()[0])
+
+	svc.remotes["chat.echo"] = nil
+	svc.remoteListenerOwner.mu.Lock()
+	remoteRead := make(chan struct{})
+	go func() {
+		_, _ = svc.remoteRegistryOwner.lookupRemote("chat.echo")
+		close(remoteRead)
+	}()
+	select {
+	case <-remoteRead:
+	case <-time.After(time.Second):
+		svc.remoteListenerOwner.mu.Unlock()
+		t.Fatal("registry read waited on the listener owner")
+	}
+	svc.remoteListenerOwner.mu.Unlock()
 }
 
 func TestRemoteServiceSessionBindRemote(t *testing.T) {

@@ -24,7 +24,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"google.golang.org/protobuf/proto"
 	"testing"
 	"time"
 
@@ -32,6 +31,7 @@ import (
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
+	pcontext "github.com/alkaid/pitaya/v2/context"
 	"github.com/alkaid/pitaya/v2/helpers"
 	"github.com/alkaid/pitaya/v2/metrics"
 	metricsmocks "github.com/alkaid/pitaya/v2/metrics/mocks"
@@ -43,6 +43,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestNewNatsRPCClient(t *testing.T) {
@@ -65,22 +66,52 @@ func TestNewNatsRPCClient(t *testing.T) {
 func TestNatsRPCClientConfigure(t *testing.T) {
 	t.Parallel()
 	tables := []struct {
-		natsConnect string
-		reqTimeout  time.Duration
-		err         error
+		name    string
+		mutate  func(*config.NatsRPCClientConfig)
+		want    string
+		wantErr error
 	}{
-		{"nats://localhost:2333", time.Duration(10 * time.Second), nil},
-		{"nats://localhost:2333", time.Duration(0), constants.ErrNatsNoRequestTimeout},
-		{"", time.Duration(10 * time.Second), constants.ErrNoNatsConnectionString},
+		{name: "valid"},
+		{
+			name:    "empty connect",
+			mutate:  func(cfg *config.NatsRPCClientConfig) { cfg.Connect = " \t" },
+			want:    "pitaya.cluster.rpc.client.nats.connect",
+			wantErr: constants.ErrNoNatsConnectionString,
+		},
+		{
+			name:   "connection timeout",
+			mutate: func(cfg *config.NatsRPCClientConfig) { cfg.ConnectionTimeout = 0 },
+			want:   "pitaya.cluster.rpc.client.nats.connectiontimeout",
+		},
+		{
+			name:    "request timeout",
+			mutate:  func(cfg *config.NatsRPCClientConfig) { cfg.RequestTimeout = -time.Second },
+			want:    "pitaya.cluster.rpc.client.nats.requesttimeout",
+			wantErr: constants.ErrNatsNoRequestTimeout,
+		},
+		{
+			name:   "reconnect retries",
+			mutate: func(cfg *config.NatsRPCClientConfig) { cfg.MaxReconnectionRetries = -2 },
+			want:   "pitaya.cluster.rpc.client.nats.maxreconnectionretries",
+		},
 	}
 
 	for _, table := range tables {
-		t.Run(fmt.Sprintf("%s-%s", table.natsConnect, table.reqTimeout), func(t *testing.T) {
+		t.Run(table.name, func(t *testing.T) {
 			cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Client.Nats
-			cfg.Connect = table.natsConnect
-			cfg.RequestTimeout = table.reqTimeout
+			if table.mutate != nil {
+				table.mutate(&cfg)
+			}
 			_, err := NewNatsRPCClient(cfg, getServer(), nil, nil)
-			assert.Equal(t, table.err, err)
+			if table.want == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), table.want)
+			if table.wantErr != nil {
+				assert.ErrorIs(t, err, table.wantErr)
+			}
 		})
 	}
 }
@@ -129,6 +160,104 @@ func TestNatsRPCClientInit(t *testing.T) {
 	// should setup conn
 	assert.NotNil(t, rpcClient.conn)
 	assert.True(t, rpcClient.conn.IsConnected())
+}
+
+func TestNatsRPCClientTracksBrokerDisconnectAndRecovery(t *testing.T) {
+	port := helpers.GetFreePort(t)
+	currentServer := runTestNATSServerAtPort(t, port)
+	defer func() {
+		currentServer.Shutdown()
+		currentServer.WaitForShutdown()
+	}()
+
+	dieChan := make(chan bool, 1)
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Client.Nats
+	cfg.Connect = fmt.Sprintf("nats://127.0.0.1:%d", port)
+	cfg.MaxReconnectionRetries = 100
+	rpcClient, err := NewNatsRPCClient(cfg, getServer(), nil, dieChan)
+	require.NoError(t, err)
+	require.NoError(t, rpcClient.Init())
+	defer func() { require.NoError(t, rpcClient.Shutdown()) }()
+	require.True(t, rpcClient.IsRunning())
+
+	currentServer.Shutdown()
+	currentServer.WaitForShutdown()
+	require.Eventually(t, func() bool {
+		return !rpcClient.IsRunning()
+	}, 3*time.Second, time.Millisecond, "client did not leave readiness after broker disconnect")
+
+	currentServer = runTestNATSServerAtPort(t, port)
+	require.Eventually(t, rpcClient.IsRunning, 5*time.Second, 5*time.Millisecond, "client did not recover readiness after broker restart")
+	require.NoError(t, rpcClient.Send("recovery.client", []byte("ok")))
+	select {
+	case <-dieChan:
+		t.Fatal("recoverable broker disconnect triggered the terminal supervisor")
+	default:
+	}
+}
+
+func TestNatsRPCClientShutdownCancelsAndWaitsForInFlightCall(t *testing.T) {
+	s := helpers.GetTestNatsServer(t)
+	defer s.Shutdown()
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Client.Nats
+	cfg.Connect = fmt.Sprintf("nats://%s", s.Addr())
+	cfg.RequestTimeout = time.Minute
+	rpcClient, err := NewNatsRPCClient(cfg, getServer(), nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, rpcClient.Init())
+
+	target := &Server{ID: "target", Type: "room"}
+	requestReceived := make(chan *nats.Msg, 1)
+	sub, err := rpcClient.conn.ChanSubscribe(getChannel(target.Type, target.ID), requestReceived)
+	require.NoError(t, err)
+	require.NoError(t, rpcClient.conn.Flush())
+
+	callResult := make(chan error, 1)
+	go func() {
+		_, callErr := rpcClient.Call(
+			context.Background(),
+			protos.RPCType_User,
+			route.NewRoute(target.Type, "service", "method"),
+			nil,
+			&message.Message{Type: message.Request, Route: "service.method"},
+			target,
+		)
+		callResult <- callErr
+	}()
+	receiveFanout := func() {
+		select {
+		case <-requestReceived:
+		case <-time.After(3 * time.Second):
+			t.Fatal("in-flight call did not reach NATS")
+		}
+	}
+	receiveFanout()
+	require.NoError(t, sub.Unsubscribe())
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- rpcClient.Shutdown() }()
+	select {
+	case callErr := <-callResult:
+		require.ErrorIs(t, callErr, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not cancel the in-flight call")
+	}
+	select {
+	case shutdownErr := <-shutdownDone:
+		require.NoError(t, shutdownErr)
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not wait for the canceled call")
+	}
+	assert.False(t, rpcClient.IsRunning())
+	assert.True(t, rpcClient.conn.IsClosed())
+	require.ErrorIs(t, rpcClient.Send("after.shutdown", nil), constants.ErrRPCClientNotInitialized)
+	forkMessage := &message.Message{Type: message.Request, ID: 10}
+	require.ErrorIs(
+		t,
+		rpcClient.Fork(context.Background(), route.NewRoute("room", "svc", "method"), nil, forkMessage),
+		constants.ErrRPCClientNotInitialized,
+	)
+	assert.Equal(t, message.Request, forkMessage.Type)
 }
 
 func TestNatsRPCClientShutdownWaitsForTerminalCallback(t *testing.T) {
@@ -340,6 +469,152 @@ func TestNatsRPCClientSend(t *testing.T) {
 	}
 }
 
+func TestNatsRPCClientPublishAndForkPreserveWireSemantics(t *testing.T) {
+	s := helpers.GetTestNatsServer(t)
+	defer s.Shutdown()
+
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Client.Nats
+	cfg.Connect = fmt.Sprintf("nats://%s", s.Addr())
+	clientServer := getServer()
+	rpcClient, err := NewNatsRPCClient(cfg, clientServer, nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, rpcClient.Init())
+	defer func() { assert.NoError(t, rpcClient.Shutdown()) }()
+
+	rt := route.NewRoute("room", "svc", "publish")
+	type observation struct {
+		request *protos.Request
+		err     error
+	}
+	observed := make(chan observation, 2)
+	responseData, err := proto.Marshal(&protos.Response{Data: []byte("response")})
+	require.NoError(t, err)
+	sub, err := rpcClient.conn.Subscribe(getChannel(rt.SvType, rt.Method), func(msg *nats.Msg) {
+		req := &protos.Request{}
+		decodeErr := proto.Unmarshal(msg.Data, req)
+		observed <- observation{request: req, err: decodeErr}
+		if msg.Reply != "" {
+			_ = msg.Respond(responseData)
+		}
+	})
+	require.NoError(t, err)
+	require.NoError(t, rpcClient.conn.Flush())
+
+	publishCtx, cancelPublish := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelPublish()
+	responses, err := rpcClient.Publish(
+		publishCtx,
+		protos.RPCType_Sys,
+		rt,
+		nil,
+		&message.Message{Type: message.Request, ID: 42, Data: []byte("request")},
+		1,
+		time.Second,
+	)
+	require.NoError(t, err)
+	require.Len(t, responses, 1)
+	assert.Equal(t, []byte("response"), responses[0].Data)
+	requestObservation := helpers.ShouldEventuallyReceive(t, observed).(observation)
+	require.NoError(t, requestObservation.err)
+	assert.Equal(t, protos.MsgType_MsgRequest, requestObservation.request.Msg.Type)
+	assert.Equal(t, uint64(42), requestObservation.request.Msg.Id)
+	assert.Equal(t, rt.String(), requestObservation.request.Msg.Route)
+
+	responses, err = rpcClient.Publish(
+		context.Background(),
+		protos.RPCType_Sys,
+		rt,
+		nil,
+		&message.Message{Type: message.Notify, Data: []byte("notify")},
+		0,
+	)
+	require.NoError(t, err)
+	assert.Nil(t, responses)
+	notifyObservation := helpers.ShouldEventuallyReceive(t, observed).(observation)
+	require.NoError(t, notifyObservation.err)
+	assert.Equal(t, protos.MsgType_MsgNotify, notifyObservation.request.Msg.Type)
+	assert.Equal(t, []byte("notify"), notifyObservation.request.Msg.Data)
+
+	forkMessages := make(chan *nats.Msg, 1)
+	forkSub, err := rpcClient.conn.ChanSubscribe(GetForkTopic(rt.SvType), forkMessages)
+	require.NoError(t, err)
+	require.NoError(t, rpcClient.conn.Flush())
+	forkMessage := &message.Message{Type: message.Request, ID: 7, Data: []byte("fork")}
+	require.NoError(t, rpcClient.Fork(nil, rt, nil, forkMessage))
+	require.Equal(t, message.Notify, forkMessage.Type)
+
+	wireFork := helpers.ShouldEventuallyReceive(t, forkMessages).(*nats.Msg)
+	forkRequest := &protos.Request{}
+	require.NoError(t, proto.Unmarshal(wireFork.Data, forkRequest))
+	assert.Equal(t, protos.RPCType_User, forkRequest.Type)
+	assert.Equal(t, protos.MsgType_MsgNotify, forkRequest.Msg.Type)
+	assert.Equal(t, rt.String(), forkRequest.Msg.Route)
+	forkCtx, err := pcontext.Decode(forkRequest.Metadata)
+	require.NoError(t, err)
+	assert.Equal(t, "1", pcontext.GetFromPropagateCtx(forkCtx, constants.IdempotencyFanoutKey))
+
+	clientServer.SetOwnerEpoch(1)
+	responses, err = rpcClient.Publish(
+		context.Background(),
+		protos.RPCType_Sys,
+		rt,
+		nil,
+		&message.Message{Type: message.Notify, Data: []byte("fenced-publish")},
+		0,
+	)
+	require.ErrorIs(t, err, constants.ErrRPCPublishRequiresTargetResolution)
+	assert.Nil(t, responses)
+	require.NoError(t, rpcClient.conn.Flush())
+	select {
+	case unexpected := <-observed:
+		t.Fatalf("fenced Publish sent an unexpected request: %+v", unexpected)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	fencedMessage := &message.Message{Type: message.Request, ID: 8, Data: []byte("fenced-fork")}
+	err = rpcClient.Fork(context.Background(), rt, nil, fencedMessage)
+	require.ErrorIs(t, err, constants.ErrRPCForkRequiresTargetResolution)
+	assert.Equal(t, message.Request, fencedMessage.Type)
+	require.NoError(t, rpcClient.conn.Flush())
+	select {
+	case unexpected := <-forkMessages:
+		t.Fatalf("fenced Fork published an unexpected message: %q", unexpected.Data)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	clientServer.SetOwnerEpoch(0)
+	clientServer.InvalidateOwnerEpoch()
+	responses, err = rpcClient.Publish(
+		context.Background(),
+		protos.RPCType_Sys,
+		rt,
+		nil,
+		&message.Message{Type: message.Notify, Data: []byte("invalid-owner-publish")},
+		0,
+	)
+	require.ErrorIs(t, err, constants.ErrRPCPublishRequiresTargetResolution)
+	assert.Nil(t, responses)
+	require.NoError(t, rpcClient.conn.Flush())
+	select {
+	case unexpected := <-observed:
+		t.Fatalf("invalid-owner Publish sent an unexpected request: %+v", unexpected)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	invalidOwnerMessage := &message.Message{Type: message.Request, ID: 9, Data: []byte("invalid-owner-fork")}
+	err = rpcClient.Fork(context.Background(), rt, nil, invalidOwnerMessage)
+	require.ErrorIs(t, err, constants.ErrRPCForkRequiresTargetResolution)
+	assert.Equal(t, message.Request, invalidOwnerMessage.Type)
+	require.NoError(t, rpcClient.conn.Flush())
+	select {
+	case unexpected := <-forkMessages:
+		t.Fatalf("invalid-owner Fork published an unexpected message: %q", unexpected.Data)
+	case <-time.After(100 * time.Millisecond):
+	}
+	require.NoError(t, sub.Unsubscribe())
+	require.NoError(t, forkSub.Unsubscribe())
+}
+
 func TestNatsRPCClientBuildRequest(t *testing.T) {
 	config := config.NewDefaultPitayaConfig().Cluster.RPC.Client.Nats
 	sv := getServer()
@@ -471,6 +746,66 @@ func TestNatsRPCClientCallShouldFailIfNotRunning(t *testing.T) {
 	)
 	assert.ErrorIs(t, err, constants.ErrRPCClientNotInitialized)
 	assert.Nil(t, res)
+}
+
+func TestNatsRPCClientCallOwnsTargetFencingMetadata(t *testing.T) {
+	natsServer := helpers.GetTestNatsServer(t)
+	defer natsServer.Shutdown()
+
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Client.Nats
+	cfg.Connect = fmt.Sprintf("nats://%s", natsServer.Addr())
+	rpcClient, err := NewNatsRPCClient(cfg, getServer(), nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, rpcClient.Init())
+	defer func() { require.NoError(t, rpcClient.Shutdown()) }()
+
+	target := NewServer("room-fenced", "room", false)
+	target.SetOwnerEpoch(42)
+	requests := make(chan *nats.Msg, 1)
+	sub, err := rpcClient.conn.ChanSubscribe(getChannel(target.Type, target.ID), requests)
+	require.NoError(t, err)
+	require.NoError(t, rpcClient.conn.Flush())
+	defer func() { require.NoError(t, sub.Unsubscribe()) }()
+
+	ctx := pcontext.AddListToPropagateCtx(
+		context.Background(),
+		constants.OwnerServerIDKey, "stale-target",
+		constants.OwnerEpochKey, "1",
+	)
+	_, err = rpcClient.Call(
+		ctx,
+		protos.RPCType_User,
+		route.NewRoute(target.Type, "svc", "notify"),
+		nil,
+		&message.Message{Type: message.Notify},
+		target,
+	)
+	require.NoError(t, err)
+
+	wire := helpers.ShouldEventuallyReceive(t, requests).(*nats.Msg)
+	request := &protos.Request{}
+	require.NoError(t, proto.Unmarshal(wire.Data, request))
+	requestCtx, err := pcontext.Decode(request.Metadata)
+	require.NoError(t, err)
+	assert.Equal(t, target.ID, pcontext.GetFromPropagateCtx(requestCtx, constants.OwnerServerIDKey))
+	assert.Equal(t, "42", pcontext.GetFromPropagateCtx(requestCtx, constants.OwnerEpochKey))
+
+	target.InvalidateOwnerEpoch()
+	_, err = rpcClient.Call(
+		context.Background(),
+		protos.RPCType_User,
+		route.NewRoute(target.Type, "svc", "notify"),
+		nil,
+		&message.Message{Type: message.Notify},
+		target,
+	)
+	require.ErrorIs(t, err, constants.ErrStaleOwnerEpoch)
+	require.NoError(t, rpcClient.conn.Flush())
+	select {
+	case unexpected := <-requests:
+		t.Fatalf("invalid target Call published an unexpected message: %q", unexpected.Data)
+	case <-time.After(100 * time.Millisecond):
+	}
 }
 
 func TestNatsRPCClientCall(t *testing.T) {

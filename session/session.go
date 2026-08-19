@@ -96,10 +96,34 @@ type BoundData struct {
 	Backends   map[string]string `json:"_backends"` // 绑定的后端ID表 key:serverType value:serverID
 }
 
+type handshakeValidatorRegistry struct {
+	mu         sync.RWMutex
+	validators map[string]func(data *HandshakeData) error
+}
+
+func (r *handshakeValidatorRegistry) add(name string, validator func(data *HandshakeData) error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.validators == nil {
+		r.validators = make(map[string]func(data *HandshakeData) error)
+	}
+	r.validators[name] = validator
+}
+
+func (r *handshakeValidatorRegistry) snapshot() map[string]func(data *HandshakeData) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	validators := make(map[string]func(data *HandshakeData) error, len(r.validators))
+	for name, validator := range r.validators {
+		validators[name] = validator
+	}
+	return validators
+}
+
 type sessionPoolImpl struct {
 	sessionBindCallbacks []OnSessionBindFunc
 	afterBindCallbacks   []OnSessionBindFunc
-	handshakeValidators  map[string]func(data *HandshakeData) error
+	handshakeValidators  handshakeValidatorRegistry
 	sessionsMutex        sync.Mutex
 	// SessionCloseCallbacks contains global session close callbacks
 	SessionCloseCallbacks []OnSessionCloseFunc
@@ -194,31 +218,69 @@ type backendMutationToken struct {
 	generation uint64
 }
 
+// backendBindings owns the backend binding map and the mutation generations
+// used to make coordinator rollbacks conditional on the mutation they started.
+// Its zero value is ready for use.
+type backendBindings struct {
+	mu          sync.RWMutex
+	backends    map[string]string
+	generations map[string]uint64
+}
+
+// sessionLifecycleOwner owns identity publication, bind/close admission and
+// resources that must be detached exactly once when the session closes.
+type sessionLifecycleOwner struct {
+	lifecycleMutex   sync.RWMutex
+	binding          bool
+	closed           bool
+	identity         atomic.Pointer[sessionIdentity]
+	registeredUID    string
+	lastTime         int64
+	OnCloseCallbacks []func()
+	Subscriptions    []*nats.Subscription
+}
+
+// sessionDataOwner owns the mutable client/session snapshot. Its embedded lock
+// intentionally preserves the existing sessionImpl Lock/RLock method set.
+type sessionDataOwner struct {
+	sync.RWMutex
+	data              map[string]any
+	handshakeData     *HandshakeData
+	encodedData       []byte
+	IsFrontend        bool
+	frontendID        string
+	frontendSessionID int64
+	ip                string
+}
+
+type sessionDataSnapshot struct {
+	isFrontend        bool
+	frontendID        string
+	frontendSessionID int64
+	ip                string
+	encodedData       []byte
+}
+
+func (o *sessionDataOwner) snapshot() sessionDataSnapshot {
+	o.RLock()
+	defer o.RUnlock()
+	return sessionDataSnapshot{
+		isFrontend:        o.IsFrontend,
+		frontendID:        o.frontendID,
+		frontendSessionID: o.frontendSessionID,
+		ip:                o.ip,
+		encodedData:       append([]byte(nil), o.encodedData...),
+	}
+}
+
 type sessionImpl struct {
-	sync.RWMutex                                              // protect data
-	lifecycleMutex      sync.RWMutex                          // protect identity and close state
-	binding             bool                                  // a bind attempt is running callbacks
-	closed              bool                                  // close side effects have started
-	id                  int64                                 // session global unique id
-	identity            atomic.Pointer[sessionIdentity]       // immutable identity snapshot for lock-free reads
-	registeredUID       string                                // UID key currently registered in the local pool
-	lastTime            int64                                 // last heartbeat time
-	entity              networkentity.NetworkEntity           // low-level network entity
-	data                map[string]any                        // session data store 用户自定义数据
-	handshakeData       *HandshakeData                        // handshake data received by the client
-	handshakeValidators map[string]func(*HandshakeData) error // validations to run on handshake
-	encodedData         []byte                                // session data encoded as a byte array
-	OnCloseCallbacks    []func()                              // onClose callbacks
-	IsFrontend          bool                                  // if session is a frontend session
-	frontendID          string                                // the id of the frontend that owns the session
-	frontendSessionID   int64                                 // the id of the session on the frontend server
-	backends            map[string]string                     // 绑定的backends
-	backendGenerations  map[string]uint64                     // mutation generation by backend type
-	bsMutex             sync.RWMutex                          // backends 的mutex
-	ip                  string                                // 远程客户端ip地址
-	Subscriptions       []*nats.Subscription                  // subscription created on bind when using nats rpc server  // subscription created on bind when using nats rpc server
-	requestsInFlight    ReqInFlight
-	pool                *sessionPoolImpl
+	sessionLifecycleOwner
+	sessionDataOwner
+	id               int64                       // session global unique id
+	entity           networkentity.NetworkEntity // low-level network entity
+	backendBindings  backendBindings             // 绑定的backends
+	requestsInFlight ReqInFlight
+	pool             *sessionPoolImpl
 }
 
 type ReqInFlight struct {
@@ -440,18 +502,18 @@ func (pool *sessionPoolImpl) NewSession(entity networkentity.NetworkEntity, fron
 		uidInt = util.ForceIdStrToInt(uid)
 	}
 	s := &sessionImpl{
-		id:                  pool.sessionIDSvc.sessionID(),
-		entity:              entity,
-		data:                make(map[string]any),
-		handshakeData:       nil,
-		handshakeValidators: pool.handshakeValidators,
-		lastTime:            time.Now().Unix(),
-		OnCloseCallbacks:    []func(){},
-		IsFrontend:          frontend,
-		pool:                pool,
-		requestsInFlight:    ReqInFlight{m: make(map[string]string), mu: new(sync.RWMutex)},
-		backends:            map[string]string{},
-		backendGenerations:  map[string]uint64{},
+		sessionLifecycleOwner: sessionLifecycleOwner{
+			lastTime:         time.Now().Unix(),
+			OnCloseCallbacks: []func(){},
+		},
+		sessionDataOwner: sessionDataOwner{
+			data:       make(map[string]any),
+			IsFrontend: frontend,
+		},
+		id:               pool.sessionIDSvc.sessionID(),
+		entity:           entity,
+		pool:             pool,
+		requestsInFlight: ReqInFlight{m: make(map[string]string), mu: new(sync.RWMutex)},
 	}
 	s.identity.Store(&sessionIdentity{uid: uid, uidInt: uidInt, online: true})
 	// sessionstick 的 backend，在 BindBackend()时保存,这里只处理 frontend
@@ -464,9 +526,11 @@ func (pool *sessionPoolImpl) NewSession(entity networkentity.NetworkEntity, fron
 // NewSessionPool returns a new session pool instance
 func NewSessionPool() SessionPool {
 	return &sessionPoolImpl{
-		sessionBindCallbacks:      make([]OnSessionBindFunc, 0),
-		afterBindCallbacks:        make([]OnSessionBindFunc, 0),
-		handshakeValidators:       make(map[string]func(data *HandshakeData) error, 0),
+		sessionBindCallbacks: make([]OnSessionBindFunc, 0),
+		afterBindCallbacks:   make([]OnSessionBindFunc, 0),
+		handshakeValidators: handshakeValidatorRegistry{
+			validators: make(map[string]func(data *HandshakeData) error),
+		},
 		SessionCloseCallbacks:     make([]OnSessionCloseFunc, 0),
 		sessionIDSvc:              newSessionIDService(),
 		afterBindBackendCallbacks: make([]OnSessionBindBackendFunc, 0),
@@ -619,7 +683,7 @@ func (pool *sessionPoolImpl) closeAll(force bool) {
 // AddHandshakeValidator allows adds validation functions that will run when
 // handshake packets are processed. Errors will be raised with the given name.
 func (pool *sessionPoolImpl) AddHandshakeValidator(name string, f func(data *HandshakeData) error) {
-	pool.handshakeValidators[name] = f
+	pool.handshakeValidators.add(name, f)
 }
 
 func (pool *sessionPoolImpl) EncodeSessionData(data map[string]interface{}) ([]byte, error) {
@@ -769,6 +833,12 @@ func (pool *sessionPoolImpl) removeSessionByIDLocked(id int64, session Session) 
 }
 
 func (pool *sessionPoolImpl) SetClusterCache(storage CacheInterface) {
+	if storage == nil {
+		panic("pitaya/session: cluster cache must not be nil")
+	}
+	if storage.CacheTTL() <= 0 {
+		panic("pitaya/session: cache TTL must be greater than zero")
+	}
 	pool.storage = storage
 }
 
@@ -799,11 +869,15 @@ func (s *sessionImpl) updateEncodedData() error {
 
 // GetOnCloseCallbacks ...
 func (s *sessionImpl) GetOnCloseCallbacks() []func() {
-	return s.OnCloseCallbacks
+	s.lifecycleMutex.RLock()
+	defer s.lifecycleMutex.RUnlock()
+	return append([]func(){}, s.OnCloseCallbacks...)
 }
 
 // GetIsFrontend ...
 func (s *sessionImpl) GetIsFrontend() bool {
+	s.RLock()
+	defer s.RUnlock()
 	return s.IsFrontend
 }
 func (s *sessionImpl) GetFrontendID() string {
@@ -826,11 +900,15 @@ func (s *sessionImpl) GetSubscriptions() []*nats.Subscription {
 
 // SetOnCloseCallbacks ...
 func (s *sessionImpl) SetOnCloseCallbacks(callbacks []func()) {
-	s.OnCloseCallbacks = callbacks
+	s.lifecycleMutex.Lock()
+	defer s.lifecycleMutex.Unlock()
+	s.OnCloseCallbacks = append([]func(){}, callbacks...)
 }
 
 // SetIsFrontend ...
 func (s *sessionImpl) SetIsFrontend(isFrontend bool) {
+	s.Lock()
+	defer s.Unlock()
 	s.IsFrontend = isFrontend
 }
 
@@ -900,7 +978,9 @@ func (s *sessionImpl) SetData(data map[string]interface{}) error {
 
 // GetDataEncoded returns the session data as an encoded value
 func (s *sessionImpl) GetDataEncoded() []byte {
-	return s.encodedData
+	s.RLock()
+	defer s.RUnlock()
+	return append([]byte(nil), s.encodedData...)
 }
 
 // SetDataEncoded sets the whole session data from an encoded value
@@ -917,11 +997,15 @@ func (s *sessionImpl) SetDataEncoded(encodedData []byte) error {
 
 // SetFrontendData sets frontend id and session id
 func (s *sessionImpl) SetFrontendData(frontendID string, frontendSessionID int64) {
+	s.Lock()
+	defer s.Unlock()
 	s.frontendID = frontendID
 	s.frontendSessionID = frontendSessionID
 }
 
 func (s *sessionImpl) SetIP(ip string) {
+	s.Lock()
+	defer s.Unlock()
 	s.ip = ip
 }
 
@@ -955,7 +1039,7 @@ func (s *sessionImpl) Bind(ctx context.Context, uid string, custSessData map[str
 	}
 
 	// if code running on frontend server
-	if s.IsFrontend {
+	if s.GetIsFrontend() {
 		// Publish the replacement first so the old session cannot remove it while closing.
 		previous, loaded, err := s.registerSessionByUID(uid)
 		if err != nil {
@@ -1085,9 +1169,11 @@ func (s *sessionImpl) KickBackend(ctx context.Context, targetServerType string, 
 // OnClose adds the function it receives to the callbacks that will be called
 // when the session is closed
 func (s *sessionImpl) OnClose(c func()) error {
-	if !s.IsFrontend {
+	if !s.GetIsFrontend() {
 		return constants.ErrOnCloseBackend
 	}
+	s.lifecycleMutex.Lock()
+	defer s.lifecycleMutex.Unlock()
 	s.OnCloseCallbacks = append(s.OnCloseCallbacks, c)
 	return nil
 }
@@ -1193,7 +1279,7 @@ func (s *sessionImpl) beginClose() (string, []*nats.Subscription, bool) {
 }
 
 func (s *sessionImpl) drainSubscriptions(uid string, subscriptions []*nats.Subscription) {
-	if !s.IsFrontend {
+	if !s.GetIsFrontend() {
 		return
 	}
 	// TODO: this logic should be moved to nats rpc server
@@ -1246,13 +1332,15 @@ func (s *sessionImpl) RemoteIPWithoutCache() netip.Addr {
 
 func (s *sessionImpl) RemoteIP() netip.Addr {
 	ip := netip.Addr{}
-	err := ip.UnmarshalText([]byte(s.ip))
+	err := ip.UnmarshalText([]byte(s.RemoteIPText()))
 	if err != nil {
 		logger.Zap.Error("unmarsha ip error", zap.Error(err))
 	}
 	return ip
 }
 func (s *sessionImpl) RemoteIPText() string {
+	s.RLock()
+	defer s.RUnlock()
 	return s.ip
 }
 
@@ -1544,13 +1632,14 @@ func (s *sessionImpl) Value(key string) interface{} {
 }
 
 func (s *sessionImpl) bindInFront(ctx context.Context, callback map[string]string) error {
+	data := s.sessionDataOwner.snapshot()
 	bindMsg := &protos.BindMsg{
 		Uid:      s.UID(),
-		Fid:      s.frontendID,
-		Sid:      s.frontendSessionID,
+		Fid:      data.frontendID,
+		Sid:      data.frontendSessionID,
 		Metadata: callback,
 		Session: &protos.Session{
-			Data: s.encodedData,
+			Data: data.encodedData,
 		},
 	}
 	res, err := s.SendRequestToFrontend(ctx, constants.SessionBindRoute, bindMsg)
@@ -1563,14 +1652,15 @@ func (s *sessionImpl) bindInFront(ctx context.Context, callback map[string]strin
 
 // PushToFront updates the session in the frontend
 func (s *sessionImpl) PushToFront(ctx context.Context) error {
-	if s.IsFrontend {
+	data := s.sessionDataOwner.snapshot()
+	if data.isFrontend {
 		return constants.ErrFrontSessionCantPushToFront
 	}
 	// rpcClient.Call虽然会填充session数据,但是frontend接收时不会也不应该把session proto数据覆盖local session,所以这里还是额外传送一份session
 	_, err := s.SendRequestToFrontend(ctx, constants.SessionPushRoute, &protos.Session{
-		Id:   s.frontendSessionID,
+		Id:   data.frontendSessionID,
 		Uid:  s.UID(),
-		Data: s.encodedData,
+		Data: data.encodedData,
 	})
 	return err
 }
@@ -1600,16 +1690,18 @@ func (s *sessionImpl) SetHandshakeData(data *HandshakeData) {
 
 // GetHandshakeData gets the handshake data received by the client.
 func (s *sessionImpl) GetHandshakeData() *HandshakeData {
+	s.RLock()
+	defer s.RUnlock()
 	return s.handshakeData
 }
 
 // GetHandshakeValidators return the handshake validators associated with the session.
 func (s *sessionImpl) GetHandshakeValidators() map[string]func(data *HandshakeData) error {
-	return s.handshakeValidators
+	return s.pool.handshakeValidators.snapshot()
 }
 
 func (s *sessionImpl) ValidateHandshake(data *HandshakeData) error {
-	for name, fun := range s.handshakeValidators {
+	for name, fun := range s.GetHandshakeValidators() {
 		if err := fun(data); err != nil {
 			return fmt.Errorf("failed to run '%s' validator: %w. SessionId=%d", name, err, s.ID())
 		}
@@ -1636,101 +1728,130 @@ func (s *sessionImpl) SendRequest(ctx context.Context, serverID, route string, m
 }
 func (s *sessionImpl) SendRequestToFrontend(ctx context.Context, route string, msg proto.Message) (*protos.Response, error) {
 	uid, _, online := s.lifecycleState()
-	if s.frontendID == "" {
+	frontendID := s.GetFrontendID()
+	if frontendID == "" {
 		return nil, errors.New(fmt.Sprintf("frontendID is nil.sid=%d,uid=%s,online=%t,agent=%s,route=%s", s.ID(), uid, online, s.entity.NetworkEntityName(), route))
 	}
-	return s.SendRequest(ctx, s.frontendID, route, msg)
+	return s.SendRequest(ctx, frontendID, route, msg)
 }
 
 func (s *sessionImpl) GetBackends() map[string]string {
-	bs := map[string]string{}
-	s.bsMutex.RLock()
-	defer s.bsMutex.RUnlock()
-	for k, v := range s.backends {
-		bs[k] = v
-	}
-	return bs
+	return s.backendBindings.snapshot()
 }
 func (s *sessionImpl) GetBackendID(svrType string) string {
-	s.bsMutex.RLock()
-	defer s.bsMutex.RUnlock()
-	return s.backends[svrType]
+	return s.backendBindings.get(svrType)
 }
 
-func (s *sessionImpl) ensureBackendStateLocked() {
-	if s.backends == nil {
-		s.backends = make(map[string]string)
+func (b *backendBindings) snapshot() map[string]string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	result := make(map[string]string, len(b.backends))
+	for serverType, id := range b.backends {
+		result[serverType] = id
 	}
-	if s.backendGenerations == nil {
-		s.backendGenerations = make(map[string]uint64)
+	return result
+}
+
+func (b *backendBindings) get(serverType string) string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.backends[serverType]
+}
+
+func (b *backendBindings) ensureLocked() {
+	if b.backends == nil {
+		b.backends = make(map[string]string)
+	}
+	if b.generations == nil {
+		b.generations = make(map[string]uint64)
 	}
 }
 
-func (s *sessionImpl) advanceBackendGenerationLocked(svrType string) uint64 {
-	s.ensureBackendStateLocked()
-	s.backendGenerations[svrType]++
-	return s.backendGenerations[svrType]
+func (b *backendBindings) advanceGenerationLocked(serverType string) uint64 {
+	b.ensureLocked()
+	b.generations[serverType]++
+	return b.generations[serverType]
+}
+
+func (b *backendBindings) setIfAbsent(serverType string, id string) (string, backendMutationToken, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.ensureLocked()
+	if backendID := b.backends[serverType]; backendID != "" {
+		return backendID, backendMutationToken{}, false
+	}
+	generation := b.advanceGenerationLocked(serverType)
+	b.backends[serverType] = id
+	return "", backendMutationToken{serverType: serverType, id: id, generation: generation}, true
 }
 
 func (s *sessionImpl) setBackendIDIfAbsent(svrType string, id string) (string, backendMutationToken, bool) {
-	s.bsMutex.Lock()
-	defer s.bsMutex.Unlock()
-	s.ensureBackendStateLocked()
-	if backendID := s.backends[svrType]; backendID != "" {
-		return backendID, backendMutationToken{}, false
-	}
-	generation := s.advanceBackendGenerationLocked(svrType)
-	s.backends[svrType] = id
-	return "", backendMutationToken{serverType: svrType, id: id, generation: generation}, true
+	return s.backendBindings.setIfAbsent(svrType, id)
 }
 
-func (s *sessionImpl) takeBackendID(svrType string) (backendMutationToken, bool) {
-	s.bsMutex.Lock()
-	defer s.bsMutex.Unlock()
-	s.ensureBackendStateLocked()
-	backendID := s.backends[svrType]
+func (b *backendBindings) take(serverType string) (backendMutationToken, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.ensureLocked()
+	backendID := b.backends[serverType]
 	if backendID == "" {
 		return backendMutationToken{}, false
 	}
-	generation := s.advanceBackendGenerationLocked(svrType)
-	delete(s.backends, svrType)
-	return backendMutationToken{serverType: svrType, id: backendID, generation: generation}, true
+	generation := b.advanceGenerationLocked(serverType)
+	delete(b.backends, serverType)
+	return backendMutationToken{serverType: serverType, id: backendID, generation: generation}, true
+}
+
+func (s *sessionImpl) takeBackendID(svrType string) (backendMutationToken, bool) {
+	return s.backendBindings.take(svrType)
+}
+
+func (b *backendBindings) removeIfToken(token backendMutationToken) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.ensureLocked()
+	if b.generations[token.serverType] != token.generation || b.backends[token.serverType] != token.id {
+		return false
+	}
+	b.advanceGenerationLocked(token.serverType)
+	delete(b.backends, token.serverType)
+	return true
 }
 
 func (s *sessionImpl) removeBackendIDIfToken(token backendMutationToken) bool {
-	s.bsMutex.Lock()
-	defer s.bsMutex.Unlock()
-	s.ensureBackendStateLocked()
-	if s.backendGenerations[token.serverType] != token.generation || s.backends[token.serverType] != token.id {
+	return s.backendBindings.removeIfToken(token)
+}
+
+func (b *backendBindings) restoreIfToken(token backendMutationToken) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.ensureLocked()
+	if b.generations[token.serverType] != token.generation || b.backends[token.serverType] != "" {
 		return false
 	}
-	s.advanceBackendGenerationLocked(token.serverType)
-	delete(s.backends, token.serverType)
+	b.advanceGenerationLocked(token.serverType)
+	b.backends[token.serverType] = token.id
 	return true
 }
 
 func (s *sessionImpl) restoreBackendIDIfToken(token backendMutationToken) bool {
-	s.bsMutex.Lock()
-	defer s.bsMutex.Unlock()
-	s.ensureBackendStateLocked()
-	if s.backendGenerations[token.serverType] != token.generation || s.backends[token.serverType] != "" {
+	return s.backendBindings.restoreIfToken(token)
+}
+
+func (b *backendBindings) removeIfEqual(serverType string, id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.ensureLocked()
+	if backendID, ok := b.backends[serverType]; !ok || backendID != id {
 		return false
 	}
-	s.advanceBackendGenerationLocked(token.serverType)
-	s.backends[token.serverType] = token.id
+	b.advanceGenerationLocked(serverType)
+	delete(b.backends, serverType)
 	return true
 }
 
 func (s *sessionImpl) RemoveBackendIDIfEqual(svrType string, id string) bool {
-	s.bsMutex.Lock()
-	defer s.bsMutex.Unlock()
-	s.ensureBackendStateLocked()
-	if backendID, ok := s.backends[svrType]; !ok || backendID != id {
-		return false
-	}
-	s.advanceBackendGenerationLocked(svrType)
-	delete(s.backends, svrType)
-	return true
+	return s.backendBindings.removeIfEqual(svrType, id)
 }
 
 // CompareAndRemoveBackendID performs an atomic identity-aware backend removal.
@@ -1747,41 +1868,56 @@ func CompareAndRemoveBackendID(s Session, svrType string, id string) (bool, erro
 }
 
 func (s *sessionImpl) SetBackends(bs map[string]string) {
-	s.bsMutex.Lock()
-	defer s.bsMutex.Unlock()
-	s.ensureBackendStateLocked()
-	next := make(map[string]string, len(bs))
-	affected := make(map[string]struct{}, len(s.backendGenerations)+len(bs))
+	s.backendBindings.replace(bs)
+}
+
+func (b *backendBindings) replace(backends map[string]string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.ensureLocked()
+
+	next := make(map[string]string, len(backends))
+	affected := make(map[string]struct{}, len(b.generations)+len(backends))
 	// Replacing the whole map invalidates in-flight mutations for types whose
 	// slots are currently empty as well.
-	for svrType := range s.backendGenerations {
+	for svrType := range b.generations {
 		affected[svrType] = struct{}{}
 	}
-	for svrType := range s.backends {
+	for svrType := range b.backends {
 		affected[svrType] = struct{}{}
 	}
-	for svrType, id := range bs {
+	for svrType, id := range backends {
 		next[svrType] = id
 		affected[svrType] = struct{}{}
 	}
 	for svrType := range affected {
-		s.advanceBackendGenerationLocked(svrType)
+		b.advanceGenerationLocked(svrType)
 	}
-	s.backends = next
+	b.backends = next
 }
+
 func (s *sessionImpl) SetBackendID(svrType string, id string) {
-	s.bsMutex.Lock()
-	defer s.bsMutex.Unlock()
-	s.ensureBackendStateLocked()
-	s.advanceBackendGenerationLocked(svrType)
-	s.backends[svrType] = id
+	s.backendBindings.set(svrType, id)
 }
+
+func (b *backendBindings) set(serverType string, id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.ensureLocked()
+	b.advanceGenerationLocked(serverType)
+	b.backends[serverType] = id
+}
+
 func (s *sessionImpl) RemoveBackendID(svrType string) {
-	s.bsMutex.Lock()
-	defer s.bsMutex.Unlock()
-	s.ensureBackendStateLocked()
-	s.advanceBackendGenerationLocked(svrType)
-	delete(s.backends, svrType)
+	s.backendBindings.remove(svrType)
+}
+
+func (b *backendBindings) remove(serverType string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.ensureLocked()
+	b.advanceGenerationLocked(serverType)
+	delete(b.backends, serverType)
 }
 func (s *sessionImpl) Online() bool {
 	return s.identitySnapshot().online
@@ -1803,12 +1939,13 @@ func (s *sessionImpl) FlushFrontendData() error {
 	if uid == "" {
 		return errors.WithStack(constants.ErrIllegalUID)
 	}
+	data := s.sessionDataOwner.snapshot()
 	err := s.pool.storage.Hmset(s.pool.getSessionStorageKey(uid), map[string]string{
 		fieldKeyOnline:         lo.If(online, "1").Else("0"),
-		fieldKeyFrontendID:     s.frontendID,
-		fieldKeyFrontendSessID: strconv.FormatInt(s.frontendSessionID, 10),
-		fieldKeyIP:             s.ip,
-		fieldKeyData:           string(s.encodedData),
+		fieldKeyFrontendID:     data.frontendID,
+		fieldKeyFrontendSessID: strconv.FormatInt(data.frontendSessionID, 10),
+		fieldKeyIP:             data.ip,
+		fieldKeyData:           string(data.encodedData),
 	})
 	if err != nil {
 		return err
@@ -1832,9 +1969,7 @@ func (s *sessionImpl) FlushBackendData() error {
 	if uid == "" {
 		return errors.WithStack(constants.ErrIllegalUID)
 	}
-	s.bsMutex.RLock()
-	backends, err := json.Marshal(s.backends)
-	s.bsMutex.RUnlock()
+	backends, err := json.Marshal(s.backendBindings.snapshot())
 	if err != nil {
 		return errors.WithStack(err)
 	}
@@ -1850,7 +1985,7 @@ func (s *sessionImpl) FlushUserData() error {
 	if uid == "" {
 		return errors.WithStack(constants.ErrIllegalUID)
 	}
-	err := s.pool.storage.Hset(s.pool.getSessionStorageKey(uid), fieldKeyData, string(s.encodedData))
+	err := s.pool.storage.Hset(s.pool.getSessionStorageKey(uid), fieldKeyData, string(s.GetDataEncoded()))
 	if err != nil {
 		return err
 	}
@@ -1877,11 +2012,18 @@ func (s *sessionImpl) ObtainFromCluster() error {
 	for field, v := range cache {
 		switch field {
 		case fieldKeyFrontendID:
+			s.Lock()
 			s.frontendID = v
+			s.Unlock()
 		case fieldKeyFrontendSessID:
-			s.frontendSessionID, err = strconv.ParseInt(v, 10, 64)
+			frontendSessionID, parseErr := strconv.ParseInt(v, 10, 64)
+			err = parseErr
 			if err != nil {
 				logger.Zap.Error("parse frontend id error", zap.Error(err))
+			} else {
+				s.Lock()
+				s.frontendSessionID = frontendSessionID
+				s.Unlock()
 			}
 		case fieldKeyBackends:
 			bsData, err := s.pool.DecodeSessionData([]byte(v))
@@ -1894,13 +2036,11 @@ func (s *sessionImpl) ObtainFromCluster() error {
 			if err != nil {
 				return err
 			}
-			s.data = data
-			err = s.updateEncodedData()
-			if err != nil {
+			if err = s.SetData(data); err != nil {
 				return err
 			}
 		case fieldKeyIP:
-			s.ip = v
+			s.SetIP(v)
 		case fieldKeyOnline:
 			s.setOnline(v == "1")
 		}
@@ -1931,9 +2071,7 @@ func (s *sessionImpl) InitialFromCluster() error {
 			if err != nil {
 				return err
 			}
-			s.data = data
-			err = s.updateEncodedData()
-			if err != nil {
+			if err = s.SetData(data); err != nil {
 				return err
 			}
 		}
@@ -1950,7 +2088,8 @@ func (s *sessionImpl) Go(ctx context.Context, task func(ctx context.Context)) er
 		_, err := co.GoWithUser(ctx, uidInt, task)
 		return err
 	}
-	sid := lo.If(s.IsFrontend, s.id).Else(FrontendSessHash(s.frontendID, s.frontendSessionID))
+	data := s.sessionDataOwner.snapshot()
+	sid := lo.If(data.isFrontend, s.id).Else(FrontendSessHash(data.frontendID, data.frontendSessionID))
 	_, err := co.GoWithID(ctx, sid, task, co.WithPoolName(co.SessionGoPoolName))
 	return err
 }

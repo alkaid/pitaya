@@ -26,7 +26,6 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
-	"runtime/debug"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -44,6 +43,7 @@ import (
 	"github.com/alkaid/pitaya/v2/conn/codec"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
+	pcontext "github.com/alkaid/pitaya/v2/context"
 	"github.com/alkaid/pitaya/v2/docgenerator"
 	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/pipeline"
@@ -57,28 +57,99 @@ import (
 	"go.uber.org/zap"
 )
 
+// remoteRegistryOwner owns the component registry and its synchronization.
+// Handler execution only keeps a pointer snapshot, so registration never holds
+// the lock while user code runs.
+type remoteRegistryOwner struct {
+	mu           sync.RWMutex
+	services     map[string]*component.Service
+	subscribers  map[string]*component.Service
+	remotes      map[string]*component.Remote
+	interceptors map[string]*component.Interceptor
+}
+
+func newRemoteRegistryOwner() remoteRegistryOwner {
+	return remoteRegistryOwner{
+		services:     make(map[string]*component.Service),
+		subscribers:  make(map[string]*component.Service),
+		remotes:      make(map[string]*component.Remote),
+		interceptors: make(map[string]*component.Interceptor),
+	}
+}
+
+func (o *remoteRegistryOwner) lookupInterceptor(service string) (*component.Interceptor, bool) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	interceptor, ok := o.interceptors[service]
+	return interceptor, ok
+}
+
+func (o *remoteRegistryOwner) lookupRemote(route string) (*component.Remote, bool) {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	remote, ok := o.remotes[route]
+	return remote, ok
+}
+
+func (o *remoteRegistryOwner) remoteNames() []string {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	names := make([]string, 0, len(o.remotes))
+	for name := range o.remotes {
+		names = append(names, name)
+	}
+	return names
+}
+
+func (o *remoteRegistryOwner) servicesSnapshot() map[string]*component.Service {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	services := make(map[string]*component.Service, len(o.services))
+	for name, service := range o.services {
+		services[name] = service
+	}
+	return services
+}
+
+// remoteListenerOwner owns listener publication. Callers receive snapshots so
+// callbacks can register more listeners without deadlocking an active dispatch.
+type remoteListenerOwner struct {
+	mu                     sync.RWMutex
+	remoteBindingListeners []cluster.RemoteBindingListener
+	remoteSessionListeners []cluster.RemoteSessionListener
+}
+
+func (o *remoteListenerOwner) bindingSnapshot() []cluster.RemoteBindingListener {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return append([]cluster.RemoteBindingListener(nil), o.remoteBindingListeners...)
+}
+
+func (o *remoteListenerOwner) sessionSnapshot() []cluster.RemoteSessionListener {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return append([]cluster.RemoteSessionListener(nil), o.remoteSessionListeners...)
+}
+
 // RemoteService struct
 type RemoteService struct {
 	baseService
 	protos.UnimplementedPitayaServer
-	rpcServer              cluster.RPCServer
-	serviceDiscovery       cluster.ServiceDiscovery
-	serializer             serialize.Serializer
-	encoder                codec.PacketEncoder
-	rpcClient              cluster.RPCClient
-	services               map[string]*component.Service // all registered service
-	subscribers            map[string]*component.Service
-	router                 *router.Router
-	messageEncoder         message.Encoder
-	server                 *cluster.Server // server obj
-	remoteBindingListeners []cluster.RemoteBindingListener
-	remoteHooks            *pipeline.RemoteHooks
-	sessionPool            session.SessionPool
-	handlerPool            *HandlerPool
-	remotes                map[string]*component.Remote      // all remote method
-	remoteSessionListeners []cluster.RemoteSessionListener   // session生命周期监听
-	interceptors           map[string]*component.Interceptor // 所有拦截分发器,优先级别高于 remotes
-	fanoutConcurrency      int
+	remoteRegistryOwner
+	remoteListenerOwner
+	rpcServer        cluster.RPCServer
+	serviceDiscovery cluster.ServiceDiscovery
+	serializer       serialize.Serializer
+	encoder          codec.PacketEncoder
+	rpcClient        cluster.RPCClient
+	router           *router.Router
+	messageEncoder   message.Encoder
+	server           *cluster.Server // server obj
+	remoteHooks      *pipeline.RemoteHooks
+	sessionPool      session.SessionPool
+	handlerPool      *HandlerPool
+	fanout           *remoteFanoutExecutor
+	idempotencyStore IdempotencyStore
 }
 
 // RemoteServiceOption customizes a RemoteService without changing existing
@@ -90,7 +161,19 @@ type RemoteServiceOption func(*RemoteService)
 func WithFanoutConcurrency(concurrency int) RemoteServiceOption {
 	return func(remote *RemoteService) {
 		if concurrency > 0 {
-			remote.fanoutConcurrency = concurrency
+			fanout := remote.fanoutOwner()
+			fanout.concurrency = concurrency
+			remote.fanout = fanout
+		}
+	}
+}
+
+// WithIdempotencyStore replaces the bounded in-memory RPC command store. A
+// durable implementation can preserve deduplication across owner failover.
+func WithIdempotencyStore(store IdempotencyStore) RemoteServiceOption {
+	return func(remote *RemoteService) {
+		if store != nil {
+			remote.idempotencyStore = store
 		}
 	}
 }
@@ -155,24 +238,21 @@ func newRemoteService(
 	opts ...RemoteServiceOption,
 ) *RemoteService {
 	remote := &RemoteService{
-		services:               make(map[string]*component.Service),
-		subscribers:            make(map[string]*component.Service),
-		rpcClient:              rpcClient,
-		rpcServer:              rpcServer,
-		encoder:                encoder,
-		serviceDiscovery:       sd,
-		serializer:             serializer,
-		router:                 router,
-		messageEncoder:         messageEncoder,
-		server:                 server,
-		remoteBindingListeners: make([]cluster.RemoteBindingListener, 0),
-		sessionPool:            sessionPool,
-		handlerPool:            handlerPool,
-		remotes:                make(map[string]*component.Remote),
-		remoteSessionListeners: make([]cluster.RemoteSessionListener, 0),
-		interceptors:           make(map[string]*component.Interceptor),
-		fanoutConcurrency:      constants.DefaultRPCFanoutConcurrency,
+		remoteRegistryOwner: newRemoteRegistryOwner(),
+		remoteListenerOwner: remoteListenerOwner{},
+		rpcClient:           rpcClient,
+		rpcServer:           rpcServer,
+		encoder:             encoder,
+		serviceDiscovery:    sd,
+		serializer:          serializer,
+		router:              router,
+		messageEncoder:      messageEncoder,
+		server:              server,
+		sessionPool:         sessionPool,
+		handlerPool:         handlerPool,
+		idempotencyStore:    NewMemoryIdempotencyStore(DefaultIdempotencyStoreOptions()),
 	}
+	remote.fanout = newRemoteFanoutExecutor(remote, constants.DefaultRPCFanoutConcurrency)
 
 	remote.remoteHooks = remoteHooks
 	remote.handlerHooks = handlerHooks
@@ -223,25 +303,67 @@ func (r *RemoteService) remoteProcess(
 
 // AddRemoteBindingListener 添加绑定发生时的回调，内部使用，仅用于相同serverType间的广播
 func (r *RemoteService) AddRemoteBindingListener(bindingListener cluster.RemoteBindingListener) {
+	r.remoteListenerOwner.mu.Lock()
+	defer r.remoteListenerOwner.mu.Unlock()
 	r.remoteBindingListeners = append(r.remoteBindingListeners, bindingListener)
 }
 
 // AddRemoteSessionListener 添加session各个生命周期完成时的回调
 func (r *RemoteService) AddRemoteSessionListener(sessionListener cluster.RemoteSessionListener) {
+	r.remoteListenerOwner.mu.Lock()
+	defer r.remoteListenerOwner.mu.Unlock()
 	r.remoteSessionListeners = append(r.remoteSessionListeners, sessionListener)
 }
 
 func (r *RemoteService) GetRemoteSessionListener() []cluster.RemoteSessionListener {
-	return r.remoteSessionListeners
+	return r.remoteListenerOwner.sessionSnapshot()
 }
 func (r *RemoteService) GetRemoteBindingListener() []cluster.RemoteBindingListener {
-	return r.remoteBindingListeners
+	return r.remoteListenerOwner.bindingSnapshot()
 }
 
 // Call processes a remote call
 //
 //	@implement protos.PitayaServer
 func (r *RemoteService) Call(ctx context.Context, req *protos.Request) (*protos.Response, error) {
+	if err := validateOwnerFence(ctx, r.server); err != nil {
+		return rpcErrorResponse(err), err
+	}
+	key, err := idempotencyKeyFromContext(ctx)
+	if err != nil {
+		return rpcErrorResponse(err), err
+	}
+	fingerprint := ""
+	if key != "" {
+		fingerprint, err = rpcRequestFingerprint(req)
+		if err != nil {
+			return rpcErrorResponse(err), err
+		}
+	}
+	handlerCtx, err := consumeRPCAdmissionMetadata(ctx)
+	if err != nil {
+		return rpcErrorResponse(err), err
+	}
+	if key == "" || r.idempotencyStore == nil {
+		return r.callOnce(handlerCtx, req)
+	}
+	scope, err := idempotencyStoreKey(ctx, r.server, key)
+	if err != nil {
+		return rpcErrorResponse(err), err
+	}
+	handlerPropagation := pcontext.ToMap(handlerCtx)
+	response, callErr := r.idempotencyStore.Execute(ctx, scope, fingerprint, func(callCtx context.Context) (*protos.Response, error) {
+		callCtx = context.WithValue(callCtx, constants.PropagateCtxKey, handlerPropagation)
+		callCtx = withRPCIdempotencyInfo(callCtx, scope, fingerprint)
+		return r.callOnce(callCtx, req)
+	})
+	if callErr != nil && (response == nil || response.Status == nil) {
+		response = rpcErrorResponse(callErr)
+	}
+	return response, callErr
+}
+
+func (r *RemoteService) callOnce(ctx context.Context, req *protos.Request) (*protos.Response, error) {
 	var res *protos.Response
 	var err error
 	logg := util.GetLoggerFromCtx(ctx)
@@ -288,6 +410,10 @@ func (r *RemoteService) Call(ctx context.Context, req *protos.Request) (*protos.
 	return res, err
 }
 
+func rpcErrorResponse(err error) *protos.Response {
+	return &protos.Response{Status: &apierrors.FromError(err).Status}
+}
+
 // Deprecated:Use remote.Sys .SessionBoundFork() instead 由于上层frontend之间的广播方式改走Fork()实现,这里不会再收到响应
 //
 //	@implement protos.PitayaServer
@@ -296,7 +422,7 @@ func (r *RemoteService) Call(ctx context.Context, req *protos.Request) (*protos.
 //	具体来说是收到 modules.UniqueSession .Init() 中调用u.rpcClient.BroadcastSessionBind()发送的广播
 //	与 remote.Sys .BindSession()不同,具体参见其注释
 func (r *RemoteService) SessionBindRemote(ctx context.Context, msg *protos.BindMsg) (*protos.Response, error) {
-	for _, r := range r.remoteBindingListeners {
+	for _, r := range r.remoteListenerOwner.bindingSnapshot() {
 		r.OnUserBind(msg.Uid, msg.Fid)
 	}
 	return &protos.Response{
@@ -403,13 +529,37 @@ type remoteFanoutResult struct {
 	err      error
 }
 
-func (r *RemoteService) runFanout(ctx context.Context, tasks []remoteFanoutTask) ([]*protos.Response, error) {
+type remoteFanoutExecutor struct {
+	remote      *RemoteService
+	concurrency int
+}
+
+var errRemoteFanoutPanic = stderrors.New("fanout RPC handler failed")
+
+func newRemoteFanoutExecutor(remote *RemoteService, concurrency int) *remoteFanoutExecutor {
+	if concurrency <= 0 {
+		concurrency = constants.DefaultRPCFanoutConcurrency
+	}
+	return &remoteFanoutExecutor{
+		remote:      remote,
+		concurrency: concurrency,
+	}
+}
+
+func (r *RemoteService) fanoutOwner() *remoteFanoutExecutor {
+	if r.fanout != nil {
+		return r.fanout
+	}
+	return newRemoteFanoutExecutor(r, constants.DefaultRPCFanoutConcurrency)
+}
+
+func (e *remoteFanoutExecutor) run(ctx context.Context, tasks []remoteFanoutTask) ([]*protos.Response, error) {
 	responses := make([]*protos.Response, 0, len(tasks))
 	if len(tasks) == 0 {
 		return responses, nil
 	}
 
-	concurrency := r.fanoutConcurrency
+	concurrency := e.concurrency
 	if concurrency <= 0 {
 		concurrency = constants.DefaultRPCFanoutConcurrency
 	}
@@ -437,7 +587,7 @@ func (r *RemoteService) runFanout(ctx context.Context, tasks []remoteFanoutTask)
 					return
 				}
 				results[index].started = true
-				r.executeFanoutTask(ctx, tasks[index], &results[index])
+				e.execute(ctx, tasks[index], &results[index])
 			}
 		}()
 	}
@@ -495,20 +645,28 @@ func (r *RemoteService) runFanout(ctx context.Context, tasks []remoteFanoutTask)
 	return responses, stderrors.Join(errs...)
 }
 
-func (r *RemoteService) executeFanoutTask(ctx context.Context, task remoteFanoutTask, result *remoteFanoutResult) {
+func (e *remoteFanoutExecutor) execute(ctx context.Context, task remoteFanoutTask, result *remoteFanoutResult) {
 	defer func() {
 		if panicValue := recover(); panicValue != nil {
-			result.err = fmt.Errorf("fanout RPC panic: %v", panicValue)
-			logger.Zap.Error("panic in fanout RPC",
-				zap.Any("panic", panicValue),
-				zap.ByteString("stack", debug.Stack()),
+			result.err = errRemoteFanoutPanic
+			target := result.server
+			if target == nil {
+				target = task.server
+			}
+			util.LogRecoveredPanic(
+				logger.Zap,
+				"panic in fanout RPC",
+				panicValue,
+				zap.String("svType", serverType(target)),
+				zap.String("svID", serverID(target)),
+				zap.Stack("stack"),
 			)
 		}
 	}()
 
 	result.server = task.server
 	if result.server == nil {
-		result.server, result.err = r.resolveRemoteTarget(
+		result.server, result.err = e.remote.resolveRemoteTarget(
 			ctx,
 			protos.RPCType_User,
 			task.route,
@@ -519,7 +677,8 @@ func (r *RemoteService) executeFanoutTask(ctx context.Context, task remoteFanout
 			return
 		}
 	}
-	result.response, result.err = r.remoteCall(
+	ctx = withFanoutIdempotencyScope(ctx)
+	result.response, result.err = e.remote.remoteCall(
 		ctx,
 		result.server,
 		protos.RPCType_User,
@@ -545,7 +704,7 @@ func (r *RemoteService) snapshotFanoutServers(servers map[string]*cluster.Server
 		if server == nil {
 			continue
 		}
-		if r.server != nil && r.server.ID == server.ID {
+		if r.server != nil && r.server.Type == server.Type && r.server.ID == server.ID {
 			continue
 		}
 		targets = append(targets, server)
@@ -619,25 +778,14 @@ func sortFanoutTasks(tasks []remoteFanoutTask) {
 }
 
 func (r *RemoteService) DoFork(ctx context.Context, route *route.Route, protoData []byte, session session.Session) error {
+	ctx = withFanoutIdempotencyScope(ctx)
 	msg := &message.Message{
 		Type:  message.Notify,
 		Route: route.Short(),
 		Data:  protoData,
 	}
-	// 路由的不是本服务则直接send无须排除
-	if route.SvType != r.server.Type {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return fmt.Errorf("fork stopped: %w", ctxErr)
-		}
-		err := r.rpcClient.Fork(ctx, route, session, msg)
-		if err != nil {
-			logger.Zap.Error("error making fork",
-				zap.String("uid", lo.If(session == nil, "").ElseF(func() string { return session.UID() })),
-				zap.Stringer("route", route),
-				zap.Error(err))
-		}
-		return err
-	}
+	// Resolve each recipient so every hop carries that target's owner epoch.
+	// A type-wide broker fanout cannot represent multiple fencing tokens.
 	svs, err := r.serviceDiscovery.GetServersByType(route.SvType)
 	if err != nil {
 		return err
@@ -681,7 +829,7 @@ func (r *RemoteService) DoForkRequest(ctx context.Context, route *route.Route, p
 			msg:     msg,
 		})
 	}
-	return r.runFanout(ctx, tasks)
+	return r.fanoutOwner().run(ctx, tasks)
 }
 
 func (r *RemoteService) DoPublish(ctx context.Context, rt *route.Route, protoData []byte, session session.Session) error {
@@ -778,7 +926,7 @@ func (r *RemoteService) DoPublishRequest(ctx context.Context, ro *route.Route, p
 	}
 
 	sortFanoutTasks(tasks)
-	responses, fanoutErr := r.runFanout(ctx, tasks)
+	responses, fanoutErr := r.fanoutOwner().run(ctx, tasks)
 	if fanoutErr != nil {
 		snapshotErrs = append(snapshotErrs, fanoutErr)
 	}
@@ -850,8 +998,15 @@ func (r *RemoteService) NotifyAll(ctx context.Context, ro *route.Route, arg prot
 	if ro.SvType != "" {
 		return goerrors.WithStack(constants.ErrNotifyAllSvTypeNotEmpty)
 	}
+	msg := &message.Message{
+		Type:  message.Notify,
+		Route: ro.Short(),
+		Data:  data,
+	}
+	tasks := make([]remoteFanoutTask, 0)
+	snapshotErrs := make([]error, 0)
 	// 服务器为空 全局广播(每种服务器只有一个实例消费)
-	for _, server := range r.serviceDiscovery.GetServerTypes() {
+	for _, server := range snapshotServerTypes(r.serviceDiscovery.GetServerTypes()) {
 		// 排除自己
 		if server.Type == r.server.Type {
 			continue
@@ -866,11 +1021,21 @@ func (r *RemoteService) NotifyAll(ctx context.Context, ro *route.Route, arg prot
 		}
 		newRoute, err := route.Decode(server.Type + "." + ro.Short())
 		if err != nil {
-			return err
+			snapshotErrs = append(snapshotErrs, fmt.Errorf("server type %s: %w", server.Type, err))
+			continue
 		}
-		r.DoNotify(ctx, "", newRoute, data, session)
+		tasks = append(tasks, remoteFanoutTask{
+			route:   newRoute,
+			session: session,
+			msg:     msg,
+		})
 	}
-	return nil
+	sortFanoutTasks(tasks)
+	_, fanoutErr := r.fanoutOwner().run(ctx, tasks)
+	if fanoutErr != nil {
+		snapshotErrs = append(snapshotErrs, fanoutErr)
+	}
+	return stderrors.Join(snapshotErrs...)
 }
 
 func (r *RemoteService) Fork(ctx context.Context, notify bool, ro *route.Route, arg proto.Message, session session.Session) ([]*protos.Response, error) {
@@ -906,6 +1071,8 @@ func (r *RemoteService) Publish(ctx context.Context, ro *route.Route, notify boo
 // Register registers components
 func (r *RemoteService) Register(comp component.Component, opts []component.Option) error {
 	s := component.NewService(comp, opts)
+	r.remoteRegistryOwner.mu.Lock()
+	defer r.remoteRegistryOwner.mu.Unlock()
 	services := lo.If(s.Options.Subscriber, r.subscribers).Else(r.services)
 
 	if _, ok := services[s.Name]; ok {
@@ -944,6 +1111,8 @@ func (r *RemoteService) Register(comp component.Component, opts []component.Opti
 //	@param serviceName
 //	@param interceptor
 func (r *RemoteService) RegisterInterceptor(serviceName string, interceptor *component.Interceptor) {
+	r.remoteRegistryOwner.mu.Lock()
+	defer r.remoteRegistryOwner.mu.Unlock()
 	r.interceptors[serviceName] = interceptor
 }
 
@@ -984,7 +1153,7 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 	response := &protos.Response{}
 
 	// 拦截器优先工作
-	interceptor, ok := r.interceptors[rt.Service]
+	interceptor, ok := r.remoteRegistryOwner.lookupInterceptor(rt.Service)
 	if ok {
 		var err error
 		var sess session.Session
@@ -1046,7 +1215,7 @@ func (r *RemoteService) handleRPCUser(ctx context.Context, req *protos.Request, 
 	}
 
 	// 无拦截器情况下走常规remote
-	remote, ok := r.remotes[rt.Short()]
+	remote, ok := r.remoteRegistryOwner.lookupRemote(rt.Short())
 	if !ok {
 		// notify 情况下很多 route 都会找不到，警告太多
 		logger.Zap.Info("pitaya/remote: router not found", zap.String("route", rt.Short()))
@@ -1247,6 +1416,7 @@ func (r *RemoteService) remoteCall(
 			return nil, err
 		}
 	}
+	ctx = target.WithOwnerFencingMetadata(ctx)
 
 	res, err := r.rpcClient.Call(ctx, rpcType, route, session, msg, target)
 	if err != nil {
@@ -1288,7 +1458,7 @@ func (r *RemoteService) resolveRemoteTarget(
 
 // DumpServices outputs all registered services
 func (r *RemoteService) DumpServices() {
-	for name := range r.remotes {
+	for _, name := range r.remoteRegistryOwner.remoteNames() {
 		logger.Log.Infof("registered remote %s", name)
 	}
 }
@@ -1298,5 +1468,5 @@ func (r *RemoteService) Docs(getPtrNames bool) (map[string]interface{}, error) {
 	if r == nil {
 		return map[string]interface{}{}, nil
 	}
-	return docgenerator.RemotesDocs(r.server.Type, r.services, getPtrNames)
+	return docgenerator.RemotesDocs(r.server.Type, r.remoteRegistryOwner.servicesSnapshot(), getPtrNames)
 }

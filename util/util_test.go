@@ -39,6 +39,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 var update = flag.Bool("update", false, "update .golden files")
@@ -46,6 +48,33 @@ var update = flag.Bool("update", false, "update .golden files")
 type someStruct struct {
 	A int
 	B string
+}
+
+type panicLogValue struct{}
+
+func (panicLogValue) MarshalLogObject(zapcore.ObjectEncoder) error {
+	panic("panic value encoder ran")
+}
+
+type panicFormattingValue struct{}
+
+func (panicFormattingValue) Error() string  { panic("panic value Error called") }
+func (panicFormattingValue) String() string { panic("panic value String called") }
+
+type panicWriteSyncer struct{}
+
+func (panicWriteSyncer) Write([]byte) (int, error) {
+	panic("logging core failed")
+}
+
+func (panicWriteSyncer) Sync() error { return nil }
+
+func TestLogRecoveredPanicCannotEscapeRecoveryBoundary(t *testing.T) {
+	encoder := zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig())
+	log := zap.New(zapcore.NewCore(encoder, panicWriteSyncer{}, zapcore.ErrorLevel))
+	require.NotPanics(t, func() {
+		LogRecoveredPanic(log, "recovered", panicLogValue{})
+	})
 }
 
 func (s *someStruct) TestFunc(arg1 int, arg2 string) (*someStruct, error) {
@@ -61,6 +90,10 @@ func (s *someStruct) TestFuncErr(arg string) (*someStruct, error) {
 
 func (s *someStruct) TestFuncThrow() (*someStruct, error) {
 	panic("ohnoes")
+}
+
+func (s *someStruct) TestFuncThrowFormattingValue() (*someStruct, error) {
+	panic(panicFormattingValue{})
 }
 
 func (s *someStruct) TestFuncNil(arg string) (*someStruct, error) {
@@ -83,6 +116,7 @@ func TestPcall(t *testing.T) {
 		{"test_pcall_3", s, "TestFunc", []reflect.Value{reflect.ValueOf(s), reflect.ValueOf(11), reflect.ValueOf("blb")}, &someStruct{A: 11, B: "blb"}, nil},
 		{"test_pcall_4", s, "TestFuncErr", []reflect.Value{reflect.ValueOf(s), reflect.ValueOf("blberror")}, nil, errors.New("blberror")},
 		{"test_pcall_5", s, "TestFuncThrow", []reflect.Value{reflect.ValueOf(s)}, nil, errors.New("ohnoes")},
+		{"test_pcall_formatting_panic", s, "TestFuncThrowFormattingValue", []reflect.Value{reflect.ValueOf(s)}, nil, errors.New("rpc call internal error - TestFuncThrowFormattingValue")},
 		{"test_pcall_6", s, "TestFuncNil", []reflect.Value{reflect.ValueOf(s), reflect.ValueOf("kkk")}, nil, constants.ErrReplyShouldBeNotNull},
 	}
 

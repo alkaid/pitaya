@@ -2,6 +2,8 @@ package co
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/alkaid/ants/v2"
@@ -223,14 +225,35 @@ func (s *StatefulPool) reportEscapeEvent(event ants.PoolWithIDEscapeEvent) {
 		"reason": poolEscapeReasonName(event.BudgetReason),
 	}
 	for _, reporter := range s.reporters {
-		_ = reporter.ReportCount(metrics.PoolEscapeEvents, tags, 1)
+		if reporter == nil {
+			s.logReporterError(metrics.PoolEscapeEvents, reporter, errors.New("nil metrics reporter"))
+			continue
+		}
+		if err := reporter.ReportCount(metrics.PoolEscapeEvents, tags, 1); err != nil {
+			s.logReporterError(metrics.PoolEscapeEvents, reporter, err)
+		}
 	}
 }
 
 func (s *StatefulPool) reportGauge(name string, tags map[string]string, value float64) {
 	for _, reporter := range s.reporters {
-		_ = reporter.ReportGauge(name, tags, value)
+		if reporter == nil {
+			s.logReporterError(name, reporter, errors.New("nil metrics reporter"))
+			continue
+		}
+		if err := reporter.ReportGauge(name, tags, value); err != nil {
+			s.logReporterError(name, reporter, err)
+		}
 	}
+}
+
+func (s *StatefulPool) logReporterError(metric string, reporter metrics.Reporter, err error) {
+	logger.Zap.Error("stateful pool metric reporter failed",
+		zap.String("pool", s.Name()),
+		zap.String("metric", metric),
+		zap.String("reporter", fmt.Sprintf("%T", reporter)),
+		zap.Error(err),
+	)
 }
 
 func poolEscapeEventName(eventType ants.PoolWithIDEscapeEventType) string {

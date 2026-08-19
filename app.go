@@ -65,6 +65,7 @@ import (
 	"github.com/alkaid/pitaya/v2/session"
 	"github.com/alkaid/pitaya/v2/timer"
 	"github.com/alkaid/pitaya/v2/tracing"
+	"github.com/alkaid/pitaya/v2/util"
 	"github.com/alkaid/pitaya/v2/worker"
 	"google.golang.org/protobuf/proto"
 )
@@ -278,7 +279,9 @@ type Pitaya interface {
 	GroupCreate(ctx context.Context, groupName string) error
 	GroupCreateWithTTL(ctx context.Context, groupName string, ttlTime time.Duration) error
 	GroupMembers(ctx context.Context, groupName string) ([]string, error)
+	GroupMembersPage(ctx context.Context, groupName string, options groups.MemberPageOptions) (groups.MemberPage, error)
 	GroupBroadcast(ctx context.Context, frontendType, groupName, route string, v interface{}) error
+	GroupBroadcastWithOptions(ctx context.Context, frontendType, groupName, route string, v interface{}, options groups.BroadcastOptions) (groups.BroadcastResult, error)
 	GroupContainsMember(ctx context.Context, groupName, uid string) (bool, error)
 	GroupAddMember(ctx context.Context, groupName, uid string) error
 	GroupRemoveMember(ctx context.Context, groupName, uid string) error
@@ -748,7 +751,7 @@ func (app *App) startBackgroundTasks() {
 			defer app.backgroundWG.Done()
 			defer func() {
 				if recovered := recover(); recovered != nil {
-					logger.Zap.Error("onStarted callback panicked", zap.Any("panic", recovered))
+					util.LogRecoveredPanic(logger.Zap, "onStarted callback panicked", recovered)
 				}
 			}()
 			app.onStarted()
@@ -1352,7 +1355,11 @@ func AddMetricTagsToPropagateCtx(
 	ctx context.Context,
 	tags map[string]string,
 ) context.Context {
-	return pcontext.AddToPropagateCtx(ctx, constants.MetricTagsKey, tags)
+	snapshot := make(map[string]string, len(tags))
+	for key, value := range tags {
+		snapshot[key] = value
+	}
+	return pcontext.AddToPropagateCtx(ctx, constants.MetricTagsKey, snapshot)
 }
 
 // AddToPropagateCtx adds a key and value that will be propagated through RPC calls

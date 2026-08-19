@@ -866,6 +866,99 @@ github.com/alkaid/pitaya/v2/live.go:3.1,3.15 1 0
 	}
 }
 
+func TestRunCheckEnforcesAbsoluteTargets(t *testing.T) {
+	repo := t.TempDir()
+	git(t, repo, "init", "-q")
+	git(t, repo, "config", "user.email", "coverage@example.invalid")
+	git(t, repo, "config", "user.name", "Coverage Test")
+	writeRegisteredNestedModules(t, repo)
+	file := filepath.Join(repo, "live.go")
+	if err := os.WriteFile(file, []byte("package live\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "add", ".")
+	git(t, repo, "commit", "-qm", "base")
+	base := gitOutput(t, repo, "rev-parse", "HEAD")
+	if err := os.WriteFile(file, []byte("package live\n\nfunc Live() {}\nfunc Dead() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "add", "live.go")
+	git(t, repo, "commit", "-qm", "head")
+	head := gitOutput(t, repo, "rev-parse", "HEAD")
+
+	profile := writeProfile(t, `mode: set
+github.com/alkaid/pitaya/v2/live.go:3.1,3.15 1 1
+github.com/alkaid/pitaya/v2/live.go:4.1,4.15 1 0
+`)
+	configured := validPolicy()
+	configured.BaseSHA = base
+	configured.Targets.DiffPercent = 0
+	configured.Targets.EnforceAbsolute = true
+	configured.Baseline = baseline{
+		Overall:  counts{Covered: 1, Total: 2},
+		Packages: map[string]counts{".": {Covered: 1, Total: 2}},
+	}
+	writeProfileMetadata(t, profile, head, configured.CoveragePlatform)
+
+	for _, test := range []struct {
+		name           string
+		overallPercent float64
+		packages       map[string]float64
+		wantCode       int
+		wantOutput     string
+	}{
+		{
+			name:           "pass",
+			overallPercent: 50,
+			packages:       map[string]float64{".": 50},
+			wantCode:       0,
+			wantOutput:     "coverage gate passed: overall 50.00% (1/2)",
+		},
+		{
+			name:           "overall below target",
+			overallPercent: 70,
+			packages:       map[string]float64{".": 0},
+			wantCode:       1,
+			wantOutput:     "absolute coverage target: overall 50.00% is below 70.00% (1/2)",
+		},
+		{
+			name:           "package below target",
+			overallPercent: 0,
+			packages:       map[string]float64{".": 70},
+			wantCode:       1,
+			wantOutput:     `absolute coverage target: package "." 50.00% is below 70.00% (1/2)`,
+		},
+		{
+			name:           "targeted package missing",
+			overallPercent: 0,
+			packages:       map[string]float64{"missing": 0},
+			wantCode:       1,
+			wantOutput:     `absolute coverage target: targeted package "missing" is missing from current coverage`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			configured.Targets.OverallPercent = test.overallPercent
+			configured.Targets.PackagePercent = test.packages
+			policyPath := filepath.Join(t.TempDir(), "policy.json")
+			writeJSON(t, policyPath, configured)
+
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			code := run([]string{
+				"check", "-policy", policyPath, "-profile", profile,
+				"-repo", repo, "-base", base, "-head", head,
+			}, &stdout, &stderr)
+			if code != test.wantCode {
+				t.Fatalf("exit = %d, want %d, stderr = %q", code, test.wantCode, stderr.String())
+			}
+			output := stdout.String() + stderr.String()
+			if !strings.Contains(output, test.wantOutput) {
+				t.Fatalf("output = %q, want %q", output, test.wantOutput)
+			}
+		})
+	}
+}
+
 func TestRunCheckRejectsRepeatedProfiles(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

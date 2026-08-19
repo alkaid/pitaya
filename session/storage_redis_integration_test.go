@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -23,8 +24,11 @@ const (
 	redisOwnerKeyEnv      = "PITAYA_INTEGRATION_REDIS_OWNER_KEY"
 	redisOwnerTokenEnv    = "PITAYA_INTEGRATION_REDIS_OWNER_TOKEN"
 	redisSessionUIDEnv    = "PITAYA_INTEGRATION_SESSION_UID"
+	redisCrashHelperEnv   = "PITAYA_INTEGRATION_REDIS_CRASH_HELPER"
+	redisCrashKeyEnv      = "PITAYA_INTEGRATION_REDIS_CRASH_KEY"
 	integrationProofEnv   = "PITAYA_INTEGRATION_PROOF_PATH"
 	integrationProofToken = "PITAYA_INTEGRATION_PROOF_TOKEN"
+	redisCrashExitCode    = 86
 )
 
 func requiredEnv(t *testing.T, name string) string {
@@ -75,6 +79,25 @@ func registerIntegrationProof(t *testing.T, path, token string) {
 }
 
 func TestFlushFrontendDataRedisRoundTrip(t *testing.T) {
+	if os.Getenv(redisCrashHelperEnv) == "1" {
+		address := requiredEnv(t, redisAddressEnv)
+		key := requiredEnv(t, redisCrashKeyEnv)
+		client := redis.NewClient(&redis.Options{
+			Addr:         address,
+			MaxRetries:   -1,
+			DialTimeout:  2 * time.Second,
+			ReadTimeout:  2 * time.Second,
+			WriteTimeout: 2 * time.Second,
+			PoolTimeout:  2 * time.Second,
+		})
+		cache := session.NewRedisCache(client, time.Minute)
+		if err := cache.HmsetCtx(context.Background(), key, map[string]string{"online": "1"}); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "crash helper session write failed: %v\n", err)
+			os.Exit(1)
+		}
+		os.Exit(redisCrashExitCode)
+	}
+
 	address := requiredEnv(t, redisAddressEnv)
 	requireLiteralLoopbackAddress(t, address)
 
@@ -135,8 +158,36 @@ func TestFlushFrontendDataRedisRoundTrip(t *testing.T) {
 		}
 	})
 
+	cache := session.NewRedisCache(client, time.Minute)
+	crashKey := sessionKey + "crash-window"
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		if err := client.Del(cleanupCtx, crashKey).Err(); err != nil {
+			t.Errorf("delete exact crash-window key: %v", err)
+		}
+	})
+	crashHelper := exec.Command(os.Args[0], "-test.run=^TestFlushFrontendDataRedisRoundTrip$", "-test.count=1")
+	crashHelper.Env = append(
+		os.Environ(),
+		redisCrashHelperEnv+"=1",
+		redisAddressEnv+"="+address,
+		redisCrashKeyEnv+"="+crashKey,
+	)
+	output, err := crashHelper.CombinedOutput()
+	var exitErr *exec.ExitError
+	require.ErrorAsf(t, err, &exitErr, "crash helper unexpectedly succeeded: %s", output)
+	require.Equalf(t, redisCrashExitCode, exitErr.ExitCode(), "crash helper failed before abrupt exit: %s", output)
+	crashFields, err := client.HGetAll(ctx, crashKey).Result()
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"online": "1"}, crashFields)
+	crashTTL, err := client.PTTL(ctx, crashKey).Result()
+	require.NoError(t, err)
+	require.Greater(t, crashTTL, time.Duration(0), "successful first write must keep its TTL after writer process exit")
+	require.LessOrEqual(t, crashTTL, time.Minute)
+
 	pool := session.NewSessionPool()
-	pool.SetClusterCache(session.NewRedisCache(client, time.Minute))
+	pool.SetClusterCache(cache)
 	sess, isNew := pool.NewSession(nil, true, sessionUID)
 	require.True(t, isNew)
 	sess.SetFrontendData("frontend-1", 42)
@@ -153,4 +204,59 @@ func TestFlushFrontendDataRedisRoundTrip(t *testing.T) {
 		"ip": "192.0.2.1",
 		"u":  `{"coins":7}`,
 	}, fields, "Redis hash must contain exactly the public session payload")
+
+	assertPositiveSessionTTL := func(message string) {
+		t.Helper()
+		ttl, err := client.PTTL(ctx, sessionKey).Result()
+		require.NoError(t, err)
+		require.Greater(t, ttl, time.Duration(0), message)
+		require.LessOrEqual(t, ttl, time.Minute)
+	}
+	assertPositiveSessionTTL("the first successful session write must establish its TTL")
+
+	persisted, err := client.Persist(ctx, sessionKey).Result()
+	require.NoError(t, err)
+	require.True(t, persisted)
+	persistentTTL, err := client.PTTL(ctx, sessionKey).Result()
+	require.NoError(t, err)
+	require.Less(t, persistentTTL, time.Duration(0), "test precondition requires a key without TTL")
+	require.NoError(t, sess.FlushOnline())
+	assertPositiveSessionTTL("a single-field update must rebuild a missing TTL")
+
+	persisted, err = client.Persist(ctx, sessionKey).Result()
+	require.NoError(t, err)
+	require.True(t, persisted)
+	require.NoError(t, sess.FlushFrontendData())
+	assertPositiveSessionTTL("a full session update must rebuild a missing TTL")
+
+	persisted, err = client.Persist(ctx, sessionKey).Result()
+	require.NoError(t, err)
+	require.True(t, persisted)
+	inserted, err := cache.HsetnxCtx(ctx, sessionKey, "o", "0")
+	require.NoError(t, err)
+	require.False(t, inserted, "HSETNX must preserve an existing session field")
+	assertPositiveSessionTTL("a no-op conditional hash write must still rebuild a missing TTL")
+
+	failureKey := sessionKey + "atomic-failure"
+	t.Cleanup(func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cleanupCancel()
+		deleted, err := client.Del(cleanupCtx, failureKey).Result()
+		if err != nil {
+			t.Errorf("delete exact atomic-failure key: %v", err)
+			return
+		}
+		if deleted != 1 {
+			t.Errorf("deleted %d keys, want exactly one atomic-failure key", deleted)
+		}
+	})
+	require.NoError(t, client.Set(ctx, failureKey, "original", 0).Err())
+	err = cache.HmsetCtx(ctx, failureKey, map[string]string{"online": "1"})
+	require.Error(t, err, "HSET against a string key must fail")
+	value, err := client.Get(ctx, failureKey).Result()
+	require.NoError(t, err)
+	require.Equal(t, "original", value, "a failed atomic write must preserve the prior value")
+	failureTTL, err := client.PTTL(ctx, failureKey).Result()
+	require.NoError(t, err)
+	require.Less(t, failureTTL, time.Duration(0), "a failed atomic write must not partially apply PEXPIRE")
 }

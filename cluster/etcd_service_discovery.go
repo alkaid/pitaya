@@ -26,7 +26,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -50,111 +49,30 @@ import (
 )
 
 type etcdServiceDiscovery struct {
-	cli                 *clientv3.Client
-	ownsClient          bool
-	syncServersInterval time.Duration
-	heartbeatTTL        time.Duration
-	logHeartbeat        bool
-	lastHeartbeatTime   time.Time
-	leaseID             atomic.Int64
-	// leasePublicationGate is a weighted reader/writer gate around leaseID. A
-	// steady-state Flush takes one permit only to snapshot leaseID, releases it
-	// before network I/O, and fences the subsequent etcd Txn with LeaseValue.
-	// Grant publishes a generation under all permits; renewal also holds all
-	// permits while reconciling remote registration; revoke holds all permits
-	// while revoking the published generation.
-	leasePublicationGate    *semaphore.Weighted
-	selfRegistration        atomic.Pointer[selfRegistrationSnapshot]
-	renewalSync             chan struct{}
-	mapByTypeLock           sync.RWMutex
-	serverMapByType         map[string]map[string]*Server
-	serverMapByID           sync.Map
-	etcdEndpoints           []string
-	etcdUser                string
-	etcdPass                string
-	etcdPrefix              string
-	etcdDialTimeout         time.Duration
-	running                 atomic.Bool
-	server                  *Server
-	lastSyncUnixNano        atomic.Int64
-	listenersLock           sync.RWMutex
-	listeners               []SDListener
-	revokeTimeout           time.Duration
-	grantLeaseTimeout       time.Duration
-	grantLeaseMaxRetries    int
-	grantLeaseInterval      time.Duration
-	shutdownDelay           time.Duration
-	appDieChan              chan bool
-	serverTypesBlacklist    []string
-	syncServersParallelism  int
-	syncFetchLock           sync.Mutex
-	syncServersLock         sync.Mutex
-	serverRevisions         map[string]int64
-	serverRevisionFloor     int64
-	watchRevision           int64
-	consistentHashLock      sync.RWMutex
-	consistentHash          map[string]*hash.ConsistentHash
-	lifecycleLock           sync.Mutex
-	lifecycleCtx            context.Context
-	lifecycleCancel         context.CancelFunc
-	lifecycleWG             sync.WaitGroup
-	lifecycleState          etcdLifecycleState
-	initDone                chan struct{}
-	initErr                 error
-	initWaitingCallbacks    atomic.Bool
-	newEtcdClient           func(clientv3.Config) (*clientv3.Client, error)
-	leaseCtx                context.Context
-	leaseCancel             context.CancelFunc
-	flushCtx                context.Context
-	flushCancel             context.CancelFunc
-	shutdownOnce            sync.Once
-	shutdownErr             error
-	beforeShutdownOnce      sync.Once
-	callbackLock            sync.Mutex
-	callbackNotEmpty        *sync.Cond
-	callbackNotFull         *sync.Cond
-	callbackQueue           []callbackWork
-	callbackWaiters         int
-	callbackStarted         bool
-	callbackStopping        bool
-	callbackDrained         chan struct{}
-	callbackDrainOnce       sync.Once
-	callbackBarrierWaiters  atomic.Int32
-	leaderCallbackLock      sync.Mutex
-	leaderCallbackNotEmpty  *sync.Cond
-	leaderCallbackNotFull   *sync.Cond
-	leaderCallbackQueue     []callbackWork
-	leaderCallbackWaiters   int
-	leaderCallbackStarted   bool
-	leaderCallbackStopping  bool
-	leaderCallbackDrained   chan struct{}
-	leaderCallbackDrainOnce sync.Once
+	lifecycle etcdLifecycleOwner
+	lease     etcdLeaseOwner
+	watch     etcdWatchOwner
+	election  etcdElectionOwner
 
-	// 选主相关
-	electionEnable      bool   // 是否开启选举
-	electionName        string // 竞选名,不传的话默认为election/server.Type
-	resumeLeader        bool   // 若连上后发现自己是leader 是否使用原leader创建election. false的话会辞职
-	reconnectBackOff    time.Duration
-	electionCancel      context.CancelFunc // 选举取消
-	leaderAdmissionLock sync.Mutex
-	leaderGeneration    uint64
-	leaderLock          sync.RWMutex
-	leaderID            string
-	onLeaderChange      LeaderChangeListener
+	cli             *clientv3.Client
+	ownsClient      bool
+	etcdEndpoints   []string
+	etcdUser        string
+	etcdPass        string
+	etcdTLS         config.TLSConfig
+	etcdPrefix      string
+	etcdDialTimeout time.Duration
+	server          *Server
+	shutdownDelay   time.Duration
+	newEtcdClient   func(clientv3.Config) (*clientv3.Client, error)
 }
-
-type callbackWork struct {
-	callback func()
-	done     chan struct{}
-}
-
-const callbackQueueLimit = 64
 
 // The large fixed capacity models an exclusive permit set; it is not a limit on
 // the number of callers the service discovery API is intended to support.
 const leasePublicationPermits int64 = 1 << 30
 
 var errEtcdCandidateLeaseUnfenced = errors.New("etcd candidate lease could not be fenced")
+var errEtcdServerIdentityOwned = errors.New("etcd server identity is already owned by another lease")
 
 type etcdLifecycleState uint8
 
@@ -188,6 +106,10 @@ func NewEtcdServiceDiscovery(
 	if err := validateEtcdServerIdentity(server); err != nil {
 		return nil, err
 	}
+	// RPC modules initialize before service discovery. Fence the shared server as
+	// soon as etcd ownership is selected so ingress cannot accept epoch-0 calls
+	// before registration publishes a real owner generation.
+	server.InvalidateOwnerEpoch()
 	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	leaseCtx, leaseCancel := context.WithCancel(lifecycleCtx)
 	flushCtx, flushCancel := context.WithCancel(lifecycleCtx)
@@ -196,34 +118,37 @@ func NewEtcdServiceDiscovery(
 		client = borrowEtcdClient(lifecycleCtx, cli[0])
 	}
 	sd := &etcdServiceDiscovery{
-		server:                server,
-		serverMapByType:       make(map[string]map[string]*Server),
-		listeners:             make([]SDListener, 0),
-		appDieChan:            appDieChan,
-		cli:                   client,
-		serverRevisions:       make(map[string]int64),
-		consistentHash:        make(map[string]*hash.ConsistentHash),
-		lifecycleCtx:          lifecycleCtx,
-		lifecycleCancel:       lifecycleCancel,
-		lifecycleState:        etcdLifecycleNew,
-		newEtcdClient:         clientv3.New,
-		leaseCtx:              leaseCtx,
-		leaseCancel:           leaseCancel,
-		flushCtx:              flushCtx,
-		flushCancel:           flushCancel,
-		leasePublicationGate:  semaphore.NewWeighted(leasePublicationPermits),
-		renewalSync:           make(chan struct{}, 1),
-		callbackDrained:       make(chan struct{}),
-		leaderCallbackDrained: make(chan struct{}),
-		resumeLeader:          true,
-		reconnectBackOff:      time.Second * 2,
-		electionName:          server.Type,
-		electionEnable:        false,
+		server:        server,
+		cli:           client,
+		newEtcdClient: clientv3.New,
+		lifecycle: etcdLifecycleOwner{
+			ctx:        lifecycleCtx,
+			cancel:     lifecycleCancel,
+			state:      etcdLifecycleNew,
+			appDieChan: appDieChan,
+		},
+		lease: etcdLeaseOwner{
+			ctx:             leaseCtx,
+			cancel:          leaseCancel,
+			flushCtx:        flushCtx,
+			flushCancel:     flushCancel,
+			publicationGate: semaphore.NewWeighted(leasePublicationPermits),
+			renewal:         make(chan struct{}, 1),
+		},
+		watch: etcdWatchOwner{
+			byType:         make(map[string]map[string]*Server),
+			listeners:      make([]SDListener, 0),
+			revisions:      make(map[string]int64),
+			consistentHash: make(map[string]*hash.ConsistentHash),
+			callbacks:      newCallbackDispatcher(callbackQueueLimit),
+		},
+		election: etcdElectionOwner{
+			callbacks:      newCallbackDispatcher(callbackQueueLimit),
+			resumeLeader:   true,
+			reconnectDelay: 2 * time.Second,
+			name:           server.Type,
+		},
 	}
-	sd.callbackNotEmpty = sync.NewCond(&sd.callbackLock)
-	sd.callbackNotFull = sync.NewCond(&sd.callbackLock)
-	sd.leaderCallbackNotEmpty = sync.NewCond(&sd.leaderCallbackLock)
-	sd.leaderCallbackNotFull = sync.NewCond(&sd.leaderCallbackLock)
 	sd.rememberSelfRegistration(server.AsJSONString(), 0)
 	sd.configure(config)
 
@@ -251,163 +176,50 @@ func borrowEtcdClient(ctx context.Context, source *clientv3.Client) *clientv3.Cl
 }
 
 func (sd *etcdServiceDiscovery) startLifecycleWorker(worker func()) bool {
-	sd.lifecycleLock.Lock()
-	defer sd.lifecycleLock.Unlock()
+	sd.lifecycle.mu.Lock()
+	defer sd.lifecycle.mu.Unlock()
 	// lifecycleLock is the admission gate pairing WaitGroup.Add with Shutdown's
 	// transition to stopping. Once Shutdown can Wait, no new worker can Add.
 	// Lifecycle workers may enqueue callbacks, but must not wait for callback
 	// completion or a listener calling Shutdown would wait on its own worker.
-	if (sd.lifecycleState != etcdLifecycleInitializing && sd.lifecycleState != etcdLifecycleRunning) || sd.lifecycleCtx.Err() != nil {
+	if (sd.lifecycle.state != etcdLifecycleInitializing && sd.lifecycle.state != etcdLifecycleRunning) || sd.lifecycle.ctx.Err() != nil {
 		return false
 	}
-	sd.lifecycleWG.Add(1)
+	sd.lifecycle.wg.Add(1)
 	go func() {
-		defer sd.lifecycleWG.Done()
+		defer sd.lifecycle.wg.Done()
 		worker()
 	}()
 	return true
 }
 
-func (sd *etcdServiceDiscovery) enqueueCallback(callback func()) (<-chan struct{}, bool) {
-	done := make(chan struct{})
-	sd.callbackLock.Lock()
-	// This bounds the application callback queue and applies backpressure instead
-	// of dropping or coalescing topology callbacks. The etcd watch client may
-	// buffer upstream responses while this queue is blocked, so listeners must
-	// still return promptly.
-	for len(sd.callbackQueue) >= callbackQueueLimit && !sd.callbackStopping {
-		sd.callbackWaiters++
-		sd.callbackNotFull.Wait()
-		sd.callbackWaiters--
-	}
-	if sd.callbackStopping {
-		sd.callbackLock.Unlock()
-		return nil, false
-	}
-	sd.callbackQueue = append(sd.callbackQueue, callbackWork{callback: callback, done: done})
-	if !sd.callbackStarted {
-		sd.callbackStarted = true
-		go sd.dispatchCallbacks()
-	}
-	sd.callbackNotEmpty.Signal()
-	sd.callbackLock.Unlock()
-	return done, true
-}
-
-func (sd *etcdServiceDiscovery) enqueueLeaderCallback(callback func()) (<-chan struct{}, bool) {
-	done := make(chan struct{})
-	sd.leaderCallbackLock.Lock()
-	for len(sd.leaderCallbackQueue) >= callbackQueueLimit && !sd.leaderCallbackStopping {
-		sd.leaderCallbackWaiters++
-		sd.leaderCallbackNotFull.Wait()
-		sd.leaderCallbackWaiters--
-	}
-	if sd.leaderCallbackStopping {
-		sd.leaderCallbackLock.Unlock()
-		return nil, false
-	}
-	sd.leaderCallbackQueue = append(sd.leaderCallbackQueue, callbackWork{callback: callback, done: done})
-	if !sd.leaderCallbackStarted {
-		sd.leaderCallbackStarted = true
-		go sd.dispatchLeaderCallbacks()
-	}
-	sd.leaderCallbackNotEmpty.Signal()
-	sd.leaderCallbackLock.Unlock()
-	return done, true
-}
-
-func (sd *etcdServiceDiscovery) dispatchCallbacks() {
-	// The dispatcher intentionally stays outside lifecycleWG: a listener is
-	// allowed to call Shutdown, which must not wait for that same callback.
-	defer sd.callbackDrainOnce.Do(func() { close(sd.callbackDrained) })
-	for {
-		sd.callbackLock.Lock()
-		for len(sd.callbackQueue) == 0 && !sd.callbackStopping {
-			sd.callbackNotEmpty.Wait()
-		}
-		if sd.callbackStopping && len(sd.callbackQueue) == 0 {
-			sd.callbackLock.Unlock()
-			return
-		}
-		work := sd.callbackQueue[0]
-		sd.callbackQueue[0] = callbackWork{}
-		sd.callbackQueue = sd.callbackQueue[1:]
-		sd.callbackNotFull.Signal()
-		sd.callbackLock.Unlock()
-		if work.callback != nil {
-			work.callback()
-		}
-		close(work.done)
-	}
-}
-
-func (sd *etcdServiceDiscovery) dispatchLeaderCallbacks() {
-	// Leader callbacks have their own lane so a slow topology listener cannot
-	// leave LeaderID and IsLeader stale. Like the topology dispatcher, this
-	// worker stays outside lifecycleWG so its listener may call Shutdown.
-	defer sd.leaderCallbackDrainOnce.Do(func() { close(sd.leaderCallbackDrained) })
-	for {
-		sd.leaderCallbackLock.Lock()
-		for len(sd.leaderCallbackQueue) == 0 && !sd.leaderCallbackStopping {
-			sd.leaderCallbackNotEmpty.Wait()
-		}
-		if sd.leaderCallbackStopping && len(sd.leaderCallbackQueue) == 0 {
-			sd.leaderCallbackLock.Unlock()
-			return
-		}
-		work := sd.leaderCallbackQueue[0]
-		sd.leaderCallbackQueue[0] = callbackWork{}
-		sd.leaderCallbackQueue = sd.leaderCallbackQueue[1:]
-		sd.leaderCallbackNotFull.Signal()
-		sd.leaderCallbackLock.Unlock()
-		if work.callback != nil {
-			work.callback()
-		}
-		close(work.done)
-	}
-}
-
-func (sd *etcdServiceDiscovery) stopCallbacks() {
-	sd.callbackLock.Lock()
-	// Close callback admission before lifecycle cancellation. Queued work is
-	// drained in FIFO order rather than dropped; Shutdown does not join that
-	// drain, so a callback may call Shutdown without waiting for itself.
-	sd.callbackStopping = true
-	started := sd.callbackStarted
-	sd.callbackNotEmpty.Broadcast()
-	sd.callbackNotFull.Broadcast()
-	sd.callbackLock.Unlock()
-	if !started {
-		sd.callbackDrainOnce.Do(func() { close(sd.callbackDrained) })
-	}
-}
-
-func (sd *etcdServiceDiscovery) stopLeaderCallbacks() {
-	sd.leaderCallbackLock.Lock()
-	sd.leaderCallbackStopping = true
-	started := sd.leaderCallbackStarted
-	sd.leaderCallbackNotEmpty.Broadcast()
-	sd.leaderCallbackNotFull.Broadcast()
-	sd.leaderCallbackLock.Unlock()
-	if !started {
-		sd.leaderCallbackDrainOnce.Do(func() { close(sd.leaderCallbackDrained) })
-	}
-}
-
 func (sd *etcdServiceDiscovery) installElectionCancel(cancel context.CancelFunc) bool {
-	sd.lifecycleLock.Lock()
-	defer sd.lifecycleLock.Unlock()
-	if (sd.lifecycleState != etcdLifecycleInitializing && sd.lifecycleState != etcdLifecycleRunning) || sd.lifecycleCtx.Err() != nil {
+	sd.lifecycle.mu.Lock()
+	defer sd.lifecycle.mu.Unlock()
+	if (sd.lifecycle.state != etcdLifecycleInitializing && sd.lifecycle.state != etcdLifecycleRunning) || sd.lifecycle.ctx.Err() != nil {
 		return false
 	}
-	sd.electionCancel = cancel
+	sd.election.cancelMu.Lock()
+	sd.election.cancel = cancel
+	sd.election.cancelMu.Unlock()
+	return true
+}
+
+func (sd *etcdServiceDiscovery) publishSelfOwnerEpoch(epoch uint64) bool {
+	sd.lifecycle.mu.Lock()
+	defer sd.lifecycle.mu.Unlock()
+	if (sd.lifecycle.state != etcdLifecycleInitializing && sd.lifecycle.state != etcdLifecycleRunning) ||
+		(sd.lifecycle.ctx != nil && sd.lifecycle.ctx.Err() != nil) {
+		return false
+	}
+	sd.server.SetOwnerEpoch(epoch)
 	return true
 }
 
 func (sd *etcdServiceDiscovery) cancelElection() {
-	sd.lifecycleLock.Lock()
-	cancel := sd.electionCancel
-	sd.lifecycleLock.Unlock()
+	sd.election.cancelMu.Lock()
+	cancel := sd.election.cancel
+	sd.election.cancelMu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
@@ -445,10 +257,10 @@ func (sd *etcdServiceDiscovery) acquireSharedLeasePublication(ctx context.Contex
 }
 
 func (sd *etcdServiceDiscovery) acquireLeasePublicationPermits(ctx context.Context, permits int64) (func(), error) {
-	if err := sd.leasePublicationGate.Acquire(ctx, permits); err != nil {
+	if err := sd.lease.publicationGate.Acquire(ctx, permits); err != nil {
 		return nil, err
 	}
-	return func() { sd.leasePublicationGate.Release(permits) }, nil
+	return func() { sd.lease.publicationGate.Release(permits) }, nil
 }
 
 // GetSelfServer @implement ServiceDiscovery.GetSelfServer
@@ -463,23 +275,24 @@ func (sd *etcdServiceDiscovery) configure(config config.EtcdServiceDiscoveryConf
 	sd.etcdEndpoints = config.Endpoints
 	sd.etcdUser = config.User
 	sd.etcdPass = config.Pass
+	sd.etcdTLS = config.TLS
 	sd.etcdDialTimeout = config.DialTimeout
 	sd.etcdPrefix = config.Prefix
-	sd.heartbeatTTL = config.Heartbeat.TTL
-	sd.logHeartbeat = config.Heartbeat.Log
-	sd.syncServersInterval = config.SyncServers.Interval
-	sd.revokeTimeout = config.Revoke.Timeout
-	sd.grantLeaseTimeout = config.GrantLease.Timeout
-	sd.grantLeaseMaxRetries = config.GrantLease.MaxRetries
-	sd.grantLeaseInterval = config.GrantLease.RetryInterval
+	sd.lease.heartbeatTTL = config.Heartbeat.TTL
+	sd.lease.logHeartbeat = config.Heartbeat.Log
+	sd.watch.syncInterval = config.SyncServers.Interval
+	sd.lease.revokeTimeout = config.Revoke.Timeout
+	sd.lease.grantTimeout = config.GrantLease.Timeout
+	sd.lease.grantMaxRetries = config.GrantLease.MaxRetries
+	sd.lease.grantRetryInterval = config.GrantLease.RetryInterval
 	sd.shutdownDelay = config.Shutdown.Delay
-	sd.serverTypesBlacklist = config.ServerTypesBlacklist
-	sd.syncServersParallelism = config.SyncServers.Parallelism
-	sd.electionEnable = config.Election.Enable
+	sd.watch.blacklist = config.ServerTypesBlacklist
+	sd.watch.parallelism = config.SyncServers.Parallelism
+	sd.election.enabled = config.Election.Enable
 	if config.Election.Name != "" {
-		sd.electionName = config.Election.Name
+		sd.election.name = config.Election.Name
 	}
-	sd.electionName = "election/" + sd.electionName
+	sd.election.name = "election/" + sd.election.name
 }
 
 func (sd *etcdServiceDiscovery) watchLeaseChan(ctx context.Context, leaseID clientv3.LeaseID, c <-chan *clientv3.LeaseKeepAliveResponse) {
@@ -493,18 +306,20 @@ func (sd *etcdServiceDiscovery) watchLeaseChan(ctx context.Context, leaseID clie
 				if ctx.Err() != nil {
 					return
 				}
+				sd.server.InvalidateOwnerEpoch()
 				logger.Zap.Error("ETCD lease KeepAlive died, retrying in 10 seconds")
 				if !waitForContext(ctx, 10*time.Second) {
 					return
 				}
 			}
 			if leaseKeepAliveResponse != nil {
-				if sd.logHeartbeat {
+				if sd.lease.logHeartbeat {
 					logger.Log.Debugf("sd: etcd lease %x renewed", leaseKeepAliveResponse.ID)
 				}
 				failedGrantLeaseAttempts = 0
 				continue
 			}
+			sd.server.InvalidateOwnerEpoch()
 			logger.Log.Warn("sd: error renewing etcd lease, reconfiguring")
 			for {
 				err := sd.renewLease(ctx, leaseID)
@@ -523,13 +338,13 @@ func (sd *etcdServiceDiscovery) watchLeaseChan(ctx context.Context, leaseID clie
 						sd.signalAppDie(ctx)
 						return
 					}
-					if failedGrantLeaseAttempts >= sd.grantLeaseMaxRetries {
+					if failedGrantLeaseAttempts >= sd.lease.grantMaxRetries {
 						logger.Log.Warn("sd: exceeded max attempts to renew etcd lease")
 						sd.signalAppDie(ctx)
 						return
 					}
-					logger.Log.Warnf("sd: error granting etcd lease, will retry in %d seconds", uint64(sd.grantLeaseInterval.Seconds()))
-					if !waitForContext(ctx, sd.grantLeaseInterval) {
+					logger.Log.Warnf("sd: error granting etcd lease, will retry in %d seconds", uint64(sd.lease.grantRetryInterval.Seconds()))
+					if !waitForContext(ctx, sd.lease.grantRetryInterval) {
 						return
 					}
 					continue
@@ -542,13 +357,13 @@ func (sd *etcdServiceDiscovery) watchLeaseChan(ctx context.Context, leaseID clie
 
 func (sd *etcdServiceDiscovery) signalAppDie(ctx context.Context) {
 	if ctx.Err() == nil {
-		signalAppDie(sd.appDieChan)
+		signalAppDie(sd.lifecycle.appDieChan)
 	}
 }
 
 // renewLease reestablishes connection with etcd
 func (sd *etcdServiceDiscovery) renewLease(ctx context.Context, expectedLeaseID clientv3.LeaseID) error {
-	attemptCtx, cancel := context.WithTimeout(ctx, sd.grantLeaseTimeout)
+	attemptCtx, cancel := context.WithTimeout(ctx, sd.lease.grantTimeout)
 	defer cancel()
 	logger.Zap.Info("waiting for etcd lease", zap.String("self", sd.server.ID))
 	lease, err := sd.createLease(attemptCtx)
@@ -568,7 +383,7 @@ func (sd *etcdServiceDiscovery) renewLease(ctx context.Context, expectedLeaseID 
 	if err != nil {
 		return leaseRenewalError(ctx, attemptCtx, err)
 	}
-	if clientv3.LeaseID(sd.leaseID.Load()) != expectedLeaseID {
+	if clientv3.LeaseID(sd.lease.id.Load()) != expectedLeaseID {
 		releasePublication()
 		return nil
 	}
@@ -577,7 +392,7 @@ func (sd *etcdServiceDiscovery) renewLease(ctx context.Context, expectedLeaseID 
 		committed, reconcileErr := sd.reconcileCandidateRegistration(lease.id)
 		if reconcileErr != nil {
 			if errors.Is(reconcileErr, errEtcdCandidateLeaseUnfenced) {
-				sd.flushCancel()
+				sd.lease.flushCancel()
 			}
 			releasePublication()
 			return leaseRenewalError(ctx, attemptCtx, reconcileErr)
@@ -586,10 +401,11 @@ func (sd *etcdServiceDiscovery) renewLease(ctx context.Context, expectedLeaseID 
 			releasePublication()
 			return leaseRenewalError(ctx, attemptCtx, transitionErr)
 		}
+		publishedRemotely = true
 	} else if !publishedRemotely {
 		revokeErr := sd.revokeCandidateLease(lease.id)
 		if revokeErr != nil {
-			sd.flushCancel()
+			sd.lease.flushCancel()
 			revokeErr = fmt.Errorf("%w: %w", errEtcdCandidateLeaseUnfenced, revokeErr)
 		}
 		releasePublication()
@@ -602,13 +418,42 @@ func (sd *etcdServiceDiscovery) renewLease(ctx context.Context, expectedLeaseID 
 		)
 	}
 	published, err := sd.activateLeaseLocked(lease, expectedLeaseID)
-	releasePublication()
-	if err != nil {
-		return err
-	}
-	if !published {
+	if err != nil || !published {
+		var revokeErr error
+		if publishedRemotely {
+			// Keep the publication gate exclusive until the remotely committed but
+			// locally untracked generation is fenced. Shutdown otherwise sees the old
+			// leaseID and cannot revoke this candidate.
+			revokeErr = sd.revokeCandidateLease(lease.id)
+		}
+		releasePublication()
+		if revokeErr != nil {
+			sd.lease.flushCancel()
+			if err != nil {
+				return fmt.Errorf(
+					"%w: candidate lease %x activation failed: %v; revoke failed: %w",
+					errEtcdCandidateLeaseUnfenced,
+					lease.id,
+					err,
+					revokeErr,
+				)
+			}
+			return fmt.Errorf(
+				"%w: candidate lease %x was not activated; revoke failed: %w",
+				errEtcdCandidateLeaseUnfenced,
+				lease.id,
+				revokeErr,
+			)
+		}
+		if err != nil {
+			return err
+		}
 		return nil
 	}
+	// A successful lease transition preserves the existing generation. This
+	// store also clears the fail-closed invalid bit set on keepalive loss.
+	sd.publishSelfOwnerEpoch(sd.server.OwnerEpoch())
+	releasePublication()
 	activated = true
 	// Registration and lease publication are the fatal renewal boundary.
 	// Resync requests are coalesced outside the bounded lease attempt so callback
@@ -653,7 +498,9 @@ func (sd *etcdServiceDiscovery) transitionSelfRegistrationLease(
 		return false, err
 	}
 	if response.Succeeded {
-		sd.rememberSelfRegistration(payload, response.Header.GetRevision())
+		revision := response.Header.GetRevision()
+		sd.rememberSelfRegistration(payload, revision)
+		sd.publishSelfOwnerEpoch(uint64(revision))
 	}
 	return response.Succeeded, nil
 }
@@ -661,18 +508,18 @@ func (sd *etcdServiceDiscovery) transitionSelfRegistrationLease(
 func (sd *etcdServiceDiscovery) rememberSelfRegistration(payload string, revision int64) {
 	candidate := &selfRegistrationSnapshot{payload: payload, revision: revision}
 	for {
-		current := sd.selfRegistration.Load()
+		current := sd.lease.registration.Load()
 		if current != nil && current.revision > revision {
 			return
 		}
-		if sd.selfRegistration.CompareAndSwap(current, candidate) {
+		if sd.lease.registration.CompareAndSwap(current, candidate) {
 			return
 		}
 	}
 }
 
 func (sd *etcdServiceDiscovery) currentSelfRegistrationPayload() string {
-	if current := sd.selfRegistration.Load(); current != nil {
+	if current := sd.lease.registration.Load(); current != nil {
 		return current.payload
 	}
 	return sd.server.AsJSONString()
@@ -682,11 +529,12 @@ func (sd *etcdServiceDiscovery) currentSelfRegistrationPayload() string {
 // client result. Observing the candidate lease proves the transaction committed.
 // Otherwise revoking that lease fences a request which may still linearize.
 func (sd *etcdServiceDiscovery) reconcileCandidateRegistration(candidateLeaseID clientv3.LeaseID) (bool, error) {
-	getCtx, cancelGet := withOptionalTimeout(sd.lifecycleCtx, sd.etcdDialTimeout)
+	getCtx, cancelGet := withOptionalTimeout(sd.lifecycle.ctx, sd.etcdDialTimeout)
 	response, getErr := sd.cli.Get(getCtx, getKey(sd.server.ID, sd.server.Type))
 	cancelGet()
 	if getErr == nil && len(response.Kvs) == 1 && clientv3.LeaseID(response.Kvs[0].Lease) == candidateLeaseID {
 		sd.rememberSelfRegistration(string(response.Kvs[0].Value), response.Kvs[0].ModRevision)
+		sd.publishSelfOwnerEpoch(uint64(response.Kvs[0].CreateRevision))
 		return true, nil
 	}
 	if revokeErr := sd.revokeCandidateLease(candidateLeaseID); revokeErr != nil {
@@ -707,7 +555,9 @@ func (sd *etcdServiceDiscovery) reconcileCandidateRegistration(candidateLeaseID 
 }
 
 func (sd *etcdServiceDiscovery) revokeCandidateLease(candidateLeaseID clientv3.LeaseID) error {
-	revokeCtx, cancelRevoke := withOptionalTimeout(sd.lifecycleCtx, sd.etcdDialTimeout)
+	// Candidate leases are not yet represented by leaseID. Their cleanup must
+	// survive lifecycle cancellation or Shutdown has no other way to find them.
+	revokeCtx, cancelRevoke := context.WithTimeout(context.Background(), sd.etcdDialTimeout)
 	defer cancelRevoke()
 	_, err := sd.cli.Revoke(revokeCtx, candidateLeaseID)
 	if errors.Is(err, rpctypes.ErrLeaseNotFound) {
@@ -718,7 +568,7 @@ func (sd *etcdServiceDiscovery) revokeCandidateLease(candidateLeaseID clientv3.L
 
 func (sd *etcdServiceDiscovery) requestRenewalSync() {
 	select {
-	case sd.renewalSync <- struct{}{}:
+	case sd.lease.renewal <- struct{}{}:
 	default:
 	}
 }
@@ -728,7 +578,7 @@ func (sd *etcdServiceDiscovery) runRenewalSync(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-sd.renewalSync:
+		case <-sd.lease.renewal:
 			if err := sd.syncServers(ctx, true, false); err != nil && ctx.Err() == nil {
 				logger.Zap.Error("error resyncing servers after lease renewal", zap.Error(err))
 			}
@@ -769,7 +619,7 @@ func (sd *etcdServiceDiscovery) grantLease(ctx context.Context) error {
 func (sd *etcdServiceDiscovery) createLease(ctx context.Context) (*leaseKeepAlive, error) {
 	// grab lease
 	grantCtx, cancelGrant := context.WithTimeout(ctx, sd.etcdDialTimeout)
-	l, err := sd.cli.Grant(grantCtx, int64(sd.heartbeatTTL.Seconds()))
+	l, err := sd.cli.Grant(grantCtx, int64(sd.lease.heartbeatTTL.Seconds()))
 	cancelGrant()
 	if err != nil {
 		return nil, err
@@ -777,7 +627,7 @@ func (sd *etcdServiceDiscovery) createLease(ctx context.Context) (*leaseKeepAliv
 	logger.Zap.Debug("sd: got leaseID", zap.Int64("leaseID", int64(l.ID)), zap.String("self", sd.server.ID))
 	// this will keep alive forever, when channel c is closed
 	// it means we probably have to rebootstrap the lease
-	keepAliveCtx, cancelKeepAlive := context.WithCancel(sd.leaseCtx)
+	keepAliveCtx, cancelKeepAlive := context.WithCancel(sd.lease.ctx)
 	c, err := sd.cli.KeepAlive(keepAliveCtx, l.ID)
 	if err != nil {
 		cancelKeepAlive()
@@ -802,22 +652,22 @@ func (sd *etcdServiceDiscovery) createLease(ctx context.Context) (*leaseKeepAliv
 // while changing leaseID. Renewal keeps that exclusive hold across remote
 // registration reconciliation; initial bootstrap attaches the key afterward.
 func (sd *etcdServiceDiscovery) activateLeaseLocked(lease *leaseKeepAlive, expectedLeaseID clientv3.LeaseID) (bool, error) {
-	sd.lifecycleLock.Lock()
-	defer sd.lifecycleLock.Unlock()
-	if (sd.lifecycleState != etcdLifecycleInitializing && sd.lifecycleState != etcdLifecycleRunning) || sd.lifecycleCtx.Err() != nil {
-		err := sd.lifecycleCtx.Err()
+	sd.lifecycle.mu.Lock()
+	defer sd.lifecycle.mu.Unlock()
+	if (sd.lifecycle.state != etcdLifecycleInitializing && sd.lifecycle.state != etcdLifecycleRunning) || sd.lifecycle.ctx.Err() != nil {
+		err := sd.lifecycle.ctx.Err()
 		if err == nil {
 			err = context.Canceled
 		}
 		return false, err
 	}
-	if expectedLeaseID != 0 && clientv3.LeaseID(sd.leaseID.Load()) != expectedLeaseID {
+	if expectedLeaseID != 0 && clientv3.LeaseID(sd.lease.id.Load()) != expectedLeaseID {
 		return false, nil
 	}
-	sd.lifecycleWG.Add(1)
-	sd.leaseID.Store(int64(lease.id))
+	sd.lifecycle.wg.Add(1)
+	sd.lease.id.Store(int64(lease.id))
 	go func() {
-		defer sd.lifecycleWG.Done()
+		defer sd.lifecycle.wg.Done()
 		defer lease.cancel()
 		sd.watchLeaseChan(lease.ctx, lease.id, lease.responses)
 	}()
@@ -834,7 +684,7 @@ func (sd *etcdServiceDiscovery) FlushServer2Cluster(server *Server) error {
 	if err := validateEtcdServerIdentity(server); err != nil {
 		return err
 	}
-	return sd.flushServerWithLeaseContext(sd.flushCtx, server)
+	return sd.flushServerWithLeaseContext(sd.lease.flushCtx, server)
 }
 
 func (sd *etcdServiceDiscovery) flushServerWithLeaseContext(ctx context.Context, server *Server) error {
@@ -847,7 +697,7 @@ func (sd *etcdServiceDiscovery) flushServerWithLeaseContext(ctx context.Context,
 		if err != nil {
 			return err
 		}
-		leaseID := clientv3.LeaseID(sd.leaseID.Load())
+		leaseID := clientv3.LeaseID(sd.lease.id.Load())
 		releasePublication()
 		if leaseID == 0 {
 			return errors.New("etcd service discovery has no published lease")
@@ -880,7 +730,7 @@ func (sd *etcdServiceDiscovery) flushServerWithLeaseContext(ctx context.Context,
 }
 
 func (sd *etcdServiceDiscovery) addServerIntoEtcd(server *Server) error {
-	return sd.addServerIntoEtcdContext(sd.lifecycleCtx, server)
+	return sd.addServerIntoEtcdContext(sd.lifecycle.ctx, server)
 }
 
 func (sd *etcdServiceDiscovery) addServerIntoEtcdContext(ctx context.Context, server *Server) error {
@@ -895,14 +745,14 @@ func (sd *etcdServiceDiscovery) addServerIntoEtcdContext(ctx context.Context, se
 		return err
 	}
 	defer releasePublication()
-	return sd.bootstrapServerWithLeaseContext(ctx, server, clientv3.LeaseID(sd.leaseID.Load()))
+	return sd.bootstrapServerWithLeaseContext(ctx, server, clientv3.LeaseID(sd.lease.id.Load()))
 }
 
 func (sd *etcdServiceDiscovery) bootstrapServer(server *Server) error {
-	if err := sd.bootstrapServerContext(sd.lifecycleCtx, server); err != nil {
+	if err := sd.bootstrapServerContext(sd.lifecycle.ctx, server); err != nil {
 		return err
 	}
-	_ = sd.syncServers(sd.lifecycleCtx, true, true)
+	_ = sd.syncServers(sd.lifecycle.ctx, true, true)
 	return nil
 }
 
@@ -918,60 +768,97 @@ func (sd *etcdServiceDiscovery) bootstrapServerWithLeaseContext(ctx context.Cont
 }
 
 func (sd *etcdServiceDiscovery) putServerValueWithLeaseContext(ctx context.Context, serverType, serverID, payload string, leaseID clientv3.LeaseID) error {
-	response, err := sd.cli.Put(
-		ctx,
-		getKey(serverID, serverType),
-		payload,
-		clientv3.WithLease(leaseID),
-	)
+	key := getKey(serverID, serverType)
+	response, err := sd.cli.Txn(ctx).
+		If(clientv3.Compare(clientv3.CreateRevision(key), "=", 0)).
+		Then(clientv3.OpPut(key, payload, clientv3.WithLease(leaseID))).
+		Else(clientv3.OpGet(key)).
+		Commit()
 	if err != nil {
 		return err
 	}
+	ownerEpoch := response.Header.GetRevision()
+	modRevision := response.Header.GetRevision()
+	if !response.Succeeded {
+		if len(response.Responses) != 1 {
+			return errors.New("etcd server identity check returned an invalid response")
+		}
+		rangeResponse := response.Responses[0].GetResponseRange()
+		if rangeResponse == nil || len(rangeResponse.Kvs) != 1 {
+			return fmt.Errorf("%w: %s/%s changed during registration", errEtcdServerIdentityOwned, serverType, serverID)
+		}
+		existing := rangeResponse.Kvs[0]
+		if clientv3.LeaseID(existing.Lease) != leaseID {
+			return fmt.Errorf(
+				"%w: %s/%s is attached to lease %x",
+				errEtcdServerIdentityOwned,
+				serverType,
+				serverID,
+				existing.Lease,
+			)
+		}
+		update, updateErr := sd.cli.Txn(ctx).
+			If(
+				clientv3.Compare(clientv3.ModRevision(key), "=", existing.ModRevision),
+				clientv3.Compare(clientv3.LeaseValue(key), "=", int64(leaseID)),
+			).
+			Then(clientv3.OpPut(key, payload, clientv3.WithLease(leaseID))).
+			Commit()
+		if updateErr != nil {
+			return updateErr
+		}
+		if !update.Succeeded {
+			return fmt.Errorf("%w: %s/%s changed during refresh", errEtcdServerIdentityOwned, serverType, serverID)
+		}
+		ownerEpoch = existing.CreateRevision
+		modRevision = update.Header.GetRevision()
+	}
 	if serverID == sd.server.ID && serverType == sd.server.Type {
-		sd.rememberSelfRegistration(payload, response.Header.GetRevision())
+		sd.rememberSelfRegistration(payload, modRevision)
+		sd.publishSelfOwnerEpoch(uint64(ownerEpoch))
 	}
 	return nil
 }
 
 // AddListener adds a listener to etcd service discovery
 func (sd *etcdServiceDiscovery) AddListener(listener SDListener) {
-	sd.listenersLock.Lock()
-	defer sd.listenersLock.Unlock()
-	sd.listeners = append(sd.listeners, listener)
+	sd.watch.listenersMu.Lock()
+	defer sd.watch.listenersMu.Unlock()
+	sd.watch.listeners = append(sd.watch.listeners, listener)
 }
 
 // OnLeaderChange 设置leader变化监听
 func (sd *etcdServiceDiscovery) OnLeaderChange(listener LeaderChangeListener) {
-	sd.leaderLock.Lock()
-	defer sd.leaderLock.Unlock()
-	sd.onLeaderChange = listener
+	sd.election.leaderMu.Lock()
+	defer sd.election.leaderMu.Unlock()
+	sd.election.listener = listener
 }
 
 func (sd *etcdServiceDiscovery) activateLeaderGeneration(generation uint64) bool {
-	sd.leaderAdmissionLock.Lock()
-	defer sd.leaderAdmissionLock.Unlock()
-	if generation <= sd.leaderGeneration {
+	sd.election.admissionMu.Lock()
+	defer sd.election.admissionMu.Unlock()
+	if generation <= sd.election.generation {
 		return false
 	}
-	sd.leaderGeneration = generation
+	sd.election.generation = generation
 	return true
 }
 
 func (sd *etcdServiceDiscovery) notifyLeaderChange(generation uint64, leader string, initial bool) bool {
 	// Pair the generation check with callback admission. A stale generation
 	// cannot wait on a full lane and enter it after the coordinator has moved on.
-	sd.leaderAdmissionLock.Lock()
-	defer sd.leaderAdmissionLock.Unlock()
-	if generation != sd.leaderGeneration {
+	sd.election.admissionMu.Lock()
+	defer sd.election.admissionMu.Unlock()
+	if generation != sd.election.generation {
 		return false
 	}
 	_, accepted := sd.enqueueLeaderCallback(func() {
 		// Publish later transitions and invoke the listener in the same FIFO work.
 		// Some listeners query IsLeader instead of trusting the callback argument.
-		sd.leaderLock.Lock()
-		sd.leaderID = leader
-		listener := sd.onLeaderChange
-		sd.leaderLock.Unlock()
+		sd.election.leaderMu.Lock()
+		sd.election.leaderID = leader
+		listener := sd.election.listener
+		sd.election.leaderMu.Unlock()
 		if listener != nil {
 			listener(leader)
 		}
@@ -979,9 +866,9 @@ func (sd *etcdServiceDiscovery) notifyLeaderChange(generation uint64, leader str
 	if accepted && initial {
 		// The first non-empty leader is visible before Init returns. Its listener
 		// remains asynchronous, and later state still advances inside the FIFO lane.
-		sd.leaderLock.Lock()
-		sd.leaderID = leader
-		sd.leaderLock.Unlock()
+		sd.election.leaderMu.Lock()
+		sd.election.leaderID = leader
+		sd.election.leaderMu.Unlock()
 	}
 	return accepted
 }
@@ -991,9 +878,9 @@ func (sd *etcdServiceDiscovery) AfterInit() {
 }
 
 func (sd *etcdServiceDiscovery) notifyListeners(act Action, sv *Server, old ...*Server) {
-	sd.listenersLock.RLock()
-	listeners := append([]SDListener(nil), sd.listeners...)
-	sd.listenersLock.RUnlock()
+	sd.watch.listenersMu.RLock()
+	listeners := append([]SDListener(nil), sd.watch.listeners...)
+	sd.watch.listenersMu.RUnlock()
 	if len(listeners) == 0 {
 		return
 	}
@@ -1016,36 +903,36 @@ func (sd *etcdServiceDiscovery) notifyListeners(act Action, sv *Server, old ...*
 }
 
 func (sd *etcdServiceDiscovery) writeLockScope(f func()) {
-	sd.mapByTypeLock.Lock()
-	defer sd.mapByTypeLock.Unlock()
+	sd.watch.byTypeMu.Lock()
+	defer sd.watch.byTypeMu.Unlock()
 	f()
 }
 
 func (sd *etcdServiceDiscovery) getConsistentHash(serverType string) *hash.ConsistentHash {
-	sd.consistentHashLock.RLock()
-	ha := sd.consistentHash[serverType]
-	sd.consistentHashLock.RUnlock()
+	sd.watch.consistentHashMu.RLock()
+	ha := sd.watch.consistentHash[serverType]
+	sd.watch.consistentHashMu.RUnlock()
 	return ha
 }
 
 func (sd *etcdServiceDiscovery) getOrCreateConsistentHash(serverType string) *hash.ConsistentHash {
-	sd.consistentHashLock.Lock()
-	defer sd.consistentHashLock.Unlock()
+	sd.watch.consistentHashMu.Lock()
+	defer sd.watch.consistentHashMu.Unlock()
 
-	ha := sd.consistentHash[serverType]
+	ha := sd.watch.consistentHash[serverType]
 	if ha == nil {
 		ha = hash.NewConsistentHash()
-		sd.consistentHash[serverType] = ha
+		sd.watch.consistentHash[serverType] = ha
 	}
 	return ha
 }
 
 func (sd *etcdServiceDiscovery) deleteServer(serverID string) {
-	if actual, ok := sd.serverMapByID.Load(serverID); ok {
+	if actual, ok := sd.watch.byID.Load(serverID); ok {
 		sv := actual.(*Server)
-		sd.serverMapByID.Delete(sv.ID)
+		sd.watch.byID.Delete(sv.ID)
 		sd.writeLockScope(func() {
-			if svMap, ok := sd.serverMapByType[sv.Type]; ok {
+			if svMap, ok := sd.watch.byType[sv.Type]; ok {
 				delete(svMap, sv.ID)
 			}
 		})
@@ -1057,7 +944,7 @@ func (sd *etcdServiceDiscovery) deleteServer(serverID string) {
 }
 
 func (sd *etcdServiceDiscovery) deleteLocalInvalidServers(actualServers []string) {
-	sd.serverMapByID.Range(func(key interface{}, value interface{}) bool {
+	sd.watch.byID.Range(func(key interface{}, value interface{}) bool {
 		k := key.(string)
 		if !util.SliceContainsString(actualServers, k) {
 			logger.Sugar.Warnf("deleting invalid local server %s", k)
@@ -1071,34 +958,37 @@ func (sd *etcdServiceDiscovery) deleteLocalInvalidServers(actualServers []string
 // syncServersLock held. Tombstone revisions prevent a delayed watch event from
 // resurrecting state that a newer snapshot already removed.
 func (sd *etcdServiceDiscovery) applyServerAtRevision(server *Server, revision int64) bool {
-	if revision > 0 && revision <= sd.serverRevisions[server.ID] {
+	if revision > 0 && revision <= sd.watch.revisions[server.ID] {
 		return false
 	}
 	if revision > 0 {
-		sd.serverRevisions[server.ID] = revision
+		sd.watch.revisions[server.ID] = revision
 	}
+	// Self fencing state is published only by transactions proven to use the
+	// local lease. Generic topology data may describe a replacement process with
+	// the same identity and must never be adopted by the old process.
 	sd.addServer(server)
 	return true
 }
 
 func (sd *etcdServiceDiscovery) deleteServerAtRevision(serverID string, revision int64) bool {
-	if revision > 0 && revision <= sd.serverRevisions[serverID] {
+	if revision > 0 && revision <= sd.watch.revisions[serverID] {
 		return false
 	}
 	if revision > 0 {
-		sd.serverRevisions[serverID] = revision
+		sd.watch.revisions[serverID] = revision
 	}
 	sd.deleteServer(serverID)
 	return true
 }
 
 func (sd *etcdServiceDiscovery) deleteLocalInvalidServersAtRevision(actualServers map[string]struct{}, snapshotRevision int64) {
-	sd.serverMapByID.Range(func(key interface{}, value interface{}) bool {
+	sd.watch.byID.Range(func(key interface{}, value interface{}) bool {
 		serverID := key.(string)
 		if _, ok := actualServers[serverID]; ok {
 			return true
 		}
-		if snapshotRevision > 0 && sd.serverRevisions[serverID] > snapshotRevision {
+		if snapshotRevision > 0 && sd.watch.revisions[serverID] > snapshotRevision {
 			return true
 		}
 		logger.Sugar.Warnf("deleting invalid local server %s", serverID)
@@ -1112,24 +1002,24 @@ func (sd *etcdServiceDiscovery) deleteLocalInvalidServersAtRevision(actualServer
 // the snapshot may belong to concurrent watch events and must survive until a
 // later snapshot or complete watch response covers their authoritative state.
 func (sd *etcdServiceDiscovery) pruneServerRevisionTombstones(snapshotRevision int64) {
-	for serverID, revision := range sd.serverRevisions {
+	for serverID, revision := range sd.watch.revisions {
 		if revision > snapshotRevision {
 			continue
 		}
-		if _, loaded := sd.serverMapByID.Load(serverID); loaded {
+		if _, loaded := sd.watch.byID.Load(serverID); loaded {
 			continue
 		}
-		delete(sd.serverRevisions, serverID)
+		delete(sd.watch.revisions, serverID)
 	}
 }
 
 func (sd *etcdServiceDiscovery) pruneServerRevisionCandidates(serverIDs map[string]struct{}) {
 	for serverID := range serverIDs {
-		if _, loaded := sd.serverMapByID.Load(serverID); loaded {
+		if _, loaded := sd.watch.byID.Load(serverID); loaded {
 			continue
 		}
-		if revision, ok := sd.serverRevisions[serverID]; ok && revision <= sd.serverRevisionFloor {
-			delete(sd.serverRevisions, serverID)
+		if revision, ok := sd.watch.revisions[serverID]; ok && revision <= sd.watch.revisionFloor {
+			delete(sd.watch.revisions, serverID)
 		}
 	}
 }
@@ -1148,7 +1038,7 @@ func getServerFromEtcdContext(ctx context.Context, cli *clientv3.Client, serverT
 }
 
 func getVersionedServerFromEtcdContext(ctx context.Context, cli *clientv3.Client, serverType, serverID string, atRevision int64) (*Server, int64, error) {
-	payload, revision, err := getServerValueFromEtcdContext(ctx, cli, serverType, serverID, atRevision)
+	payload, revision, ownerEpoch, err := getServerValueFromEtcdContext(ctx, cli, serverType, serverID, atRevision)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -1156,10 +1046,11 @@ func getVersionedServerFromEtcdContext(ctx context.Context, cli *clientv3.Client
 	if err != nil {
 		return nil, 0, err
 	}
+	server.SetOwnerEpoch(uint64(ownerEpoch))
 	return server, revision, nil
 }
 
-func getServerValueFromEtcdContext(ctx context.Context, cli *clientv3.Client, serverType, serverID string, atRevision int64) ([]byte, int64, error) {
+func getServerValueFromEtcdContext(ctx context.Context, cli *clientv3.Client, serverType, serverID string, atRevision int64) ([]byte, int64, int64, error) {
 	svKey := getKey(serverID, serverType)
 	var options []clientv3.OpOption
 	if atRevision > 0 {
@@ -1167,24 +1058,24 @@ func getServerValueFromEtcdContext(ctx context.Context, cli *clientv3.Client, se
 	}
 	svEInfo, err := cli.Get(ctx, svKey, options...)
 	if err != nil {
-		return nil, 0, fmt.Errorf("error getting server %s from etcd: %w", svKey, err)
+		return nil, 0, 0, fmt.Errorf("error getting server %s from etcd: %w", svKey, err)
 	}
 	if len(svEInfo.Kvs) == 0 {
-		return nil, 0, fmt.Errorf("didn't found server: %s in etcd", svKey)
+		return nil, 0, 0, fmt.Errorf("didn't found server: %s in etcd", svKey)
 	}
-	return svEInfo.Kvs[0].Value, svEInfo.Kvs[0].ModRevision, nil
+	return svEInfo.Kvs[0].Value, svEInfo.Kvs[0].ModRevision, svEInfo.Kvs[0].CreateRevision, nil
 }
 
 // GetServersByType returns a slice with all the servers of a certain type
 func (sd *etcdServiceDiscovery) GetServersByType(serverType string) (map[string]*Server, error) {
-	sd.mapByTypeLock.RLock()
-	defer sd.mapByTypeLock.RUnlock()
-	if m, ok := sd.serverMapByType[serverType]; ok && len(m) > 0 {
+	sd.watch.byTypeMu.RLock()
+	defer sd.watch.byTypeMu.RUnlock()
+	if m, ok := sd.watch.byType[serverType]; ok && len(m) > 0 {
 		// Create a new map to avoid concurrent read and write access to the
 		// map, this also prevents accidental changes to the list of servers
 		// kept by the service discovery.
-		ret := make(map[string]*Server, len(sd.serverMapByType[serverType]))
-		for k, v := range sd.serverMapByType[serverType] {
+		ret := make(map[string]*Server, len(sd.watch.byType[serverType]))
+		for k, v := range sd.watch.byType[serverType] {
 			ret[k] = v
 		}
 		return ret, nil
@@ -1207,7 +1098,7 @@ func (sd *etcdServiceDiscovery) GetConsistentHashNode(serverType string, session
 // GetServers returns a slice with all the servers
 func (sd *etcdServiceDiscovery) GetServers() []*Server {
 	ret := make([]*Server, 0)
-	sd.serverMapByID.Range(func(k, v interface{}) bool {
+	sd.watch.byID.Range(func(k, v interface{}) bool {
 		ret = append(ret, v.(*Server))
 		return true
 	})
@@ -1216,7 +1107,7 @@ func (sd *etcdServiceDiscovery) GetServers() []*Server {
 
 func (sd *etcdServiceDiscovery) GetAnyFrontend() (*Server, error) {
 	var frontend *Server
-	sd.serverMapByID.Range(func(k, v interface{}) bool {
+	sd.watch.byID.Range(func(k, v interface{}) bool {
 		sv := v.(*Server)
 		if sv.Frontend {
 			frontend = sv
@@ -1234,10 +1125,10 @@ func (sd *etcdServiceDiscovery) GetAnyFrontend() (*Server, error) {
 //
 //	@implement ServiceDiscovery.GetServerTypes
 func (sd *etcdServiceDiscovery) GetServerTypes() map[string]*Server {
-	sd.mapByTypeLock.RLock()
-	defer sd.mapByTypeLock.RUnlock()
-	ret := make(map[string]*Server, len(sd.serverMapByType))
-	for t, m := range sd.serverMapByType {
+	sd.watch.byTypeMu.RLock()
+	defer sd.watch.byTypeMu.RUnlock()
+	ret := make(map[string]*Server, len(sd.watch.byType))
+	for t, m := range sd.watch.byType {
 		for _, server := range m {
 			ret[t] = server
 			break
@@ -1247,16 +1138,17 @@ func (sd *etcdServiceDiscovery) GetServerTypes() map[string]*Server {
 }
 
 func (sd *etcdServiceDiscovery) bootstrap() error {
-	if err := sd.grantLease(sd.leaseCtx); err != nil {
+	sd.server.InvalidateOwnerEpoch()
+	if err := sd.grantLease(sd.lease.ctx); err != nil {
 		return err
 	}
 
 	// 选举
-	if sd.electionEnable {
-		ctx, cancel := context.WithCancel(sd.lifecycleCtx)
+	if sd.election.enabled {
+		ctx, cancel := context.WithCancel(sd.lifecycle.ctx)
 		if !sd.installElectionCancel(cancel) {
 			cancel()
-			return sd.lifecycleCtx.Err()
+			return sd.lifecycle.ctx.Err()
 		}
 		if err := sd.runElection(ctx); err != nil {
 			cancel()
@@ -1264,25 +1156,25 @@ func (sd *etcdServiceDiscovery) bootstrap() error {
 		}
 	}
 
-	if err := sd.bootstrapServerContext(sd.lifecycleCtx, sd.server); err != nil {
+	if err := sd.bootstrapServerContext(sd.lifecycle.ctx, sd.server); err != nil {
 		return err
 	}
-	sd.syncServersLock.Lock()
+	sd.watch.reconcileMu.Lock()
 	sd.applyServerAtRevision(sd.server, 0)
-	sd.syncServersLock.Unlock()
+	sd.watch.reconcileMu.Unlock()
 	// Registration has historically been the fatal bootstrap boundary. A
 	// transient initial read must not turn a registered production server into
 	// a terminal Init failure; the periodic sync and watch paths will converge.
-	sd.initWaitingCallbacks.Store(true)
-	_ = sd.syncServers(sd.lifecycleCtx, true, true)
-	sd.initWaitingCallbacks.Store(false)
+	sd.lifecycle.waitingCallbacks.Store(true)
+	_ = sd.syncServers(sd.lifecycle.ctx, true, true)
+	sd.lifecycle.waitingCallbacks.Store(false)
 
 	return nil
 }
 
 // GetServer returns a server given it's id
 func (sd *etcdServiceDiscovery) GetServer(id string) (*Server, error) {
-	if sv, ok := sd.serverMapByID.Load(id); ok {
+	if sv, ok := sd.watch.byID.Load(id); ok {
 		return sv.(*Server), nil
 	}
 	return nil, errors.WithStack(fmt.Errorf("%w:%s", constants.ErrNoServerWithID, id))
@@ -1291,17 +1183,21 @@ func (sd *etcdServiceDiscovery) GetServer(id string) (*Server, error) {
 func (sd *etcdServiceDiscovery) newOwnedClient() (*clientv3.Client, error) {
 	logger.Zap.Info("Initializing ETCD client")
 	etcdClientLogger, _ := logutil.CreateDefaultZapLogger(logutil.ConvertToZapLevel("error"))
-	config := clientv3.Config{
+	clientTLS, err := config.LoadClientTLS("pitaya.cluster.sd.etcd.tls", sd.etcdTLS)
+	if err != nil {
+		logger.Zap.Error("error loading etcd client TLS configuration", zap.Error(err))
+		return nil, err
+	}
+	clientConfig := clientv3.Config{
 		Endpoints:   sd.etcdEndpoints,
 		DialTimeout: sd.etcdDialTimeout,
 		Logger:      etcdClientLogger,
 		DialOptions: []grpc.DialOption{grpc.WithBlock()},
+		TLS:         clientTLS,
+		Username:    sd.etcdUser,
+		Password:    sd.etcdPass,
 	}
-	if sd.etcdUser != "" && sd.etcdPass != "" {
-		config.Username = sd.etcdUser
-		config.Password = sd.etcdPass
-	}
-	cli, err := sd.newEtcdClient(config)
+	cli, err := sd.newEtcdClient(clientConfig)
 	if err != nil {
 		logger.Zap.Error("error initializing etcd client", zap.Error(err))
 		return nil, err
@@ -1316,10 +1212,10 @@ func (sd *etcdServiceDiscovery) namespaceClient(cli *clientv3.Client) {
 }
 
 func (sd *etcdServiceDiscovery) initClient() error {
-	sd.lifecycleLock.Lock()
+	sd.lifecycle.mu.Lock()
 	cli := sd.cli
-	initializing := sd.lifecycleState == etcdLifecycleInitializing
-	sd.lifecycleLock.Unlock()
+	initializing := sd.lifecycle.state == etcdLifecycleInitializing
+	sd.lifecycle.mu.Unlock()
 	if !initializing {
 		return context.Canceled
 	}
@@ -1333,63 +1229,63 @@ func (sd *etcdServiceDiscovery) initClient() error {
 		return err
 	}
 	sd.namespaceClient(candidate)
-	sd.lifecycleLock.Lock()
-	if sd.lifecycleState != etcdLifecycleInitializing {
-		sd.lifecycleLock.Unlock()
+	sd.lifecycle.mu.Lock()
+	if sd.lifecycle.state != etcdLifecycleInitializing {
+		sd.lifecycle.mu.Unlock()
 		_ = candidate.Close()
 		return context.Canceled
 	}
 	sd.cli = candidate
 	sd.ownsClient = true
-	sd.lifecycleLock.Unlock()
+	sd.lifecycle.mu.Unlock()
 	return nil
 }
 
 // Init starts the service discovery client
 func (sd *etcdServiceDiscovery) Init() error {
-	sd.lifecycleLock.Lock()
-	switch sd.lifecycleState {
+	sd.lifecycle.mu.Lock()
+	switch sd.lifecycle.state {
 	case etcdLifecycleNew:
-		sd.lifecycleState = etcdLifecycleInitializing
-		sd.initDone = make(chan struct{})
+		sd.lifecycle.state = etcdLifecycleInitializing
+		sd.lifecycle.initDone = make(chan struct{})
 	case etcdLifecycleInitializing:
-		initDone := sd.initDone
-		sd.lifecycleLock.Unlock()
+		initDone := sd.lifecycle.initDone
+		sd.lifecycle.mu.Unlock()
 		<-initDone
-		sd.lifecycleLock.Lock()
-		err := sd.initErr
-		sd.lifecycleLock.Unlock()
+		sd.lifecycle.mu.Lock()
+		err := sd.lifecycle.initErr
+		sd.lifecycle.mu.Unlock()
 		return err
 	case etcdLifecycleRunning:
-		sd.lifecycleLock.Unlock()
+		sd.lifecycle.mu.Unlock()
 		return nil
 	case etcdLifecycleStopping:
-		initDone := sd.initDone
+		initDone := sd.lifecycle.initDone
 		if initDone != nil {
 			select {
 			case <-initDone:
 			default:
-				sd.lifecycleLock.Unlock()
+				sd.lifecycle.mu.Unlock()
 				<-initDone
-				sd.lifecycleLock.Lock()
-				err := sd.initErr
-				sd.lifecycleLock.Unlock()
+				sd.lifecycle.mu.Lock()
+				err := sd.lifecycle.initErr
+				sd.lifecycle.mu.Unlock()
 				return err
 			}
 		}
 		fallthrough
 	case etcdLifecycleStopped:
-		err := sd.initErr
+		err := sd.lifecycle.initErr
 		if err == nil {
-			err = sd.lifecycleCtx.Err()
+			err = sd.lifecycle.ctx.Err()
 		}
 		if err == nil {
 			err = context.Canceled
 		}
-		sd.lifecycleLock.Unlock()
+		sd.lifecycle.mu.Unlock()
 		return err
 	}
-	sd.lifecycleLock.Unlock()
+	sd.lifecycle.mu.Unlock()
 
 	err := sd.initOnce()
 	return sd.finishInit(err)
@@ -1403,57 +1299,57 @@ func (sd *etcdServiceDiscovery) initOnce() error {
 	if err := sd.bootstrap(); err != nil {
 		return err
 	}
-	if !sd.startLifecycleWorker(func() { sd.runRenewalSync(sd.lifecycleCtx) }) {
-		return sd.lifecycleCtx.Err()
+	if !sd.startLifecycleWorker(func() { sd.runRenewalSync(sd.lifecycle.ctx) }) {
+		return sd.lifecycle.ctx.Err()
 	}
 	// Establish the initial snapshot revision before starting the watch. The
 	// watcher resumes at revision+1, closing the list/watch creation window.
-	if !sd.startLifecycleWorker(func() { sd.watchEtcdChanges(sd.lifecycleCtx) }) {
-		return sd.lifecycleCtx.Err()
+	if !sd.startLifecycleWorker(func() { sd.watchEtcdChanges(sd.lifecycle.ctx) }) {
+		return sd.lifecycle.ctx.Err()
 	}
 
 	// update servers
 	if !sd.startLifecycleWorker(func() {
-		syncServersTicker := time.NewTicker(sd.syncServersInterval)
+		syncServersTicker := time.NewTicker(sd.watch.syncInterval)
 		defer syncServersTicker.Stop()
 		for {
 			select {
 			case <-syncServersTicker.C:
-				err := sd.syncServers(sd.lifecycleCtx, false, false)
-				if err != nil && sd.lifecycleCtx.Err() == nil {
+				err := sd.syncServers(sd.lifecycle.ctx, false, false)
+				if err != nil && sd.lifecycle.ctx.Err() == nil {
 					logger.Zap.Error("error resyncing servers", zap.Error(err))
 				}
-			case <-sd.lifecycleCtx.Done():
+			case <-sd.lifecycle.ctx.Done():
 				return
 			}
 		}
 	}) {
-		return sd.lifecycleCtx.Err()
+		return sd.lifecycle.ctx.Err()
 	}
 
 	return nil
 }
 
 func (sd *etcdServiceDiscovery) finishInit(initErr error) error {
-	sd.lifecycleLock.Lock()
+	sd.lifecycle.mu.Lock()
 	result := initErr
-	if sd.lifecycleState != etcdLifecycleInitializing && result == nil {
-		result = sd.lifecycleCtx.Err()
+	if sd.lifecycle.state != etcdLifecycleInitializing && result == nil {
+		result = sd.lifecycle.ctx.Err()
 		if result == nil {
 			result = context.Canceled
 		}
 	}
 	if result == nil {
-		sd.lifecycleState = etcdLifecycleRunning
-		sd.running.Store(true)
+		sd.lifecycle.state = etcdLifecycleRunning
+		sd.lifecycle.running.Store(true)
 	} else {
-		sd.initErr = result
-		if sd.lifecycleState == etcdLifecycleInitializing {
-			sd.lifecycleState = etcdLifecycleStopping
+		sd.lifecycle.initErr = result
+		if sd.lifecycle.state == etcdLifecycleInitializing {
+			sd.lifecycle.state = etcdLifecycleStopping
 		}
 	}
-	close(sd.initDone)
-	sd.lifecycleLock.Unlock()
+	close(sd.lifecycle.initDone)
+	sd.lifecycle.mu.Unlock()
 
 	if result != nil {
 		_ = sd.Shutdown()
@@ -1506,9 +1402,9 @@ func parseServerForKey(value []byte, serverType, serverID string) (*Server, erro
 }
 
 func (sd *etcdServiceDiscovery) printServers() {
-	sd.mapByTypeLock.RLock()
-	defer sd.mapByTypeLock.RUnlock()
-	for k, v := range sd.serverMapByType {
+	sd.watch.byTypeMu.RLock()
+	defer sd.watch.byTypeMu.RUnlock()
+	for k, v := range sd.watch.byType {
 		logger.Zap.Debug("", zap.String("self", sd.server.ID), zap.String("type", k), zap.Any("servers", v))
 	}
 }
@@ -1521,6 +1417,7 @@ type parallelGetterWork struct {
 	payload        []byte
 	payloadPresent bool
 	revision       int64
+	ownerEpoch     int64
 	readAt         int64
 }
 
@@ -1582,8 +1479,15 @@ func (p *parallelGetter) processWork(work parallelGetterWork) {
 	defer p.wg.Done()
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			err := fmt.Errorf("panic loading server %s/%s from etcd: %v", work.serverType, work.serverID, recovered)
-			logger.Zap.Error("panic loading server from etcd", zap.String("svType", work.serverType), zap.String("svID", work.serverID), zap.Any("panic", recovered))
+			err := fmt.Errorf("panic loading server %s/%s from etcd", work.serverType, work.serverID)
+			util.LogRecoveredPanic(
+				logger.Zap,
+				"panic loading server from etcd",
+				recovered,
+				zap.String("svType", work.serverType),
+				zap.String("svID", work.serverID),
+				zap.Stack("stack"),
+			)
 			p.recordError(err)
 		}
 	}()
@@ -1591,9 +1495,14 @@ func (p *parallelGetter) processWork(work parallelGetterWork) {
 	logger.Zap.Debug("loading info from missing server", zap.String("svType", work.serverType), zap.String("svID", work.serverID))
 	payload := work.payload
 	revision := work.revision
+	ownerEpoch := work.ownerEpoch
 	var err error
 	if !work.payloadPresent {
-		payload, revision, err = getServerValueFromEtcdContext(p.ctx, p.cli, work.serverType, work.serverID, work.readAt)
+		var fetchedEpoch int64
+		payload, revision, fetchedEpoch, err = getServerValueFromEtcdContext(p.ctx, p.cli, work.serverType, work.serverID, work.readAt)
+		if ownerEpoch == 0 {
+			ownerEpoch = fetchedEpoch
+		}
 	}
 	if err != nil {
 		logger.Zap.Error("Error loading server from etcd", zap.String("svType", work.serverType), zap.String("svID", work.serverID), zap.Error(err))
@@ -1604,6 +1513,9 @@ func (p *parallelGetter) processWork(work parallelGetterWork) {
 	sv, parseErr := parseServerForKey(payload, work.serverType, work.serverID)
 	if parseErr != nil {
 		logger.Zap.Error("Error parsing server from etcd", zap.String("svType", work.serverType), zap.String("svID", work.serverID), zap.Error(parseErr))
+	}
+	if sv != nil {
+		sv.SetOwnerEpoch(uint64(ownerEpoch))
 	}
 
 	p.resultMutex.Lock()
@@ -1626,7 +1538,11 @@ func (p *parallelGetter) waitAndGetResult() ([]versionedServer, error) {
 	return *p.result, p.firstError
 }
 
-func (p *parallelGetter) addWorkWithPayload(serverType, serverID string, payload []byte, revision int64) {
+func (p *parallelGetter) addWorkWithPayload(serverType, serverID string, payload []byte, revision int64, ownerEpochValues ...int64) {
+	var ownerEpoch int64
+	if len(ownerEpochValues) > 0 {
+		ownerEpoch = ownerEpochValues[0]
+	}
 	p.wg.Add(1)
 	p.workChan <- parallelGetterWork{
 		serverType:     serverType,
@@ -1634,15 +1550,21 @@ func (p *parallelGetter) addWorkWithPayload(serverType, serverID string, payload
 		payload:        payload,
 		payloadPresent: true,
 		revision:       revision,
+		ownerEpoch:     ownerEpoch,
 	}
 }
 
-func (p *parallelGetter) addWork(serverType, serverID string, readAt int64) {
+func (p *parallelGetter) addWork(serverType, serverID string, readAt int64, ownerEpochValues ...int64) {
+	var ownerEpoch int64
+	if len(ownerEpochValues) > 0 {
+		ownerEpoch = ownerEpochValues[0]
+	}
 	p.wg.Add(1)
 	p.workChan <- parallelGetterWork{
 		serverType: serverType,
 		serverID:   serverID,
 		readAt:     readAt,
+		ownerEpoch: ownerEpoch,
 	}
 }
 
@@ -1665,18 +1587,18 @@ func (sd *etcdServiceDiscovery) fetchServerSnapshot(ctx context.Context, fullVal
 		return nil, errors.New("etcd server snapshot has no response header")
 	}
 
-	sd.syncServersLock.Lock()
-	appliedRevisions := make(map[string]int64, len(sd.serverRevisions))
-	for serverID, revision := range sd.serverRevisions {
+	sd.watch.reconcileMu.Lock()
+	appliedRevisions := make(map[string]int64, len(sd.watch.revisions))
+	for serverID, revision := range sd.watch.revisions {
 		appliedRevisions[serverID] = revision
 	}
-	sd.syncServersLock.Unlock()
+	sd.watch.reconcileMu.Unlock()
 
 	snapshot := &etcdServerSnapshot{
 		revision:  kvs.Header.Revision,
 		serverIDs: make(map[string]struct{}, len(kvs.Kvs)),
 	}
-	parallelGetter, err := newParallelGetter(ctx, sd.cli, sd.syncServersParallelism)
+	parallelGetter, err := newParallelGetter(ctx, sd.cli, sd.watch.parallelism)
 	if err != nil {
 		return nil, err
 	}
@@ -1693,17 +1615,17 @@ func (sd *etcdServiceDiscovery) fetchServerSnapshot(ctx context.Context, fullVal
 		}
 
 		snapshot.serverIDs[svID] = struct{}{}
-		_, loaded := sd.serverMapByID.Load(svID)
+		_, loaded := sd.watch.byID.Load(svID)
 		appliedRevision := appliedRevisions[svID]
 		if appliedRevision > kv.ModRevision || (loaded && appliedRevision == kv.ModRevision) {
 			continue
 		}
 		if fullValues {
-			parallelGetter.addWorkWithPayload(svType, svID, kv.Value, kv.ModRevision)
+			parallelGetter.addWorkWithPayload(svType, svID, kv.Value, kv.ModRevision, kv.CreateRevision)
 		} else {
 			// Read the payload from the keys-only snapshot revision. A current
 			// read could mix a later PUT with the earlier deletion set.
-			parallelGetter.addWork(svType, svID, snapshot.revision)
+			parallelGetter.addWork(svType, svID, snapshot.revision, kv.CreateRevision)
 		}
 	}
 
@@ -1715,12 +1637,12 @@ func (sd *etcdServiceDiscovery) fetchServerSnapshot(ctx context.Context, fullVal
 }
 
 func (sd *etcdServiceDiscovery) applyServerSnapshot(snapshot *etcdServerSnapshot, waitCallbacks bool) (<-chan struct{}, bool) {
-	sd.syncServersLock.Lock()
-	if sd.serverRevisionFloor == 0 || snapshot.revision > sd.serverRevisionFloor {
+	sd.watch.reconcileMu.Lock()
+	if sd.watch.revisionFloor == 0 || snapshot.revision > sd.watch.revisionFloor {
 		for _, versioned := range snapshot.servers {
 			if versioned.server == nil {
-				if versioned.revision > sd.serverRevisions[versioned.serverID] {
-					sd.serverRevisions[versioned.serverID] = versioned.revision
+				if versioned.revision > sd.watch.revisions[versioned.serverID] {
+					sd.watch.revisions[versioned.serverID] = versioned.revision
 				}
 				continue
 			}
@@ -1731,17 +1653,17 @@ func (sd *etcdServiceDiscovery) applyServerSnapshot(snapshot *etcdServerSnapshot
 		if snapshot.revision > 0 {
 			// The snapshot is authoritative through this revision. Once the floor
 			// is published, old watch events no longer need per-server tombstones.
-			sd.serverRevisionFloor = snapshot.revision
+			sd.watch.revisionFloor = snapshot.revision
 		}
 		sd.pruneServerRevisionTombstones(snapshot.revision)
-		if snapshot.revision > sd.watchRevision {
+		if snapshot.revision > sd.watch.watchRevision {
 			// Full snapshots carry every payload. Keys-only snapshots reach this
 			// point only after every missing or lagging payload was fetched at the
 			// same revision, so both forms may safely advance the checkpoint.
-			sd.watchRevision = snapshot.revision
+			sd.watch.watchRevision = snapshot.revision
 		}
 	}
-	sd.lastSyncUnixNano.Store(time.Now().UnixNano())
+	sd.watch.lastSync.Store(time.Now().UnixNano())
 	var callbackBarrier <-chan struct{}
 	callbackAccepted := true
 	if waitCallbacks {
@@ -1750,17 +1672,17 @@ func (sd *etcdServiceDiscovery) applyServerSnapshot(snapshot *etcdServerSnapshot
 		// callback running elsewhere is never a reason to skip this marker.
 		callbackBarrier, callbackAccepted = sd.enqueueCallback(nil)
 	}
-	sd.syncServersLock.Unlock()
+	sd.watch.reconcileMu.Unlock()
 	return callbackBarrier, callbackAccepted
 }
 
 // SyncServers gets all servers from etcd
 func (sd *etcdServiceDiscovery) SyncServers(firstSync bool) error {
-	return sd.syncServers(sd.lifecycleCtx, firstSync, true)
+	return sd.syncServers(sd.lifecycle.ctx, firstSync, true)
 }
 
 func (sd *etcdServiceDiscovery) syncServers(ctx context.Context, firstSync, waitCallbacks bool) error {
-	sd.syncFetchLock.Lock()
+	sd.watch.fetchMu.Lock()
 	snapshot, err := sd.fetchServerSnapshot(ctx, firstSync)
 	if err != nil && !firstSync && errors.Is(err, rpctypes.ErrCompacted) {
 		// A keys-only snapshot can be compacted before its historical payload
@@ -1768,74 +1690,67 @@ func (sd *etcdServiceDiscovery) syncServers(ctx context.Context, firstSync, wait
 		snapshot, err = sd.fetchServerSnapshot(ctx, true)
 	}
 	if err != nil {
-		sd.syncFetchLock.Unlock()
+		sd.watch.fetchMu.Unlock()
 		if ctx.Err() == nil {
 			logger.Zap.Error("Error querying etcd server", zap.Error(err))
 		}
 		return err
 	}
 	callbackBarrier, callbackAccepted := sd.applyServerSnapshot(snapshot, waitCallbacks)
-	sd.syncFetchLock.Unlock()
-	if !callbackAccepted {
-		sd.callbackBarrierWaiters.Add(1)
-		defer sd.callbackBarrierWaiters.Add(-1)
-		select {
-		case <-sd.callbackDrained:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	if callbackBarrier != nil {
-		select {
-		case <-callbackBarrier:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	return nil
+	sd.watch.fetchMu.Unlock()
+	return sd.watch.callbacks.waitForBarrier(ctx, callbackBarrier, callbackAccepted)
 }
 
 func (sd *etcdServiceDiscovery) Running() bool {
-	return sd.running.Load()
+	return sd.lifecycle.running.Load()
 }
 
 // BeforeShutdown executes before shutting down and will remove the server from the list
 func (sd *etcdServiceDiscovery) BeforeShutdown() {
-	sd.lifecycleLock.Lock()
-	lifecycleState := sd.lifecycleState
-	sd.lifecycleLock.Unlock()
+	sd.lifecycle.mu.Lock()
+	lifecycleState := sd.lifecycle.state
+	sd.lifecycle.mu.Unlock()
 	if lifecycleState < etcdLifecycleRunning {
 		return
 	}
-	sd.beforeShutdownOnce.Do(func() {
+	sd.lifecycle.beforeStopOnce.Do(func() {
+		// Linearize the serving-to-stopping transition with every local owner epoch
+		// publication. A renewal already past its etcd transaction must not reopen
+		// RPC admission while accepted callbacks are still draining.
+		sd.lifecycle.mu.Lock()
+		if sd.lifecycle.state == etcdLifecycleRunning {
+			sd.lifecycle.state = etcdLifecycleStopping
+		}
+		sd.server.InvalidateOwnerEpoch()
+		sd.lifecycle.mu.Unlock()
 		sd.stopCallbacks()
 		sd.stopLeaderCallbacks()
 		// A listener may be blocked in FlushServer2Cluster. Cancel Flush before
 		// joining either callback lane or the drain and revoke phases could wait on
 		// each other indefinitely.
-		sd.flushCancel()
+		sd.lease.flushCancel()
 		// BeforeShutdown is the non-reentrant lifecycle barrier: dependent modules
 		// must not begin teardown while already accepted listeners in either lane
 		// can still run. Shutdown intentionally does not join so a listener may
 		// call it itself.
-		<-sd.callbackDrained
-		<-sd.leaderCallbackDrained
-		sd.listenersLock.Lock()
-		sd.listeners = nil
-		sd.listenersLock.Unlock()
-		sd.leaderLock.Lock()
-		sd.onLeaderChange = nil
-		sd.leaderLock.Unlock()
+		<-sd.watch.callbacks.drainedSignal()
+		<-sd.election.callbacks.drainedSignal()
+		sd.watch.listenersMu.Lock()
+		sd.watch.listeners = nil
+		sd.watch.listenersMu.Unlock()
+		sd.election.leaderMu.Lock()
+		sd.election.listener = nil
+		sd.election.leaderMu.Unlock()
 		if !sd.Running() {
 			// Shutdown is callback-safe because it does not join these drains, but it
 			// also does not revoke. If it ran first, leave the registration to lease
 			// expiry; normal module teardown must call BeforeShutdown first.
 			return
 		}
-		// Flush transactions compare the lease generation, so an RPC which
-		// linearizes after cancellation cannot recreate the revoked registration.
-		sd.leaseCancel()
+		// Cancel renewal before taking the publication gate. A renewal which already
+		// owns the gate either finishes first and has its new lease revoked below, or
+		// observes cancellation and cannot publish a replacement registration.
+		sd.lease.cancel()
 		_ = sd.revoke()
 		sd.cancelElection()
 		time.Sleep(sd.shutdownDelay) // Sleep for a short while to ensure shutdown has propagated
@@ -1844,28 +1759,28 @@ func (sd *etcdServiceDiscovery) BeforeShutdown() {
 
 // Shutdown executes on shutdown and will clean etcd
 func (sd *etcdServiceDiscovery) Shutdown() error {
-	sd.shutdownOnce.Do(func() {
-		sd.running.Store(false)
-		sd.lifecycleLock.Lock()
-		initializing := sd.lifecycleState == etcdLifecycleInitializing
-		initWaitingCallbacks := sd.initWaitingCallbacks.Load()
-		if sd.lifecycleState < etcdLifecycleStopping {
-			sd.lifecycleState = etcdLifecycleStopping
+	sd.lifecycle.shutdownOnce.Do(func() {
+		sd.lifecycle.running.Store(false)
+		sd.lifecycle.mu.Lock()
+		initializing := sd.lifecycle.state == etcdLifecycleInitializing
+		initWaitingCallbacks := sd.lifecycle.waitingCallbacks.Load()
+		if sd.lifecycle.state < etcdLifecycleStopping {
+			sd.lifecycle.state = etcdLifecycleStopping
 		}
-		initDone := sd.initDone
-		electionCancel := sd.electionCancel
-		sd.lifecycleLock.Unlock()
+		// Publish and invalidation share lifecycleLock, so no renewal can make the
+		// local owner valid between this transition and the shutdown barrier.
+		sd.server.InvalidateOwnerEpoch()
+		initDone := sd.lifecycle.initDone
+		sd.lifecycle.mu.Unlock()
 
 		// Stop worker and both callback admissions before cancellation and Wait.
 		// This ordering is the shutdown gate documented above each subsystem.
 		sd.stopCallbacks()
 		sd.stopLeaderCallbacks()
-		sd.flushCancel()
-		sd.leaseCancel()
-		sd.lifecycleCancel()
-		if electionCancel != nil {
-			electionCancel()
-		}
+		sd.lease.flushCancel()
+		sd.lease.cancel()
+		sd.lifecycle.cancel()
+		sd.cancelElection()
 		// Init may be waiting for an initial listener which calls Shutdown. Only
 		// that reentrant window skips the join; other initialization races retain
 		// Shutdown's historical completion boundary.
@@ -1873,24 +1788,25 @@ func (sd *etcdServiceDiscovery) Shutdown() error {
 			<-initDone
 		}
 
-		sd.lifecycleWG.Wait()
-		sd.lifecycleLock.Lock()
+		sd.lifecycle.wg.Wait()
+		sd.lifecycle.mu.Lock()
 		cli := sd.cli
 		ownsClient := sd.ownsClient
-		sd.lifecycleLock.Unlock()
+		sd.lifecycle.mu.Unlock()
 		if ownsClient && cli != nil {
-			sd.shutdownErr = cli.Close()
+			sd.lifecycle.shutdownErr = cli.Close()
 		}
-		sd.lifecycleLock.Lock()
-		sd.lifecycleState = etcdLifecycleStopped
-		sd.lifecycleLock.Unlock()
+		sd.lifecycle.mu.Lock()
+		sd.lifecycle.state = etcdLifecycleStopped
+		sd.lifecycle.mu.Unlock()
 	})
-	return sd.shutdownErr
+	return sd.lifecycle.shutdownErr
 }
 
 // revoke prevents Pitaya from crashing when etcd is not available
 func (sd *etcdServiceDiscovery) revoke() error {
-	ctx, cancel := context.WithTimeout(context.Background(), sd.revokeTimeout)
+	sd.server.InvalidateOwnerEpoch()
+	ctx, cancel := context.WithTimeout(context.Background(), sd.lease.revokeTimeout)
 	defer cancel()
 	logger.Zap.Debug("waiting for etcd revoke", zap.String("self", sd.server.ID))
 	// Exclude lease selection and publication while revoking. A Flush transaction
@@ -1905,7 +1821,8 @@ func (sd *etcdServiceDiscovery) revoke() error {
 		return err
 	}
 	defer releasePublication()
-	_, err = sd.cli.Revoke(ctx, clientv3.LeaseID(sd.leaseID.Load()))
+
+	_, err = sd.cli.Revoke(ctx, clientv3.LeaseID(sd.lease.id.Load()))
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		logger.Zap.Warn("timed out waiting for etcd revoke", zap.String("self", sd.server.ID))
 		return nil // timed out
@@ -1915,13 +1832,13 @@ func (sd *etcdServiceDiscovery) revoke() error {
 }
 
 func (sd *etcdServiceDiscovery) addServer(sv *Server) {
-	old, loaded := sd.serverMapByID.Load(sv.ID)
+	old, loaded := sd.watch.byID.Load(sv.ID)
 	sd.writeLockScope(func() {
-		sd.serverMapByID.Store(sv.ID, sv)
-		mapSvByType, ok := sd.serverMapByType[sv.Type]
+		sd.watch.byID.Store(sv.ID, sv)
+		mapSvByType, ok := sd.watch.byType[sv.Type]
 		if !ok {
 			mapSvByType = make(map[string]*Server)
-			sd.serverMapByType[sv.Type] = mapSvByType
+			sd.watch.byType[sv.Type] = mapSvByType
 		}
 		mapSvByType[sv.ID] = sv
 	})
@@ -1938,9 +1855,9 @@ func (sd *etcdServiceDiscovery) addServer(sv *Server) {
 func (sd *etcdServiceDiscovery) watchEtcdChanges(ctx context.Context) {
 	for {
 		watchCtx, cancelWatch := context.WithCancel(ctx)
-		sd.syncServersLock.Lock()
-		watchRevision := sd.watchRevision
-		sd.syncServersLock.Unlock()
+		sd.watch.reconcileMu.Lock()
+		watchRevision := sd.watch.watchRevision
+		sd.watch.reconcileMu.Unlock()
 		watchOptions := []clientv3.OpOption{
 			clientv3.WithPrefix(),
 			clientv3.WithCreatedNotify(),
@@ -2016,11 +1933,11 @@ func (sd *etcdServiceDiscovery) recordWatchCreation(requestedRevision, createdRe
 	if requestedRevision != 0 || createdRevision <= 0 {
 		return
 	}
-	sd.syncServersLock.Lock()
-	if sd.watchRevision == 0 {
-		sd.watchRevision = createdRevision
+	sd.watch.reconcileMu.Lock()
+	if sd.watch.watchRevision == 0 {
+		sd.watch.watchRevision = createdRevision
 	}
-	sd.syncServersLock.Unlock()
+	sd.watch.reconcileMu.Unlock()
 }
 
 // applyEtcdWatchResponse returns false when the response cannot form a
@@ -2031,15 +1948,15 @@ func (sd *etcdServiceDiscovery) applyEtcdWatchResponse(watchResponse clientv3.Wa
 		return len(watchResponse.Events) == 0
 	}
 	if len(watchResponse.Events) == 0 {
-		sd.syncServersLock.Lock()
-		if watchResponse.Header.Revision > sd.watchRevision {
-			sd.watchRevision = watchResponse.Header.Revision
+		sd.watch.reconcileMu.Lock()
+		if watchResponse.Header.Revision > sd.watch.watchRevision {
+			sd.watch.watchRevision = watchResponse.Header.Revision
 		}
-		if sd.serverRevisionFloor > 0 && watchResponse.Header.Revision > sd.serverRevisionFloor {
-			sd.serverRevisionFloor = watchResponse.Header.Revision
+		if sd.watch.revisionFloor > 0 && watchResponse.Header.Revision > sd.watch.revisionFloor {
+			sd.watch.revisionFloor = watchResponse.Header.Revision
 			sd.pruneServerRevisionTombstones(watchResponse.Header.Revision)
 		}
-		sd.syncServersLock.Unlock()
+		sd.watch.reconcileMu.Unlock()
 		return true
 	}
 
@@ -2058,12 +1975,12 @@ func (sd *etcdServiceDiscovery) applyEtcdWatchResponse(watchResponse clientv3.Wa
 		}
 	}
 
-	sd.syncServersLock.Lock()
-	defer sd.syncServersLock.Unlock()
+	sd.watch.reconcileMu.Lock()
+	defer sd.watch.reconcileMu.Unlock()
 	pruneCandidates := make(map[string]struct{}, len(watchResponse.Events))
 	for _, ev := range watchResponse.Events {
 		revision := ev.Kv.ModRevision
-		if revision <= sd.serverRevisionFloor {
+		if revision <= sd.watch.revisionFloor {
 			continue
 		}
 		svType, svID, err := parseEtcdKey(string(ev.Kv.Key))
@@ -2082,13 +1999,14 @@ func (sd *etcdServiceDiscovery) applyEtcdWatchResponse(watchResponse clientv3.Wa
 			sv, err := parseServerForKey(ev.Kv.Value, svType, svID)
 			if err != nil {
 				logger.Zap.Error("Failed to parse server from etcd", zap.String("self", sd.server.ID), zap.Error(err))
-				if revision > sd.serverRevisions[svID] {
+				if revision > sd.watch.revisions[svID] {
 					// Consume the malformed remote revision while preserving the
 					// last valid local value. A later valid PUT can still recover it.
-					sd.serverRevisions[svID] = revision
+					sd.watch.revisions[svID] = revision
 				}
 				continue
 			}
+			sv.SetOwnerEpoch(uint64(ev.Kv.CreateRevision))
 
 			if sd.applyServerAtRevision(sv, revision) {
 				logger.Zap.Info("server added", zap.ByteString("sv", ev.Kv.Key), zap.String("self", sd.server.ID))
@@ -2101,18 +2019,18 @@ func (sd *etcdServiceDiscovery) applyEtcdWatchResponse(watchResponse clientv3.Wa
 			}
 		}
 	}
-	if responseRevision > sd.watchRevision {
-		sd.watchRevision = responseRevision
+	if responseRevision > sd.watch.watchRevision {
+		sd.watch.watchRevision = responseRevision
 	}
-	if sd.serverRevisionFloor > 0 && responseRevision > sd.serverRevisionFloor {
-		sd.serverRevisionFloor = responseRevision
+	if sd.watch.revisionFloor > 0 && responseRevision > sd.watch.revisionFloor {
+		sd.watch.revisionFloor = responseRevision
 		sd.pruneServerRevisionCandidates(pruneCandidates)
 	}
 	return true
 }
 
 func (sd *etcdServiceDiscovery) isServerTypeBlacklisted(svType string) bool {
-	for _, blacklistedSv := range sd.serverTypesBlacklist {
+	for _, blacklistedSv := range sd.watch.blacklist {
 		if blacklistedSv == svType {
 			return true
 		}
@@ -2163,7 +2081,7 @@ func (generation *electionGeneration) reconnectLease(id clientv3.LeaseID) electi
 func (sd *etcdServiceDiscovery) runElection(ctx context.Context) error {
 	const initialGeneration uint64 = 1
 	generation, err := sd.newElectionGeneration(ctx, electionLease{
-		id:         clientv3.LeaseID(sd.leaseID.Load()),
+		id:         clientv3.LeaseID(sd.lease.id.Load()),
 		provenance: electionLeaseService,
 	}, initialGeneration)
 	if err != nil {
@@ -2209,7 +2127,7 @@ func (sd *etcdServiceDiscovery) runElectionCoordinator(
 		if !sd.notifyLeaderChange(generation.token, next, initial) {
 			return false
 		}
-		logger.Zap.Info("etcd election leader changed", zap.String("name", sd.electionName),
+		logger.Zap.Info("etcd election leader changed", zap.String("name", sd.election.name),
 			zap.Uint64("generation", generation.token), zap.String("leaderID", next),
 			zap.String("old", leader), zap.String("self", sd.server.ID))
 		leader = next
@@ -2242,7 +2160,7 @@ func (sd *etcdServiceDiscovery) runElectionCoordinator(
 		preserveLease := nextLease == currentLease
 		sd.revokeElectionLease(currentLease, preserveLease)
 		pendingLease = nextLease
-		if (nextLease.id == 0 || preserveLease) && !waitForContext(ctx, sd.reconnectBackOff) {
+		if (nextLease.id == 0 || preserveLease) && !waitForContext(ctx, sd.election.reconnectDelay) {
 			return
 		}
 		for {
@@ -2257,7 +2175,7 @@ func (sd *etcdServiceDiscovery) runElectionCoordinator(
 			}
 			logger.Zap.Error("while creating new session", zap.String("self", sd.server.ID),
 				zap.Int64("lease", int64(nextLease.id)), zap.Error(err))
-			if !waitForContext(ctx, sd.reconnectBackOff) {
+			if !waitForContext(ctx, sd.election.reconnectDelay) {
 				return
 			}
 		}
@@ -2297,10 +2215,10 @@ func (sd *etcdServiceDiscovery) runElectionGeneration(
 			if generation.session.Lease() != leaderLease {
 				return leaderLease, true
 			}
-			resumed := concurrency.ResumeElection(generation.session, sd.electionName+"/",
+			resumed := concurrency.ResumeElection(generation.session, sd.election.name+"/",
 				string(node.Kvs[0].Key), node.Kvs[0].CreateRevision)
 			generation.election = resumed
-			if sd.resumeLeader {
+			if sd.election.resumeLeader {
 				resumeObservation = true
 			} else {
 				resignCtx, cancel := context.WithTimeout(generation.ctx, sd.electionShutdownTimeout())
@@ -2672,7 +2590,7 @@ func (sd *etcdServiceDiscovery) newElectionGeneration(ctx context.Context, lease
 	}
 	generationCtx, cancel := context.WithCancel(ctx)
 	generationClient := borrowEtcdClient(generationCtx, sd.cli)
-	session, err := concurrency.NewSession(generationClient, concurrency.WithTTL(int(sd.heartbeatTTL.Seconds())),
+	session, err := concurrency.NewSession(generationClient, concurrency.WithTTL(int(sd.lease.heartbeatTTL.Seconds())),
 		concurrency.WithContext(generationCtx), concurrency.WithLease(lease.id))
 	if err != nil {
 		cancel()
@@ -2684,7 +2602,7 @@ func (sd *etcdServiceDiscovery) newElectionGeneration(ctx context.Context, lease
 		ctx:      generationCtx,
 		cancel:   cancel,
 		session:  session,
-		election: concurrency.NewElection(session, sd.electionName),
+		election: concurrency.NewElection(session, sd.election.name),
 		lease:    lease,
 	}, nil
 }
@@ -2714,16 +2632,16 @@ func (sd *etcdServiceDiscovery) stopElectionGeneration(generation *electionGener
 }
 
 func (sd *etcdServiceDiscovery) electionShutdownTimeout() time.Duration {
-	if sd.revokeTimeout > 0 && sd.revokeTimeout < sd.heartbeatTTL {
-		return sd.revokeTimeout
+	if sd.lease.revokeTimeout > 0 && sd.lease.revokeTimeout < sd.lease.heartbeatTTL {
+		return sd.lease.revokeTimeout
 	}
-	return sd.heartbeatTTL
+	return sd.lease.heartbeatTTL
 }
 
 func (sd *etcdServiceDiscovery) LeaderID() string {
-	sd.leaderLock.RLock()
-	defer sd.leaderLock.RUnlock()
-	return sd.leaderID
+	sd.election.leaderMu.RLock()
+	defer sd.election.leaderMu.RUnlock()
+	return sd.election.leaderID
 }
 func (sd *etcdServiceDiscovery) IsLeader() bool {
 	return sd.LeaderID() == sd.server.ID

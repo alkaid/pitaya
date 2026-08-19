@@ -42,6 +42,7 @@ import (
 	"github.com/google/uuid"
 	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 	"google.golang.org/protobuf/proto"
 )
@@ -2536,4 +2537,109 @@ func TestRequestsInFlightCopySharesLock(t *testing.T) {
 	assert.True(t, sess.HasRequestsInFlight())
 	sess.SetRequestInFlight("request-id", "", false)
 	assert.False(t, sess.HasRequestsInFlight())
+}
+
+func TestBackendBindingsOwnsSnapshotsAndConditionalRemoval(t *testing.T) {
+	t.Parallel()
+
+	sess := &sessionImpl{}
+	assert.Empty(t, sess.GetBackends())
+
+	sess.SetBackendID("chat", "backend-1")
+	assert.Equal(t, "backend-1", sess.GetBackendID("chat"))
+	snapshot := sess.GetBackends()
+	snapshot["chat"] = "mutated-outside-owner"
+	assert.Equal(t, "backend-1", sess.GetBackendID("chat"))
+
+	assert.False(t, sess.RemoveBackendIDIfEqual("chat", "backend-2"))
+	assert.True(t, sess.RemoveBackendIDIfEqual("chat", "backend-1"))
+	assert.Empty(t, sess.GetBackendID("chat"))
+
+	replacement := map[string]string{"room": "backend-2"}
+	sess.SetBackends(replacement)
+	replacement["room"] = "mutated-outside-owner"
+	assert.Equal(t, map[string]string{"room": "backend-2"}, sess.GetBackends())
+
+	sess.RemoveBackendID("room")
+	assert.Empty(t, sess.GetBackends())
+}
+
+func TestSessionStateOwnersHaveIndependentLocksAndSnapshots(t *testing.T) {
+	t.Parallel()
+
+	sess := newTestSession(NewSessionPool(), nil, false).(*sessionImpl)
+	sess.lifecycleMutex.Lock()
+	dataWritten := make(chan struct{})
+	go func() {
+		assert.NoError(t, sess.Set("coins", 7))
+		close(dataWritten)
+	}()
+	select {
+	case <-dataWritten:
+	case <-time.After(time.Second):
+		sess.lifecycleMutex.Unlock()
+		t.Fatal("session data write waited on the lifecycle owner")
+	}
+	sess.lifecycleMutex.Unlock()
+
+	sess.Lock()
+	lifecycleRead := make(chan struct{})
+	go func() {
+		_ = sess.isClosed()
+		close(lifecycleRead)
+	}()
+	select {
+	case <-lifecycleRead:
+	case <-time.After(time.Second):
+		sess.Unlock()
+		t.Fatal("session lifecycle read waited on the data owner")
+	}
+	sess.Unlock()
+
+	encoded := sess.GetDataEncoded()
+	require.NotEmpty(t, encoded)
+	encoded[0] = '!'
+	assert.JSONEq(t, `{"coins":7}`, string(sess.GetDataEncoded()))
+
+	callback := func() {}
+	sess.SetOnCloseCallbacks([]func(){callback})
+	callbacks := sess.GetOnCloseCallbacks()
+	require.Len(t, callbacks, 1)
+	callbacks[0] = nil
+	assert.NotNil(t, sess.GetOnCloseCallbacks()[0])
+}
+
+func TestSessionPoolRangesAndSessionSnapshots(t *testing.T) {
+	t.Parallel()
+
+	pool := NewSessionPool().(*sessionPoolImpl)
+	sess, isNew := pool.NewSession(nil, true)
+	assert.True(t, isNew)
+	assert.NoError(t, pool.storeSessionLocal("user-1", sess.ID(), sess))
+
+	var users []string
+	pool.RangeUsers(func(uid string, got SessPublic) bool {
+		users = append(users, uid)
+		assert.Same(t, sess, got)
+		return true
+	})
+	assert.Equal(t, []string{"user-1"}, users)
+
+	var sessionIDs []int64
+	pool.RangeSessions(func(id int64, got SessPublic) bool {
+		sessionIDs = append(sessionIDs, id)
+		assert.Same(t, sess, got)
+		return true
+	})
+	assert.Equal(t, []int64{sess.ID()}, sessionIDs)
+
+	local := sess.(*sessionImpl)
+	callbacks := []func(){func() {}}
+	local.SetOnCloseCallbacks(callbacks)
+	local.SetIsFrontend(false)
+	local.SetSubscriptions(nil)
+	callbacks[0] = nil
+	assert.Len(t, local.GetOnCloseCallbacks(), 1)
+	assert.False(t, local.GetIsFrontend())
+	assert.Empty(t, local.GetSubscriptions())
 }

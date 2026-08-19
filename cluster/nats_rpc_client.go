@@ -54,8 +54,15 @@ type NatsRPCClient struct {
 	connectionTimeout      time.Duration
 	maxReconnectionRetries int
 	reqTimeout             time.Duration
+	connectionOptions      []nats.Option
 	running                atomic.Bool
+	stopping               atomic.Bool
 	shutdownOnce           sync.Once
+	lifecycleCtx           context.Context
+	cancelLifecycle        context.CancelFunc
+	operationMu            sync.Mutex
+	operationWG            sync.WaitGroup
+	operationsClosed       bool
 	server                 *Server
 	metricsReporters       []metrics.Reporter
 	appDieChan             chan bool
@@ -68,11 +75,17 @@ func NewNatsRPCClient(
 	metricsReporters []metrics.Reporter,
 	appDieChan chan bool,
 ) (*NatsRPCClient, error) {
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+	lifecycleCtx, cancelLifecycle := context.WithCancel(context.Background())
 	ns := &NatsRPCClient{
 		server:            server,
 		metricsReporters:  metricsReporters,
 		appDieChan:        appDieChan,
 		connectionTimeout: nats.DefaultTimeout,
+		lifecycleCtx:      lifecycleCtx,
+		cancelLifecycle:   cancelLifecycle,
 	}
 	if err := ns.configure(config); err != nil {
 		return nil, err
@@ -81,16 +94,19 @@ func NewNatsRPCClient(
 }
 
 func (ns *NatsRPCClient) configure(config config.NatsRPCClientConfig) error {
-	ns.connString = config.Connect
-	if ns.connString == "" {
-		return constants.ErrNoNatsConnectionString
+	connectionOptions, err := buildNATSConnectionOptions(
+		"pitaya.cluster.rpc.client.nats",
+		config.TLS,
+		config.Auth,
+	)
+	if err != nil {
+		return err
 	}
+	ns.connString = config.Connect
 	ns.connectionTimeout = config.ConnectionTimeout
 	ns.maxReconnectionRetries = config.MaxReconnectionRetries
 	ns.reqTimeout = config.RequestTimeout
-	if ns.reqTimeout == 0 {
-		return constants.ErrNatsNoRequestTimeout
-	}
+	ns.connectionOptions = connectionOptions
 	return nil
 }
 
@@ -111,10 +127,12 @@ func (ns *NatsRPCClient) BroadcastSessionBind(uid string) error {
 
 // Send publishes a message in a given topic
 func (ns *NatsRPCClient) Send(topic string, data []byte) error {
-	if !ns.running.Load() {
-		return constants.ErrRPCClientNotInitialized
+	ctx, done, err := ns.beginOperation(context.Background())
+	if err != nil {
+		return err
 	}
-	return ns.conn.Publish(topic, data)
+	defer done()
+	return ns.publish(ctx, topic, data)
 }
 
 // SendPush sends a message to a user
@@ -146,6 +164,10 @@ func (ns *NatsRPCClient) Publish(
 	observersCount int,
 	timeouts ...time.Duration,
 ) ([]*protos.Response, error) {
+	ownerEpoch, ownerValid := ns.server.OwnerEpochSnapshot()
+	if !ownerValid || ownerEpoch > 0 {
+		return nil, constants.ErrRPCPublishRequiresTargetResolution
+	}
 	var err error
 	spanInfo := &tracing.SpanInfo{
 		RpcSystem: "nats",
@@ -158,10 +180,13 @@ func (ns *NatsRPCClient) Publish(
 	ctx = tracing.RPCStartSpan(ctx, spanInfo)
 	defer tracing.FinishSpan(ctx, err)
 
-	if !ns.running.Load() {
-		err = constants.ErrRPCClientNotInitialized
+	operationCtx, finishOperation, operationErr := ns.beginOperation(ctx)
+	if operationErr != nil {
+		err = operationErr
 		return nil, errors.WithStack(err)
 	}
+	ctx = operationCtx
+	defer finishOperation()
 	req, err1 := buildRequest(ctx, rpcType, route.String(), session, msg, ns.server)
 	err = err1
 	if err != nil {
@@ -184,14 +209,11 @@ func (ns *NatsRPCClient) Publish(
 
 	// support notify type.  notify msg don't need wait response
 	if msg.Type == message.Notify {
-		err = ns.Send(getChannel(route.SvType, route.Method), marshalledData)
+		err = ns.publish(ctx, getChannel(route.SvType, route.Method), marshalledData)
 		if err != nil {
 			return nil, errors.WithStack(err)
 		}
 		return nil, nil
-	}
-	if !ns.running.Load() {
-		return nil, constants.ErrRPCClientNotInitialized
 	}
 	uid := ""
 	if session != nil {
@@ -205,11 +227,11 @@ func (ns *NatsRPCClient) Publish(
 		return nil, errors.WithStack(err)
 	}
 	defer sub.Unsubscribe()
-	err = ns.conn.Flush()
+	err = ns.conn.FlushWithContext(ctx)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
-	err = ns.conn.PublishRequest(getChannel(route.SvType, route.Method), reply, marshalledData)
+	err = ns.publishRequest(ctx, getChannel(route.SvType, route.Method), reply, marshalledData)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
@@ -218,9 +240,11 @@ func (ns *NatsRPCClient) Publish(
 	timeoutPerReply := lo.If(len(timeouts) == 0, ns.reqTimeout).ElseF(func() time.Duration { return timeouts[0] })
 	// nats订阅端自己无法感知,需要外部传入订阅者数量，ErrNoResponders 并不能作为读完的依据,只能说明没有订阅者.
 	for i := 0; i < observersCount; i++ {
-		m, err := sub.NextMsg(timeoutPerReply)
+		replyCtx, cancelReply := context.WithTimeout(ctx, timeoutPerReply)
+		m, err := sub.NextMsgWithContext(replyCtx)
+		cancelReply()
 		if err != nil {
-			if errors.Is(err, nats.ErrTimeout) {
+			if errors.Is(err, nats.ErrTimeout) || errors.Is(err, context.DeadlineExceeded) {
 				err = apierrors.GatewayTimeout(err.Error(), "PIT-408", "").WithMetadata(map[string]string{
 					"timeout": timeoutPerReply.String(),
 					"route":   route.String(),
@@ -258,6 +282,10 @@ func (ns *NatsRPCClient) Call(
 	server *Server,
 ) (*protos.Response, error) {
 	var err error
+	ctx, err = withTargetOwnerFencingMetadata(ctx, server)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
 	spanInfo := &tracing.SpanInfo{
 		RpcSystem: "nats",
 		IsClient:  true,
@@ -271,10 +299,13 @@ func (ns *NatsRPCClient) Call(
 	ctx = tracing.RPCStartSpan(ctx, spanInfo)
 	defer tracing.FinishSpan(ctx, err)
 
-	if !ns.running.Load() {
-		err = constants.ErrRPCClientNotInitialized
+	operationCtx, finishOperation, operationErr := ns.beginOperation(ctx)
+	if operationErr != nil {
+		err = operationErr
 		return nil, errors.WithStack(err)
 	}
+	ctx = operationCtx
+	defer finishOperation()
 
 	if session != nil {
 		requestID := util.NanoID(16)
@@ -318,7 +349,7 @@ func (ns *NatsRPCClient) Call(
 
 	// support notify type.  notify msg don't need wait response
 	if msg.Type == message.Notify {
-		err = ns.Send(getChannel(server.Type, server.ID), marshalledData)
+		err = ns.publish(ctx, getChannel(server.Type, server.ID), marshalledData)
 		if err != nil {
 			return nil, errors.WithStack(err)
 		}
@@ -327,9 +358,14 @@ func (ns *NatsRPCClient) Call(
 
 	var timeout time.Duration
 	timeout, _ = time.ParseDuration(reqTimeout.(string))
-	m, err = ns.conn.Request(getChannel(server.Type, server.ID), marshalledData, timeout)
+	requestCtx, cancelRequest := context.WithTimeout(ctx, timeout)
+	defer cancelRequest()
+	m, err = ns.conn.RequestMsgWithContext(requestCtx, &nats.Msg{
+		Subject: getChannel(server.Type, server.ID),
+		Data:    marshalledData,
+	})
 	if err != nil {
-		if errors.Is(err, nats.ErrTimeout) {
+		if errors.Is(err, nats.ErrTimeout) || errors.Is(err, context.DeadlineExceeded) {
 			err = apierrors.GatewayTimeout(err.Error(), "PIT-408", "").WithMetadata(map[string]string{
 				"timeout": timeout.String(),
 				"route":   route.String(),
@@ -360,7 +396,14 @@ func (ns *NatsRPCClient) Fork(
 	session session.Session,
 	msg *message.Message,
 ) error {
-	msg.Type = message.Notify
+	ownerEpoch, ownerValid := ns.server.OwnerEpochSnapshot()
+	if !ownerValid || ownerEpoch > 0 {
+		return constants.ErrRPCForkRequiresTargetResolution
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = pcontext.AddToPropagateCtx(ctx, constants.IdempotencyFanoutKey, "1")
 	var err error
 	spanInfo := &tracing.SpanInfo{
 		RpcSystem: "nats",
@@ -373,10 +416,14 @@ func (ns *NatsRPCClient) Fork(
 	ctx = tracing.RPCStartSpan(ctx, spanInfo)
 	defer tracing.FinishSpan(ctx, err)
 
-	if !ns.running.Load() {
-		err = constants.ErrRPCClientNotInitialized
+	operationCtx, finishOperation, operationErr := ns.beginOperation(ctx)
+	if operationErr != nil {
+		err = operationErr
 		return errors.WithStack(err)
 	}
+	ctx = operationCtx
+	defer finishOperation()
+	msg.Type = message.Notify
 	req, err1 := buildRequest(ctx, protos.RPCType_User, route.String(), session, msg, ns.server)
 	err = err1
 	if err != nil {
@@ -395,26 +442,47 @@ func (ns *NatsRPCClient) Fork(
 			metrics.ReportTimingFromCtx(ctx, ns.metricsReporters, typ, err)
 		}()
 	}
-	err = ns.Send(GetForkTopic(route.SvType), marshalledData)
+	err = ns.publish(ctx, GetForkTopic(route.SvType), marshalledData)
 	return err
 }
 
 // Init inits nats rpc client
 func (ns *NatsRPCClient) Init() error {
 	logger.Log.Debugf("connecting to nats (client) with timeout of %s", ns.connectionTimeout)
-	conn, terminalCallbackDone, err := setupTrackedNatsConn(
-		ns.connString,
-		ns.appDieChan,
-		nil,
+	options := append([]nats.Option(nil), ns.connectionOptions...)
+	options = append(
+		options,
 		nats.MaxReconnects(ns.maxReconnectionRetries),
 		nats.Timeout(ns.connectionTimeout),
+	)
+	conn, terminalCallbackDone, err := setupTrackedNatsConnWithLifecycle(
+		ns.connString,
+		ns.appDieChan,
+		natsConnLifecycleCallbacks{
+			disconnected: func(error) {
+				ns.running.Store(false)
+			},
+			reconnected: func(*nats.Conn) {
+				if !ns.stopping.Load() {
+					ns.running.Store(true)
+				}
+			},
+			closed: func(*nats.Conn) {
+				ns.running.Store(false)
+				if ns.cancelLifecycle != nil {
+					ns.cancelLifecycle()
+				}
+			},
+			closing: ns.stopping.Load,
+		},
+		options...,
 	)
 	if err != nil {
 		return err
 	}
 	ns.conn = conn
 	ns.terminalCallbackDone = terminalCallbackDone
-	ns.running.Store(true)
+	ns.running.Store(conn.IsConnected() && !ns.stopping.Load())
 	return nil
 }
 
@@ -427,12 +495,18 @@ func (ns *NatsRPCClient) BeforeShutdown() {}
 
 // Shutdown stops nats rpc client
 func (ns *NatsRPCClient) Shutdown() error {
-	ns.stop()
 	ns.shutdownOnce.Do(func() {
+		ns.stop()
+		ns.operationWG.Wait()
 		if ns.conn == nil {
 			return
 		}
-		ns.conn.Close()
+		if !ns.conn.IsClosed() {
+			if err := ns.conn.Drain(); err != nil {
+				logger.Zap.Warn("error draining nats rpc client connection", zap.Error(err))
+				ns.conn.Close()
+			}
+		}
 		if ns.terminalCallbackDone != nil {
 			<-ns.terminalCallbackDone
 		}
@@ -441,7 +515,74 @@ func (ns *NatsRPCClient) Shutdown() error {
 }
 
 func (ns *NatsRPCClient) stop() {
+	ns.stopping.Store(true)
 	ns.running.Store(false)
+	ns.operationMu.Lock()
+	ns.operationsClosed = true
+	if ns.cancelLifecycle != nil {
+		ns.cancelLifecycle()
+	}
+	ns.operationMu.Unlock()
+}
+
+// IsRunning reports whether the client currently has a usable NATS connection.
+func (ns *NatsRPCClient) IsRunning() bool {
+	return ns.running.Load()
+}
+
+func (ns *NatsRPCClient) beginOperation(ctx context.Context) (context.Context, func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ns.operationMu.Lock()
+	if ns.operationsClosed || !ns.running.Load() || ns.conn == nil {
+		ns.operationMu.Unlock()
+		return nil, nil, constants.ErrRPCClientNotInitialized
+	}
+	if err := ctx.Err(); err != nil {
+		ns.operationMu.Unlock()
+		return nil, nil, err
+	}
+	ns.operationWG.Add(1)
+	ns.operationMu.Unlock()
+
+	operationCtx, cancel := ns.contextWithLifecycle(ctx)
+	return operationCtx, func() {
+		cancel()
+		ns.operationWG.Done()
+	}, nil
+}
+
+func (ns *NatsRPCClient) contextWithLifecycle(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	if ns.lifecycleCtx == nil {
+		return ctx, cancel
+	}
+	stopLifecycle := context.AfterFunc(ns.lifecycleCtx, cancel)
+	return ctx, func() {
+		stopLifecycle()
+		cancel()
+	}
+}
+
+func (ns *NatsRPCClient) publish(ctx context.Context, topic string, data []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !ns.running.Load() || ns.conn == nil {
+		return constants.ErrRPCClientNotInitialized
+	}
+	return ns.conn.Publish(topic, data)
+}
+
+func (ns *NatsRPCClient) publishRequest(ctx context.Context, topic, reply string, data []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !ns.running.Load() || ns.conn == nil {
+		return constants.ErrRPCClientNotInitialized
+	}
+	return ns.conn.PublishRequest(topic, reply, data)
 }
 
 func (ns *NatsRPCClient) getSubscribeChannel() string {

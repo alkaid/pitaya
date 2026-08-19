@@ -33,7 +33,6 @@ import (
 	"github.com/alkaid/pitaya/v2/co"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/conn/codec"
-	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/metrics"
 	"github.com/alkaid/pitaya/v2/protos"
@@ -49,6 +48,12 @@ import (
 var ErrAlreadySubscribed = errors.New("already subscribed")
 
 var errNatsRPCServerStopping = errors.New("nats rpc server is stopping")
+
+var (
+	errNilRPCResponse   = errors.New("pitaya server returned a nil RPC response")
+	errRPCHandlerPanic  = errors.New("pitaya server RPC handler panicked")
+	errRPCHandlerFailed = errors.New("RPC handler failed")
+)
 
 const (
 	// NATS defaults to a 4 KiB maximum protocol control line.
@@ -71,6 +76,7 @@ type NatsRPCServer struct {
 	connString             string
 	connectionTimeout      time.Duration
 	maxReconnectionRetries int
+	connectionOptions      []nats.Option
 	server                 *Server
 	conn                   *nats.Conn
 	terminalCallbackDone   <-chan struct{}
@@ -100,9 +106,12 @@ type NatsRPCServer struct {
 	reqTimeout             time.Duration
 	lifecycleCtx           context.Context
 	cancelLifecycle        context.CancelFunc
+	running                atomic.Bool
+	stopping               atomic.Bool
 	stopOnce               sync.Once
 	shutdownOnce           sync.Once
 	connectionShutdownOnce sync.Once
+	deliveryCloseOnce      sync.Once
 	handlerMu              sync.Mutex
 	handlerWG              sync.WaitGroup
 	handlersClosed         bool
@@ -129,6 +138,9 @@ func NewNatsRPCServer(
 	appDieChan chan bool,
 	sessionPool session.SessionPool,
 ) (*NatsRPCServer, error) {
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
 	lifecycleCtx, cancelLifecycle := context.WithCancel(context.Background())
 	ns := &NatsRPCServer{
 		server:               server,
@@ -156,21 +168,20 @@ func NewNatsRPCServer(
 }
 
 func (ns *NatsRPCServer) configure(config config.NatsRPCServerConfig) error {
+	connectionOptions, err := buildNATSConnectionOptions(
+		"pitaya.cluster.rpc.server.nats",
+		config.TLS,
+		config.Auth,
+	)
+	if err != nil {
+		return err
+	}
 	ns.service = config.Services
 	ns.connString = config.Connect
-	if ns.connString == "" {
-		return constants.ErrNoNatsConnectionString
-	}
 	ns.connectionTimeout = config.ConnectionTimeout
 	ns.maxReconnectionRetries = config.MaxReconnectionRetries
 	ns.messagesBufferSize = config.Buffer.Messages
-	if ns.messagesBufferSize == 0 {
-		return constants.ErrNatsMessagesBufferSizeZero
-	}
 	ns.pushBufferSize = config.Buffer.Push
-	if ns.pushBufferSize == 0 {
-		return constants.ErrNatsPushBufferSizeZero
-	}
 	ns.subChan = make(chan *nats.Msg, ns.messagesBufferSize)
 	ns.bindingsChan = make(chan *nats.Msg, ns.messagesBufferSize)
 	// the reason this channel is buffered is that we can achieve more performance by not
@@ -180,6 +191,7 @@ func (ns *NatsRPCServer) configure(config config.NatsRPCServerConfig) error {
 	ns.responses = make([]*protos.Response, ns.service)
 	ns.requests = make([]*protos.Request, ns.service)
 	ns.reqTimeout = config.RequestTimeout
+	ns.connectionOptions = connectionOptions
 	return nil
 }
 
@@ -289,11 +301,8 @@ func (ns *NatsRPCServer) handleMessages() {
 			}
 		}
 		close(ns.unhandledReqCh)
-		if recovered != nil {
-			logger.Zap.Error("nats rpc message pump panicked", zap.Any("panic", recovered))
-		}
 		if !normalStop {
-			logger.Zap.Error("nats rpc message pump exited unexpectedly")
+			util.LogRecoveredPanic(logger.Zap, "nats rpc message pump exited unexpectedly", recovered)
 			signalAppDie(ns.appDieChan)
 		}
 	})()
@@ -548,6 +557,14 @@ func (ns *NatsRPCServer) getUserKickChannel() chan *protos.KickMsg {
 }
 
 func (ns *NatsRPCServer) marshalResponse(res *protos.Response) ([]byte, error) {
+	if res == nil {
+		res = rpcHandlerFailureResponse()
+		payload, marshalErr := proto.Marshal(res)
+		if marshalErr != nil {
+			return nil, errors.Wrap(marshalErr, "marshal nil RPC response fallback")
+		}
+		return payload, errNilRPCResponse
+	}
 	p, err := proto.Marshal(res)
 	if err != nil {
 		res := &protos.Response{
@@ -560,6 +577,29 @@ func (ns *NatsRPCServer) marshalResponse(res *protos.Response) ([]byte, error) {
 		err = apierrors.FromStatus(res.Status)
 	}
 	return p, err
+}
+
+func (ns *NatsRPCServer) callPitayaServer(ctx context.Context, req *protos.Request) (res *protos.Response, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			util.LogRecoveredPanic(logger.Zap, "pitaya server RPC handler panicked", recovered)
+			res = rpcHandlerFailureResponse()
+			err = errRPCHandlerPanic
+		}
+	}()
+
+	res, err = ns.pitayaServer.Call(ctx, req)
+	if res == nil {
+		if err == nil {
+			err = errNilRPCResponse
+		}
+		res = rpcHandlerFailureResponse()
+	}
+	return res, err
+}
+
+func rpcHandlerFailureResponse() *protos.Response {
+	return &protos.Response{Status: &apierrors.FromError(errRPCHandlerFailed).Status}
 }
 
 func (ns *NatsRPCServer) processMessages(threadID int) {
@@ -587,7 +627,7 @@ func (ns *NatsRPCServer) processMessages(threadID int) {
 		logg := util.GetLoggerFromCtx(ctx)
 		logg.Debug("rpcsv processing msg")
 		submitErr := ns.submitRequestTask(ctx, req, func(ctx context.Context) {
-			resp, err := ns.pitayaServer.Call(ctx, req)
+			resp, err := ns.callPitayaServer(ctx, req)
 			if err != nil {
 				// pitayaServer.Call已有打印error,这里不再重复
 				logg.Info("rpc error calling pitayaServer", zap.String("cause", err.Error()))
@@ -715,12 +755,33 @@ func (ns *NatsRPCServer) processKick() {
 // Init inits nats rpc server
 func (ns *NatsRPCServer) Init() error {
 	logger.Log.Debugf("connecting to nats (server) with timeout of %s", ns.connectionTimeout)
-	conn, terminalCallbackDone, err := setupTrackedNatsConn(
-		ns.connString,
-		ns.appDieChan,
-		nil,
+	options := append([]nats.Option(nil), ns.connectionOptions...)
+	options = append(
+		options,
 		nats.MaxReconnects(ns.maxReconnectionRetries),
 		nats.Timeout(ns.connectionTimeout),
+	)
+	conn, terminalCallbackDone, err := setupTrackedNatsConnWithLifecycle(
+		ns.connString,
+		ns.appDieChan,
+		natsConnLifecycleCallbacks{
+			disconnected: func(error) {
+				ns.running.Store(false)
+			},
+			reconnected: func(*nats.Conn) {
+				if !ns.stopping.Load() {
+					ns.running.Store(true)
+				}
+			},
+			closed: func(*nats.Conn) {
+				ns.running.Store(false)
+				if !ns.stopping.Load() {
+					ns.stopHandlers()
+				}
+			},
+			closing: ns.stopping.Load,
+		},
+		options...,
 	)
 	if err != nil {
 		return err
@@ -730,6 +791,8 @@ func (ns *NatsRPCServer) Init() error {
 	ns.watchConnectionClose()
 	defer func() {
 		if err != nil {
+			ns.stopping.Store(true)
+			ns.running.Store(false)
 			ns.finishConnection(false)
 		}
 	}()
@@ -781,16 +844,19 @@ func (ns *NatsRPCServer) Init() error {
 
 	// Keep message delivery ordered here; requests fan out through the keyed
 	// session pools after this single dispatcher accepts them.
-	handlers := []func(){
-		func() { ns.processMessages(0) },
-		ns.processSessionBindings,
-		ns.handleMessages,
-		ns.processPushes,
-		ns.processKick,
+	handlers := []struct {
+		name string
+		run  func()
+	}{
+		{name: "requests", run: func() { ns.processMessages(0) }},
+		{name: "bindings", run: ns.processSessionBindings},
+		{name: "messages", run: ns.handleMessages},
+		{name: "pushes", run: ns.processPushes},
+		{name: "kicks", run: ns.processKick},
 	}
 	accepted := 0
 	for _, handler := range handlers {
-		if err = ns.startHandler(handler); err != nil {
+		if err = ns.startConsumer(handler.name, handler.run); err != nil {
 			// Once admitted, handleMessages owns the request-channel shutdown.
 			if accepted >= 3 {
 				ns.stopHandlers()
@@ -818,6 +884,7 @@ func (ns *NatsRPCServer) Init() error {
 	}
 
 	ns.sessionPool.OnSessionBind(ns.onSessionBind)
+	ns.running.Store(ns.conn.IsConnected() && !ns.stopping.Load())
 
 	return nil
 }
@@ -837,19 +904,29 @@ func (ns *NatsRPCServer) Shutdown() error {
 }
 
 func (ns *NatsRPCServer) stopHandlers() {
-	ns.handlerMu.Lock()
-	ns.handlersClosed = true
-	ns.stopOnce.Do(func() {
-		if ns.cancelLifecycle != nil {
-			ns.cancelLifecycle()
-		}
-		close(ns.stopChan)
-	})
-	ns.handlerMu.Unlock()
+	ns.stopping.Store(true)
+	ns.running.Store(false)
 
+	// Close request-task admission before publishing stopChan. Callers use the
+	// stop signal as the lifecycle barrier and must not be able to submit work
+	// after observing it.
 	ns.taskMu.Lock()
 	ns.tasksClosed = true
 	ns.taskMu.Unlock()
+
+	ns.handlerMu.Lock()
+	ns.handlersClosed = true
+	ns.stopOnce.Do(func() {
+		ns.cancelHandlerLifecycle()
+		close(ns.stopChan)
+	})
+	ns.handlerMu.Unlock()
+}
+
+func (ns *NatsRPCServer) cancelHandlerLifecycle() {
+	if ns.cancelLifecycle != nil {
+		ns.cancelLifecycle()
+	}
 }
 
 func (ns *NatsRPCServer) startHandler(handler func()) error {
@@ -867,6 +944,27 @@ func (ns *NatsRPCServer) startHandler(handler func()) error {
 		return err
 	}
 	return nil
+}
+
+func (ns *NatsRPCServer) startConsumer(name string, consumer func()) error {
+	return ns.startHandler(func() {
+		defer func() {
+			recovered := recover()
+			if ns.stopping.Load() {
+				return
+			}
+			ns.running.Store(false)
+			util.LogRecoveredPanic(
+				logger.Zap,
+				"nats rpc consumer exited unexpectedly",
+				recovered,
+				zap.String("consumer", name),
+			)
+			signalAppDie(ns.appDieChan)
+			ns.stopHandlers()
+		}()
+		consumer()
+	})
 }
 
 func (ns *NatsRPCServer) submitRequestTask(ctx context.Context, req *protos.Request, task func(context.Context)) error {
@@ -1098,20 +1196,42 @@ func (ns *NatsRPCServer) signalTransportDrain() {
 
 func (ns *NatsRPCServer) stopAndWait() {
 	ns.shutdownOnce.Do(func() {
+		ns.stopping.Store(true)
+		ns.running.Store(false)
 		subscriptions := ns.closeInboundSubscriptionAdmission()
 		graceful := ns.beginGracefulTransportDrain()
 		if graceful && ns.drainInboundSubscriptions(subscriptions) {
+			ns.closeUserDeliveryChannels()
 			ns.signalTransportDrain()
+			// Consumers keep the lifecycle context live while they finish every
+			// delivery accepted before subscription admission closed.
 			ns.handlerWG.Wait()
 			ns.stopHandlers()
 		} else {
 			ns.closeInboundCallbackAdmission()
 			ns.stopHandlers()
 			ns.waitInboundCallbacks()
+			ns.closeUserDeliveryChannels()
 			ns.handlerWG.Wait()
 		}
 		ns.taskWG.Wait()
 		ns.drainConnection()
+	})
+}
+
+// IsRunning reports whether the server's NATS connection and message pumps are ready.
+func (ns *NatsRPCServer) IsRunning() bool {
+	return ns.running.Load()
+}
+
+func (ns *NatsRPCServer) closeUserDeliveryChannels() {
+	ns.deliveryCloseOnce.Do(func() {
+		if ns.userPushCh != nil {
+			close(ns.userPushCh)
+		}
+		if ns.userKickCh != nil {
+			close(ns.userKickCh)
+		}
 	})
 }
 

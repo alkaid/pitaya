@@ -32,15 +32,47 @@ import (
 	"github.com/alkaid/goerrors/apierrors"
 	"github.com/alkaid/pitaya/v2/constants"
 	pcontext "github.com/alkaid/pitaya/v2/context"
+	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/metrics/mocks"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type sysMetricsLifecycleReporter struct {
 	calls     atomic.Int64
 	firstCall chan struct{}
+}
+
+type periodicSysMetricsReporter struct {
+	calls  atomic.Int64
+	cycles chan struct{}
+}
+
+func newPeriodicSysMetricsReporter() *periodicSysMetricsReporter {
+	return &periodicSysMetricsReporter{cycles: make(chan struct{}, 4)}
+}
+
+func (r *periodicSysMetricsReporter) ReportCount(string, map[string]string, float64) error {
+	return nil
+}
+
+func (r *periodicSysMetricsReporter) ReportSummary(string, map[string]string, float64) error {
+	return nil
+}
+
+func (r *periodicSysMetricsReporter) ReportHistogram(string, map[string]string, float64) error {
+	return nil
+}
+
+func (r *periodicSysMetricsReporter) ReportGauge(string, map[string]string, float64) error {
+	if r.calls.Add(1)%3 == 0 {
+		r.cycles <- struct{}{}
+	}
+	return nil
 }
 
 func newSysMetricsLifecycleReporter() *sysMetricsLifecycleReporter {
@@ -113,6 +145,67 @@ func TestReportSysMetricsContextCancellation(t *testing.T) {
 			t.Fatalf("reported %d gauges before cancellation, want 3", got)
 		}
 	})
+}
+
+func TestReportSysMetricsContextRejectsInactiveInputs(t *testing.T) {
+	reporter := newSysMetricsLifecycleReporter()
+	tests := []struct {
+		name      string
+		ctx       context.Context
+		reporters []Reporter
+		period    time.Duration
+	}{
+		{name: "nil context", reporters: []Reporter{reporter}, period: time.Second},
+		{name: "no reporters", ctx: context.Background(), period: time.Second},
+		{name: "zero period", ctx: context.Background(), reporters: []Reporter{reporter}},
+		{name: "negative period", ctx: context.Background(), reporters: []Reporter{reporter}, period: -time.Second},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			done := make(chan struct{})
+			go func() {
+				ReportSysMetricsContext(test.ctx, test.reporters, test.period)
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("ReportSysMetricsContext did not reject inactive input")
+			}
+		})
+	}
+	assert.Zero(t, reporter.calls.Load())
+}
+
+func TestReportSysMetricsContextRepeatsUntilCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	reporter := newPeriodicSysMetricsReporter()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ReportSysMetricsContext(ctx, []Reporter{reporter}, time.Millisecond)
+	}()
+
+	for range 3 {
+		select {
+		case <-reporter.cycles:
+		case <-time.After(time.Second):
+			cancel()
+			t.Fatal("system metrics did not complete a reporting cycle")
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("system metrics did not stop after cancellation")
+	}
+	assert.GreaterOrEqual(t, reporter.calls.Load(), int64(9))
+}
+
+func TestReportSysMetricsWrapperRejectsEmptyReporterList(t *testing.T) {
+	assert.NotPanics(t, func() { ReportSysMetrics(nil, time.Second) })
 }
 
 func TestReportTimingFromCtx(t *testing.T) {
@@ -260,4 +353,110 @@ func TestReportMessageProcessDelayFromCtx(t *testing.T) {
 
 		ReportMessageProcessDelayFromCtx(ctx, []Reporter{mockMetricsReporter}, expectedType)
 	})
+}
+
+func TestContextMetricHelpersIgnoreMalformedContext(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	reporter := mocks.NewMockReporter(ctrl)
+
+	assert.NotPanics(t, func() {
+		ReportTimingFromCtx(nil, []Reporter{reporter}, "request", nil)
+		ReportTimingFromCtx(context.Background(), []Reporter{reporter}, "request", nil)
+		ReportMessageProcessDelayFromCtx(nil, []Reporter{reporter}, "request")
+		ReportMessageProcessDelayFromCtx(context.Background(), []Reporter{reporter}, "request")
+
+		ctx := pcontext.AddToPropagateCtx(context.Background(), constants.StartTimeKey, "not-an-int64")
+		ctx = pcontext.AddToPropagateCtx(ctx, constants.RouteKey, 42)
+		ReportTimingFromCtx(ctx, []Reporter{reporter}, "request", nil)
+		ReportMessageProcessDelayFromCtx(ctx, []Reporter{reporter}, "request")
+	})
+}
+
+func TestReportPoolGoDeadlinesUsesFallbackForMissingRoute(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	reporter := mocks.NewMockReporter(ctrl)
+	reporter.EXPECT().ReportCount(PoolGoDeadlines, map[string]string{
+		"route": "nil", "second": "3", "pool": "workers",
+	}, float64(1))
+
+	ReportPoolGoDeadlines(nil, "workers", 3, []Reporter{reporter})
+	ReportPoolGoDeadlines(context.Background(), "workers", 3, []Reporter{reporter})
+}
+
+func TestTagsFromContextConvertsJSONCompatibleMaps(t *testing.T) {
+	ctx := pcontext.AddToPropagateCtx(context.Background(), constants.MetricTagsKey, map[string]any{
+		"region": "eu", "tenant": "blue",
+	})
+	assert.Equal(t, map[string]string{"region": "eu", "tenant": "blue"}, tagsFromContext(ctx))
+
+	ctx = pcontext.AddToPropagateCtx(context.Background(), constants.MetricTagsKey, map[string]any{
+		"region": "eu", "attempt": 2,
+	})
+	assert.Empty(t, tagsFromContext(ctx))
+}
+
+func TestGetTagsKeepsFrameworkDimensionsAuthoritative(t *testing.T) {
+	ctx := pcontext.AddToPropagateCtx(context.Background(), constants.MetricTagsKey, map[string]string{
+		"route":  "forged.route",
+		"status": "forged",
+		"region": "eu",
+	})
+
+	tags := getTags(ctx, map[string]string{"route": "match.join", "status": "ok"})
+
+	assert.Equal(t, map[string]string{
+		"route":  "match.join",
+		"status": "ok",
+		"region": "eu",
+	}, tags)
+}
+
+func TestMetricHelpersLogReporterErrors(t *testing.T) {
+	core, observed := observer.New(zapcore.ErrorLevel)
+	previousLogger := logger.Zap
+	logger.Zap = zap.New(core)
+	t.Cleanup(func() { logger.Zap = previousLogger })
+
+	reporter := errorReporter{err: errors.New("backend unavailable")}
+	ctx := pcontext.AddToPropagateCtx(context.Background(), constants.StartTimeKey, time.Now().UnixNano())
+	ctx = pcontext.AddToPropagateCtx(ctx, constants.RouteKey, "match.join")
+
+	ReportTimingFromCtx(ctx, []Reporter{reporter}, "request", nil)
+	ReportPoolGoDeadlines(ctx, "default", 1, []Reporter{reporter})
+	ReportMessageProcessDelayFromCtx(ctx, []Reporter{reporter}, "request")
+	ReportNumberOfConnectedClients([]Reporter{reporter}, 1)
+	reportSysMetrics([]Reporter{reporter})
+	ReportExceededRateLimiting([]Reporter{reporter})
+
+	entries := observed.FilterMessage("metrics reporter failed").All()
+	assert.Len(t, entries, 8)
+	for _, entry := range entries {
+		assert.Equal(t, "backend unavailable", entry.ContextMap()["error"])
+	}
+}
+
+func TestMetricHelpersHandleNilReporter(t *testing.T) {
+	core, observed := observer.New(zapcore.ErrorLevel)
+	previousLogger := logger.Zap
+	logger.Zap = zap.New(core)
+	t.Cleanup(func() { logger.Zap = previousLogger })
+
+	ctx := pcontext.AddToPropagateCtx(context.Background(), constants.StartTimeKey, time.Now().UnixNano())
+	ctx = pcontext.AddToPropagateCtx(ctx, constants.RouteKey, "match.join")
+	reporters := []Reporter{nil}
+
+	assert.NotPanics(t, func() {
+		ReportTimingFromCtx(ctx, reporters, "request", nil)
+		ReportPoolGoDeadlines(ctx, "default", 1, reporters)
+		ReportMessageProcessDelayFromCtx(ctx, reporters, "request")
+		ReportNumberOfConnectedClients(reporters, 1)
+		reportSysMetrics(reporters)
+		ReportExceededRateLimiting(reporters)
+	})
+
+	entries := observed.FilterMessage("metrics reporter failed").All()
+	assert.Len(t, entries, 8)
+	for _, entry := range entries {
+		assert.Equal(t, errNilMetricsReporter.Error(), entry.ContextMap()["error"])
+	}
 }

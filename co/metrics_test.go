@@ -2,6 +2,7 @@ package co
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"testing"
 
@@ -9,6 +10,8 @@ import (
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/metrics"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest/observer"
@@ -24,6 +27,17 @@ type recordingPoolReporter struct {
 	counts []recordedPoolMetric
 	gauges []recordedPoolMetric
 }
+
+type failingPoolReporter struct {
+	err error
+}
+
+func (r *failingPoolReporter) ReportCount(string, map[string]string, float64) error { return r.err }
+func (r *failingPoolReporter) ReportGauge(string, map[string]string, float64) error { return r.err }
+func (r *failingPoolReporter) ReportHistogram(string, map[string]string, float64) error {
+	return r.err
+}
+func (r *failingPoolReporter) ReportSummary(string, map[string]string, float64) error { return r.err }
 
 func (r *recordingPoolReporter) ReportCount(name string, tags map[string]string, value float64) error {
 	r.counts = append(r.counts, recordedPoolMetric{name: name, tags: maps.Clone(tags), value: value})
@@ -186,6 +200,30 @@ func TestStatefulPoolLogsEscapeErrors(t *testing.T) {
 	}
 	if reason := entries[1].ContextMap()["reason"]; reason != poolEscapeScopeGlobal {
 		t.Fatalf("unexpected budget exhaustion reason: %v", reason)
+	}
+}
+
+func TestStatefulPoolLogsMetricReporterErrors(t *testing.T) {
+	core, observed := observer.New(zapcore.ErrorLevel)
+	previousLogger := logger.Zap
+	logger.Zap = zap.New(core)
+	t.Cleanup(func() { logger.Zap = previousLogger })
+
+	reportErr := errors.New("report failed")
+	pool := &StatefulPool{
+		config:    config.GoPool{Name: "metrics-errors"},
+		reporters: []metrics.Reporter{&failingPoolReporter{err: reportErr}, nil},
+	}
+	pool.reportEscapeEvent(ants.PoolWithIDEscapeEvent{})
+	pool.reportGauge(metrics.PoolWorkers, map[string]string{"pool": pool.Name()}, 1)
+
+	entries := observed.FilterMessage("stateful pool metric reporter failed").All()
+	require.Len(t, entries, 4)
+	for _, entry := range entries {
+		fields := entry.ContextMap()
+		assert.Equal(t, "metrics-errors", fields["pool"])
+		assert.NotEmpty(t, fields["metric"])
+		assert.NotEmpty(t, fields["error"])
 	}
 }
 

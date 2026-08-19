@@ -62,6 +62,9 @@ func NewGRPCClient(
 	bindingStorage interfaces.BindingStorage,
 	infoRetriever InfoRetriever,
 ) (*GRPCClient, error) {
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
 	gs := &GRPCClient{
 		bindingStorage:   bindingStorage,
 		infoRetriever:    infoRetriever,
@@ -111,6 +114,10 @@ func (gs *GRPCClient) Call(
 	server *Server,
 ) (*protos.Response, error) {
 	var err error
+	ctx, err = withTargetOwnerFencingMetadata(ctx, server)
+	if err != nil {
+		return nil, err
+	}
 	c, ok := gs.clientMap.Load(server.ID)
 	if !ok {
 		return nil, constants.ErrNoConnectionToServer

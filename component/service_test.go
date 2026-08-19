@@ -37,21 +37,30 @@ type ExportedTypeWithNoHandlerAndNoRemote struct {
 }
 
 var tables = []struct {
-	name     string
-	comp     Component
-	err      error
-	handlers []string
-	remotes  []string
+	name       string
+	comp       Component
+	handlerErr error
+	remoteErr  error
+	handlers   []string
+	remotes    []string
 }{
 	{
 		"valid",
 		&TestType{},
 		nil,
+		nil,
 		[]string{"ExportedHandlerWithOnlySession", "ExportedHandlerWithSessionAndPointerWithPointerOut", "ExportedHandlerWithSessionAndPointerWithRawOut", "ExportedHandlerWithSessionAndRawWithNoOuts"},
 		[]string{"ExportedRemotePointerOut", "ExportedRemoteRawOut"},
 	},
-	{"invalid", &unexportedTestType{}, errors.New("type unexportedTestType is not exported"), nil, nil},
-	{"invalid", &ExportedTypeWithNoHandlerAndNoRemote{}, errors.New("type ExportedTypeWithNoHandlerAndNoRemote has no exported methods of handler type"), nil, nil},
+	{"invalid", &unexportedTestType{}, errors.New("type unexportedTestType is not exported"), errors.New("type unexportedTestType is not exported"), nil, nil},
+	{
+		"invalid",
+		&ExportedTypeWithNoHandlerAndNoRemote{},
+		errors.New("type ExportedTypeWithNoHandlerAndNoRemote has no exported methods of handler type"),
+		errors.New("type ExportedTypeWithNoHandlerAndNoRemote has no exported methods of remote type"),
+		nil,
+		nil,
+	},
 }
 
 func TestNewService(t *testing.T) {
@@ -75,8 +84,8 @@ func TestExtractHandler(t *testing.T) {
 		t.Run(table.name, func(t *testing.T) {
 			svc := NewService(table.comp, []Option{})
 			err := svc.ExtractHandler()
-			if table.err != nil {
-				assert.EqualError(t, table.err, err.Error())
+			if table.handlerErr != nil {
+				assert.EqualError(t, table.handlerErr, err.Error())
 			} else {
 				assert.NoError(t, err)
 				for _, h := range table.handlers {
@@ -91,13 +100,12 @@ func TestExtractHandler(t *testing.T) {
 }
 
 func TestExtractRemote(t *testing.T) {
-	tables[2].err = errors.New("type ExportedTypeWithNoHandlerAndNoRemote has no exported methods of remote type")
 	for _, table := range tables {
 		t.Run(table.name, func(t *testing.T) {
 			svc := NewService(table.comp, []Option{})
 			err := svc.ExtractRemote()
-			if table.err != nil {
-				assert.EqualError(t, table.err, err.Error())
+			if table.remoteErr != nil {
+				assert.EqualError(t, table.remoteErr, err.Error())
 			} else {
 				assert.NoError(t, err)
 				for _, r := range table.remotes {

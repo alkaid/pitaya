@@ -34,7 +34,7 @@ import (
 // The duration d must be greater than zero; if not, NewTimer will panic.
 // Stop the timer to release associated resources.
 func NewTimer(interval time.Duration, fn timer.Func) *timer.Timer {
-	return NewCountTimer(interval, timer.LoopForever, fn)
+	return NewCountTimerWithPolicy(interval, timer.LoopForever, fn, timer.ExecutionSerial)
 }
 
 // NewCountTimer returns a new Timer containing a function that will be called
@@ -43,6 +43,18 @@ func NewTimer(interval time.Duration, fn timer.Func) *timer.Timer {
 // The duration d must be greater than zero; if not, NewCountTimer will panic.
 // Stop the timer to release associated resources.
 func NewCountTimer(interval time.Duration, count int, fn timer.Func) *timer.Timer {
+	return NewCountTimerWithPolicy(interval, count, fn, timer.ExecutionSerial)
+}
+
+// NewTimerWithPolicy returns a timer with an explicit callback overrun policy.
+func NewTimerWithPolicy(interval time.Duration, fn timer.Func, policy timer.ExecutionPolicy) *timer.Timer {
+	return NewCountTimerWithPolicy(interval, timer.LoopForever, fn, policy)
+}
+
+// NewCountTimerWithPolicy returns a counted timer with an explicit callback
+// overrun policy. Serial is the compatibility default used by NewTimer and
+// NewCountTimer; Async permits overlap; SkipIfRunning drops overlapping runs.
+func NewCountTimerWithPolicy(interval time.Duration, count int, fn timer.Func, policy timer.ExecutionPolicy) *timer.Timer {
 	if fn == nil {
 		panic("pitaya/timer: nil timer function")
 	}
@@ -50,10 +62,7 @@ func NewCountTimer(interval time.Duration, count int, fn timer.Func) *timer.Time
 		panic("non-positive interval for NewTimer")
 	}
 
-	t := timer.NewTimer(fn, interval, count)
-	// add to manager
-	timer.Manager.ChCreatedTimer <- t
-	return t
+	return timer.NewTimerWithPolicy(fn, interval, count, policy)
 }
 
 // NewAfterTimer returns a new Timer containing a function that will be called
@@ -88,9 +97,9 @@ func SetTimerPrecision(precision time.Duration) {
 	timer.Precision = precision
 }
 
-// SetTimerBacklog set the timer created/closing channel backlog, A small backlog
-// may cause the logic to be blocked when call NewTimer/NewCountTimer/timer.Stop
-// in main logic gorontine.
+// SetTimerBacklog sets the process-wide timer create/close queue capacity. It
+// must be called before the timer manager is run or any process-wide timer API
+// is used; changing it later panics.
 func SetTimerBacklog(c int) {
 	timer.SetTimerBacklog(c)
 }

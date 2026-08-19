@@ -12,9 +12,27 @@ import (
 	"github.com/alkaid/pitaya/v2/metrics/models"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/stretchr/testify/require"
 )
 
 var errPrometheusRegistration = errors.New("injected prometheus registration failure")
+
+type panicFormattingMetricValue struct{}
+
+func (panicFormattingMetricValue) Error() string  { panic("metric panic Error called") }
+func (panicFormattingMetricValue) String() string { panic("metric panic String called") }
+
+func TestRecoverPrometheusReportDoesNotFormatRecoveredValue(t *testing.T) {
+	var reportErr error
+	require.NotPanics(t, func() {
+		func() {
+			defer recoverPrometheusReport("unsafe", prometheusCounter, &reportErr)
+			panic(panicFormattingMetricValue{})
+		}()
+	})
+	require.Error(t, reportErr)
+	require.Contains(t, reportErr.Error(), "metrics.panicFormattingMetricValue")
+}
 
 type failingPrometheusRegisterer struct {
 	registry      *prometheus.Registry
@@ -764,6 +782,201 @@ func TestPrometheusReporterReturnsUnknownForUnconfiguredResponseTimeHistogram(t 
 	}, 123)
 	if !errors.Is(err, constants.ErrMetricNotKnown) {
 		t.Fatalf("response-time histogram error = %v, want %v", err, constants.ErrMetricNotKnown)
+	}
+}
+
+func TestPrometheusReporterReturnsUnknownForEveryMetricKind(t *testing.T) {
+	reporter := &PrometheusReporter{
+		countReportersMap:     map[string]*prometheus.CounterVec{},
+		summaryReportersMap:   map[string]*prometheus.SummaryVec{},
+		histogramReportersMap: map[string]*prometheus.HistogramVec{},
+		gaugeReportersMap:     map[string]*prometheus.GaugeVec{},
+	}
+	tests := []struct {
+		name   string
+		report func() error
+	}{
+		{name: "counter", report: func() error { return reporter.ReportCount("unknown", nil, 1) }},
+		{name: "summary", report: func() error { return reporter.ReportSummary("unknown", nil, 1) }},
+		{name: "histogram", report: func() error { return reporter.ReportHistogram("unknown", nil, 1) }},
+		{name: "gauge", report: func() error { return reporter.ReportGauge("unknown", nil, 1) }},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.report(); !errors.Is(err, constants.ErrMetricNotKnown) {
+				t.Fatalf("report error = %v, want %v", err, constants.ErrMetricNotKnown)
+			}
+		})
+	}
+}
+
+func TestPrometheusReporterRejectsUnexpectedLabelsWithoutPanicking(t *testing.T) {
+	reporter, err := newPrometheusReporter(
+		"frontend",
+		emptyMetricsConfig(),
+		&models.CustomMetricsSpec{Histograms: []*models.Histogram{{
+			Subsystem: "custom",
+			Name:      "latency",
+			Help:      "custom latency",
+			Labels:    []string{"kind"},
+		}}},
+		prometheus.NewRegistry(),
+	)
+	if err != nil {
+		t.Fatalf("create prometheus reporter: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		report func() error
+	}{
+		{
+			name: "summary",
+			report: func() error {
+				return reporter.ReportSummary(ResponseTime, map[string]string{
+					"route": "match.join", "status": "ok", "type": "request", "code": "0", "typo": "value",
+				}, 1)
+			},
+		},
+		{
+			name: "histogram",
+			report: func() error {
+				return reporter.ReportHistogram("latency", map[string]string{"kind": "rpc", "typo": "value"}, 1)
+			},
+		},
+		{
+			name: "counter",
+			report: func() error {
+				return reporter.ReportCount(PoolGoDeadlines, map[string]string{
+					"route": "match.join", "pool": "default", "second": "1", "typo": "value",
+				}, 1)
+			},
+		},
+		{
+			name: "gauge",
+			report: func() error {
+				return reporter.ReportGauge(ConnectedClients, map[string]string{"typo": "value"}, 1)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var reportErr error
+			if func() (panicked bool) {
+				defer func() { panicked = recover() != nil }()
+				reportErr = test.report()
+				return false
+			}() {
+				t.Fatal("reporting unexpected labels panicked")
+			}
+			if reportErr == nil {
+				t.Fatal("reporting unexpected labels returned nil error")
+			}
+		})
+	}
+}
+
+func TestPrometheusReporterAddsDefaultLabelsWithoutMutatingInput(t *testing.T) {
+	cfg := emptyMetricsConfig()
+	cfg.AdditionalLabels = map[string]string{"region": "unknown"}
+	reporter, err := newPrometheusReporter("frontend", cfg, &models.CustomMetricsSpec{}, prometheus.NewRegistry())
+	if err != nil {
+		t.Fatalf("create prometheus reporter: %v", err)
+	}
+
+	labels := map[string]string{}
+	if err := reporter.ReportGauge(ConnectedClients, labels, 1); err != nil {
+		t.Fatalf("report gauge with default label: %v", err)
+	}
+	if len(labels) != 0 {
+		t.Fatalf("reporting mutated caller labels: %#v", labels)
+	}
+}
+
+func TestPrometheusReporterReturnsReservedLabelConfigurationErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		spec *models.CustomMetricsSpec
+	}{
+		{
+			name: "summary quantile label",
+			spec: &models.CustomMetricsSpec{Summaries: []*models.Summary{{
+				Subsystem: "custom", Name: "latency", Help: "latency", Labels: []string{"quantile"},
+			}}},
+		},
+		{
+			name: "additional quantile label",
+			spec: &models.CustomMetricsSpec{},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := emptyMetricsConfig()
+			if test.name == "additional quantile label" {
+				cfg.AdditionalLabels = map[string]string{"quantile": "unknown"}
+			}
+			var reporter *PrometheusReporter
+			var err error
+			panicked := false
+			func() {
+				defer func() { panicked = recover() != nil }()
+				reporter, err = newPrometheusReporter("frontend", cfg, test.spec, prometheus.NewRegistry())
+			}()
+			if panicked {
+				t.Fatal("reserved prometheus label panicked")
+			}
+			if err == nil || reporter != nil {
+				t.Fatalf("reporter, error = %v, %v; want nil, non-nil", reporter, err)
+			}
+		})
+	}
+}
+
+func TestPrometheusReporterConvertsLazyHistogramPanicsToErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		labels    []string
+		buckets   []float64
+		reportMap map[string]string
+	}{
+		{name: "reserved le label", labels: []string{"le"}, reportMap: map[string]string{"le": "1"}},
+		{name: "unordered buckets", buckets: []float64{2, 1}, reportMap: map[string]string{}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reporter, err := newPrometheusReporter(
+				"frontend",
+				emptyMetricsConfig(),
+				&models.CustomMetricsSpec{Histograms: []*models.Histogram{{
+					Subsystem: "custom",
+					Name:      "latency",
+					Help:      "latency",
+					Labels:    test.labels,
+					Buckets:   test.buckets,
+				}}},
+				prometheus.NewRegistry(),
+			)
+			if err != nil {
+				t.Fatalf("create prometheus reporter: %v", err)
+			}
+
+			var reportErr error
+			panicked := false
+			func() {
+				defer func() { panicked = recover() != nil }()
+				reportErr = reporter.ReportHistogram("latency", test.reportMap, 1)
+			}()
+			if panicked {
+				t.Fatal("invalid histogram configuration panicked while reporting")
+			}
+			if reportErr == nil {
+				t.Fatal("invalid histogram configuration returned nil error")
+			}
+		})
 	}
 }
 

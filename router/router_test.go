@@ -9,8 +9,10 @@ import (
 	"github.com/alkaid/pitaya/v2/cluster"
 	"github.com/alkaid/pitaya/v2/cluster/mocks"
 	"github.com/alkaid/pitaya/v2/conn/message"
+	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/route"
+	sessionmocks "github.com/alkaid/pitaya/v2/session/mocks"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 )
@@ -68,6 +70,48 @@ func TestDefaultRoute(t *testing.T) {
 	retServer, err := router.defaultRoute(serverType, servers, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, server, retServer)
+}
+
+func TestDefaultRouteDoesNotRandomlyFallbackAfterConsistentHashFailure(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	discovery := mocks.NewMockServiceDiscovery(ctrl)
+	sess := sessionmocks.NewMockSession(ctrl)
+	target := cluster.NewServer("stateful-1", "stateful", false)
+	hashErr := errors.New("hash ring unavailable")
+
+	sess.EXPECT().UID().Return("uid-1").AnyTimes()
+	sess.EXPECT().GetFrontendID().Return("").AnyTimes()
+	sess.EXPECT().GetFrontendSessionID().Return(int64(0)).AnyTimes()
+	discovery.EXPECT().GetConsistentHashNode("stateful", "uid-1").Return("", hashErr)
+
+	r := New()
+	r.SetServiceDiscovery(discovery)
+	got, err := r.defaultRoute("stateful", map[string]*cluster.Server{target.ID: target}, sess)
+	assert.Nil(t, got)
+	assert.ErrorIs(t, err, hashErr)
+}
+
+func TestDefaultRouteRejectsStatefulSessionWithoutStableKey(t *testing.T) {
+	t.Parallel()
+	ctrl := gomock.NewController(t)
+	sess := sessionmocks.NewMockSession(ctrl)
+	target := cluster.NewServer("stateful-1", "stateful", false)
+
+	sess.EXPECT().UID().Return("").AnyTimes()
+	sess.EXPECT().GetFrontendID().Return("").AnyTimes()
+	sess.EXPECT().GetFrontendSessionID().Return(int64(0)).AnyTimes()
+
+	got, err := New().defaultRoute("stateful", map[string]*cluster.Server{target.ID: target}, sess)
+	assert.Nil(t, got)
+	assert.ErrorIs(t, err, constants.ErrStatefulRouteKeyNotFound)
+}
+
+func TestDefaultRouteRejectsEmptyServerSet(t *testing.T) {
+	t.Parallel()
+	got, err := New().defaultRoute("empty", nil, nil)
+	assert.Nil(t, got)
+	assert.ErrorIs(t, err, constants.ErrNoServersAvailableOfType)
 }
 
 func TestRoute(t *testing.T) {

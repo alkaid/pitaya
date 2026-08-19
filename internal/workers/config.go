@@ -16,6 +16,7 @@ const (
 
 type Options struct {
 	Address      string
+	Username     string
 	Password     string
 	Database     string
 	ProcessID    string
@@ -73,6 +74,12 @@ func Configure(options Options) {
 
 func GetConnectionPool(options Options) *redis.Pool {
 	dialOptions := append([]redis.DialOption(nil), options.DialOptions...)
+	if options.Username != "" {
+		dialOptions = append(dialOptions, redis.DialUsername(options.Username))
+	}
+	if options.Password != "" {
+		dialOptions = append(dialOptions, redis.DialPassword(options.Password))
+	}
 	dialOptions = append(dialOptions,
 		redis.DialConnectTimeout(redisConnectTimeout),
 		redis.DialReadTimeout(redisReadTimeout),
@@ -82,14 +89,6 @@ func GetConnectionPool(options Options) *redis.Pool {
 		c, err := redis.DialContext(ctx, "tcp", options.Address, dialOptions...)
 		if err != nil {
 			return nil, err
-		}
-		if options.Password != "" {
-			if _, err := redis.DoContext(c, ctx, "AUTH", options.Password); err != nil {
-				if errClose := c.Close(); errClose != nil {
-					return nil, fmt.Errorf("%w. failed to close connection: %s", err, errClose.Error())
-				}
-				return nil, err
-			}
 		}
 		if options.Database != "" {
 			if _, err := redis.DoContext(c, ctx, "SELECT", options.Database); err != nil {

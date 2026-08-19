@@ -59,6 +59,11 @@ Prerequisites:
 - Linux with GNU coreutils `timeout` for NATS E2E and the full `make verify`
   process-tree ownership contract.
 
+The supported runtime and verification platform is Linux/amd64. CI also
+cross-compiles the root, CLI, and xk6 modules with `CGO_ENABLED=0` for
+Darwin/amd64 and Windows/amd64. Those two lanes are compile-only compatibility
+checks, not runtime, external-service, or operational support guarantees.
+
 ```sh
 git clone https://github.com/alkaid/pitaya.git
 cd pitaya
@@ -85,7 +90,7 @@ make verify-fast          # source, docs policy, unit, vet, and consumer checks
 make verify               # sequential engineering-health aggregate
 make docs-lint            # fork identity, link policy, and ledger checks
 make docs                 # warning-free Sphinx build
-make test-integration     # isolated Redis session-storage round trip
+make test-integration     # isolated Redis session and RPC-idempotency recovery paths
 make test-e2e-nats        # isolated Docker-backed NATS/etcd/Redis path
 make test-distribution    # versioned CLI/xk6/module/Docker smoke
 make benchmark-regression # isolated NATS network benchmark report

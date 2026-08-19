@@ -111,5 +111,6 @@ func (a *Cluster) SendRequest(ctx context.Context, serverID, reqRoute string, v 
 	if err != nil {
 		return nil, err
 	}
+	ctx = server.WithOwnerFencingMetadata(ctx)
 	return a.rpcClient.Call(ctx, protos.RPCType_User, r, nil, msg, server)
 }

@@ -347,15 +347,25 @@ func TestSetDictionary(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
 	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
 
-	dict := map[string]uint16{"someroute": 12}
+	sequence := appDictionarySequence.Add(1)
+	route := fmt.Sprintf("someroute-%d", sequence)
+	code := uint16(50000 + sequence)
+	dict := map[string]uint16{route: code}
+	expected := message.GetDictionary()
+	if expected == nil {
+		expected = make(map[string]uint16)
+	}
+	expected[route] = code
 	err := app.SetDictionary(dict)
 	assert.NoError(t, err)
-	assert.Equal(t, dict, message.GetDictionary())
+	assert.Equal(t, expected, message.GetDictionary())
 
 	app.configurationLocked.Store(true)
 	err = app.SetDictionary(dict)
 	assert.EqualError(t, constants.ErrChangeDictionaryWhileRunning, err.Error())
 }
+
+var appDictionarySequence atomic.Uint32
 
 func TestAddRoute(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
@@ -712,7 +722,7 @@ func TestStartAndListenStandalone(t *testing.T) {
 
 func TestAppInitializesComponentsAndModulesBeforeStartingAcceptors(t *testing.T) {
 	cfg := config.NewDefaultPitayaConfig()
-	cfg.Concurrency.Handler.Dispatch = 0
+	cfg.Concurrency.Handler.Dispatch = 1
 	component := &MyComp{}
 	module := &MyMod{name: "init-order"}
 	acc := newInitOrderAcceptor(func() error {
@@ -750,7 +760,7 @@ func TestAppInitializesComponentsAndModulesBeforeStartingAcceptors(t *testing.T)
 
 func TestAppWaitsForAllAcceptorsBeforeStartingConnectionReaders(t *testing.T) {
 	cfg := config.NewDefaultPitayaConfig()
-	cfg.Concurrency.Handler.Dispatch = 0
+	cfg.Concurrency.Handler.Dispatch = 1
 	first := newReadyGateAcceptor("first")
 	second := newReadyGateAcceptor("second")
 	builder := newAppTestBuilder(true, "readiness-order", Standalone, nil, *cfg)
@@ -823,7 +833,7 @@ func TestAppPublishesReadyMarkerOnlyAfterAcceptorsReady(t *testing.T) {
 	t.Cleanup(func() { logger.Zap = previousLogger })
 
 	cfg := config.NewDefaultPitayaConfig()
-	cfg.Concurrency.Handler.Dispatch = 0
+	cfg.Concurrency.Handler.Dispatch = 1
 	acc := newReadyGateAcceptor("ready-marker")
 	builder := newAppTestBuilder(true, "ready-marker", Standalone, nil, *cfg)
 	builder.AddAcceptor(acc)
@@ -1018,9 +1028,11 @@ func TestGetSessionFromCtx(t *testing.T) {
 }
 
 func TestAddMetricTagsToPropagateCtx(t *testing.T) {
-	ctx := AddMetricTagsToPropagateCtx(context.Background(), map[string]string{
+	tags := map[string]string{
 		"key": "value",
-	})
+	}
+	ctx := AddMetricTagsToPropagateCtx(context.Background(), tags)
+	tags["key"] = "mutated"
 	val := ctx.Value(constants.PropagateCtxKey)
 	assert.Equal(t, map[string]interface{}{
 		constants.MetricTagsKey: map[string]string{
@@ -1162,7 +1174,7 @@ func TestAppStatelessStartupFailsFast(t *testing.T) {
 	}
 
 	cfg := config.NewDefaultPitayaConfig()
-	cfg.Concurrency.Handler.Dispatch = 0
+	cfg.Concurrency.Handler.Dispatch = 1
 	acc := acceptor.NewTCPAcceptor("127.0.0.1:0")
 	builder := newAppTestBuilder(true, "testtype", Standalone, map[string]string{}, *cfg)
 	builder.AddAcceptor(acc)

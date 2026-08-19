@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/alkaid/pitaya/v2/constants"
@@ -248,10 +249,12 @@ func newDefaultGRPCServerConfig() *GRPCServerConfig {
 
 // NatsRPCClientConfig provides nats client configuration
 type NatsRPCClientConfig struct {
-	Connect                string        `mapstructure:"connect"`
-	MaxReconnectionRetries int           `mapstructure:"maxreconnectionretries"`
-	RequestTimeout         time.Duration `mapstructure:"requesttimeout"`
-	ConnectionTimeout      time.Duration `mapstructure:"connectiontimeout"`
+	Connect                string         `mapstructure:"connect"`
+	MaxReconnectionRetries int            `mapstructure:"maxreconnectionretries"`
+	RequestTimeout         time.Duration  `mapstructure:"requesttimeout"`
+	ConnectionTimeout      time.Duration  `mapstructure:"connectiontimeout"`
+	TLS                    TLSConfig      `mapstructure:"tls"`
+	Auth                   NatsAuthConfig `mapstructure:"auth"`
 }
 
 // newDefaultNatsRPCClientConfig provides default nats client configuration
@@ -266,12 +269,16 @@ func newDefaultNatsRPCClientConfig() *NatsRPCClientConfig {
 
 // NatsRPCServerConfig provides nats server configuration
 type NatsRPCServerConfig struct {
-	Connect                string `mapstructure:"connect"`
-	MaxReconnectionRetries int    `mapstructure:"maxreconnectionretries"`
+	Connect                string         `mapstructure:"connect"`
+	MaxReconnectionRetries int            `mapstructure:"maxreconnectionretries"`
+	TLS                    TLSConfig      `mapstructure:"tls"`
+	Auth                   NatsAuthConfig `mapstructure:"auth"`
 	Buffer                 struct {
 		Messages int `mapstructure:"messages"`
 		Push     int `mapstructure:"push"`
 	} `mapstructure:"buffer"`
+	// Services is retained for configuration compatibility and must be 1.
+	// Message ordering is established by one dispatcher before keyed execution.
 	Services          int           `mapstructure:"services"`
 	ConnectionTimeout time.Duration `mapstructure:"connectiontimeout"`
 	RequestTimeout    time.Duration
@@ -289,7 +296,7 @@ func newDefaultNatsRPCServerConfig() *NatsRPCServerConfig {
 			Messages: 75,
 			Push:     100,
 		},
-		Services:          30,
+		Services:          1,
 		ConnectionTimeout: time.Duration(2 * time.Second),
 		RequestTimeout:    time.Duration(5 * time.Second),
 	}
@@ -312,6 +319,7 @@ type EtcdServiceDiscoveryConfig struct {
 	Endpoints   []string      `mapstructure:"endpoints"`
 	User        string        `mapstructure:"user"`
 	Pass        string        `mapstructure:"pass"`
+	TLS         TLSConfig     `mapstructure:"tls"`
 	DialTimeout time.Duration `mapstructure:"dialtimeout"`
 	Prefix      string        `mapstructure:"prefix"`
 	Heartbeat   struct {
@@ -346,8 +354,9 @@ type RedisConfig struct {
 	Addrs        []string
 	Username     string
 	Password     string
-	PoolSize     int // 连接池最大socket连接数，默认为4倍CPU数， 4 * runtime.NumCPU
-	MinIdleConns int // 在启动阶段创建指定数量的Idle连接，并长期维持idle状态的连接数不少于指定数量；。
+	TLS          TLSConfig `mapstructure:"tls"`
+	PoolSize     int       // 连接池最大socket连接数，默认为4倍CPU数， 4 * runtime.NumCPU
+	MinIdleConns int       // 在启动阶段创建指定数量的Idle连接，并长期维持idle状态的连接数不少于指定数量；。
 
 	// 超时
 	DialTimeout  time.Duration // 连接建立超时时间，默认5秒。
@@ -373,7 +382,20 @@ func newDefaultRedisConfig() *RedisConfig {
 		Addrs: []string{"localhost:6379"},
 	}
 }
-func ToRedisNodeConfig(conf *RedisConfig) *redis.Options {
+
+// NewRedisNodeOptions converts a RedisConfig into node options and loads any
+// configured TLS material before a client is constructed.
+func NewRedisNodeOptions(conf *RedisConfig) (*redis.Options, error) {
+	if conf == nil {
+		return nil, fmt.Errorf("pitaya.storage.redis must be configured")
+	}
+	if len(conf.Addrs) == 0 {
+		return nil, fmt.Errorf("pitaya.storage.redis.addrs must contain at least one address")
+	}
+	clientTLS, err := LoadClientTLS("pitaya.storage.redis.tls", conf.TLS)
+	if err != nil {
+		return nil, err
+	}
 	opts := &redis.Options{
 		Addr:               conf.Addrs[0],
 		Dialer:             nil,
@@ -393,11 +415,31 @@ func ToRedisNodeConfig(conf *RedisConfig) *redis.Options {
 		PoolTimeout:        conf.PoolTimeout,
 		IdleTimeout:        conf.IdleTimeout,
 		IdleCheckFrequency: conf.IdleCheckFrequency,
-		TLSConfig:          nil,
+		TLSConfig:          clientTLS,
+	}
+	return opts, nil
+}
+
+// ToRedisNodeConfig is retained for source compatibility.
+// Deprecated: use NewRedisNodeOptions to handle invalid TLS configuration.
+func ToRedisNodeConfig(conf *RedisConfig) *redis.Options {
+	opts, err := NewRedisNodeOptions(conf)
+	if err != nil {
+		panic(err)
 	}
 	return opts
 }
-func ToRedisClusterOption(conf *RedisConfig) *redis.ClusterOptions {
+
+// NewRedisClusterOptions converts a RedisConfig into cluster options and loads
+// any configured TLS material before a client is constructed.
+func NewRedisClusterOptions(conf *RedisConfig) (*redis.ClusterOptions, error) {
+	if conf == nil {
+		return nil, fmt.Errorf("pitaya.storage.redis must be configured")
+	}
+	clientTLS, err := LoadClientTLS("pitaya.storage.redis.tls", conf.TLS)
+	if err != nil {
+		return nil, err
+	}
 	opts := &redis.ClusterOptions{
 		Addrs:              conf.Addrs,
 		NewClient:          nil,
@@ -423,11 +465,31 @@ func ToRedisClusterOption(conf *RedisConfig) *redis.ClusterOptions {
 		PoolTimeout:        conf.PoolTimeout,
 		IdleTimeout:        conf.IdleTimeout,
 		IdleCheckFrequency: conf.IdleCheckFrequency,
-		TLSConfig:          nil,
+		TLSConfig:          clientTLS,
+	}
+	return opts, nil
+}
+
+// ToRedisClusterOption is retained for source compatibility.
+// Deprecated: use NewRedisClusterOptions to handle invalid TLS configuration.
+func ToRedisClusterOption(conf *RedisConfig) *redis.ClusterOptions {
+	opts, err := NewRedisClusterOptions(conf)
+	if err != nil {
+		panic(err)
 	}
 	return opts
 }
-func ToRedisUniversalOptions(conf *RedisConfig) *redis.UniversalOptions {
+
+// NewRedisUniversalOptions converts a RedisConfig into universal options and
+// loads any configured TLS material before a client is constructed.
+func NewRedisUniversalOptions(conf *RedisConfig) (*redis.UniversalOptions, error) {
+	if conf == nil {
+		return nil, fmt.Errorf("pitaya.storage.redis must be configured")
+	}
+	clientTLS, err := LoadClientTLS("pitaya.storage.redis.tls", conf.TLS)
+	if err != nil {
+		return nil, err
+	}
 	opts := &redis.UniversalOptions{
 		Addrs:              conf.Addrs,
 		MaxRedirects:       0,
@@ -451,7 +513,17 @@ func ToRedisUniversalOptions(conf *RedisConfig) *redis.UniversalOptions {
 		PoolTimeout:        conf.PoolTimeout,
 		IdleTimeout:        conf.IdleTimeout,
 		IdleCheckFrequency: conf.IdleCheckFrequency,
-		TLSConfig:          nil,
+		TLSConfig:          clientTLS,
+	}
+	return opts, nil
+}
+
+// ToRedisUniversalOptions is retained for source compatibility.
+// Deprecated: use NewRedisUniversalOptions to handle invalid TLS configuration.
+func ToRedisUniversalOptions(conf *RedisConfig) *redis.UniversalOptions {
+	opts, err := NewRedisUniversalOptions(conf)
+	if err != nil {
+		panic(err)
 	}
 	return opts
 }
@@ -603,7 +675,8 @@ type ClusterConfig struct {
 }
 
 type ClusterRPCConfig struct {
-	FanoutConcurrency int `mapstructure:"fanout_concurrency"`
+	FanoutConcurrency int                  `mapstructure:"fanout_concurrency"`
+	Idempotency       RPCIdempotencyConfig `mapstructure:"idempotency"`
 	Client            struct {
 		Grpc GRPCClientConfig    `mapstructure:"grpc"`
 		Nats NatsRPCClientConfig `mapstructure:"nats"`
@@ -614,9 +687,35 @@ type ClusterRPCConfig struct {
 	} `mapstructure:"server"`
 }
 
+// RPCIdempotencyConfig controls the default Redis-backed command store used by
+// Cluster builders. Direct RemoteService construction retains the in-memory
+// fallback unless the caller injects a store.
+type RPCIdempotencyConfig struct {
+	Enabled           bool          `mapstructure:"enabled"`
+	KeyPrefix         string        `mapstructure:"keyprefix"`
+	ResultTTL         time.Duration `mapstructure:"resultttl"`
+	LeaseTTL          time.Duration `mapstructure:"leasettl"`
+	HeartbeatInterval time.Duration `mapstructure:"heartbeatinterval"`
+	PollInterval      time.Duration `mapstructure:"pollinterval"`
+	OperationTimeout  time.Duration `mapstructure:"operationtimeout"`
+}
+
+func newDefaultRPCIdempotencyConfig() *RPCIdempotencyConfig {
+	return &RPCIdempotencyConfig{
+		Enabled:           true,
+		KeyPrefix:         "pitaya:rpc:idempotency:",
+		ResultTTL:         15 * time.Minute,
+		LeaseTTL:          30 * time.Second,
+		HeartbeatInterval: 10 * time.Second,
+		PollInterval:      25 * time.Millisecond,
+		OperationTimeout:  3 * time.Second,
+	}
+}
+
 func newDefaultClusterRPCConfig() *ClusterRPCConfig {
 	return &ClusterRPCConfig{
 		FanoutConcurrency: constants.DefaultRPCFanoutConcurrency,
+		Idempotency:       *newDefaultRPCIdempotencyConfig(),
 		Client: struct {
 			Grpc GRPCClientConfig    `mapstructure:"grpc"`
 			Nats NatsRPCClientConfig `mapstructure:"nats"`
@@ -646,9 +745,11 @@ func newDefaultClusterSDConfig() *ClusterSDConfig {
 // WorkerConfig provides worker configuration
 type WorkerConfig struct {
 	Redis struct {
-		ServerURL string `mapstructure:"serverurl"`
-		Pool      string `mapstructure:"pool"`
-		Password  string `mapstructure:"password"`
+		ServerURL string    `mapstructure:"serverurl"`
+		Pool      string    `mapstructure:"pool"`
+		Username  string    `mapstructure:"username"`
+		Password  string    `mapstructure:"password"`
+		TLS       TLSConfig `mapstructure:"tls"`
 	} `mapstructure:"redis"`
 	Namespace   string      `mapstructure:"namespace"`
 	Concurrency int         `mapstructure:"concurrency"`
@@ -659,9 +760,11 @@ type WorkerConfig struct {
 func newDefaultWorkerConfig() *WorkerConfig {
 	return &WorkerConfig{
 		Redis: struct {
-			ServerURL string `mapstructure:"serverurl"`
-			Pool      string `mapstructure:"pool"`
-			Password  string `mapstructure:"password"`
+			ServerURL string    `mapstructure:"serverurl"`
+			Pool      string    `mapstructure:"pool"`
+			Username  string    `mapstructure:"username"`
+			Password  string    `mapstructure:"password"`
+			TLS       TLSConfig `mapstructure:"tls"`
 		}{
 			ServerURL: "localhost:6379",
 			Pool:      "10",
@@ -707,6 +810,9 @@ func newDefaultMemoryGroupConfig() *MemoryGroupConfig {
 type EtcdGroupServiceConfig struct {
 	DialTimeout        time.Duration `mapstructure:"dialtimeout"`
 	Endpoints          []string      `mapstructure:"endpoints"`
+	User               string        `mapstructure:"user"`
+	Pass               string        `mapstructure:"pass"`
+	TLS                TLSConfig     `mapstructure:"tls"`
 	Prefix             string        `mapstructure:"prefix"`
 	TransactionTimeout time.Duration `mapstructure:"transactiontimeout"`
 }
@@ -747,6 +853,9 @@ func newDefaultGroupsConfig() *GroupsConfig {
 type ETCDBindingConfig struct {
 	DialTimeout time.Duration `mapstructure:"dialtimeout"`
 	Endpoints   []string      `mapstructure:"endpoints"`
+	User        string        `mapstructure:"user"`
+	Pass        string        `mapstructure:"pass"`
+	TLS         TLSConfig     `mapstructure:"tls"`
 	Prefix      string        `mapstructure:"prefix"`
 	LeaseTTL    time.Duration `mapstructure:"leasettl"`
 }

@@ -17,6 +17,7 @@ import (
 	cluster "github.com/alkaid/pitaya/v2/cluster"
 	component "github.com/alkaid/pitaya/v2/component"
 	config "github.com/alkaid/pitaya/v2/config"
+	groups "github.com/alkaid/pitaya/v2/groups"
 	interfaces "github.com/alkaid/pitaya/v2/interfaces"
 	metrics "github.com/alkaid/pitaya/v2/metrics"
 	pipeline "github.com/alkaid/pitaya/v2/pipeline"
@@ -388,6 +389,21 @@ func (mr *MockPitayaMockRecorder) GroupBroadcast(ctx, frontendType, groupName, r
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GroupBroadcast", reflect.TypeOf((*MockPitaya)(nil).GroupBroadcast), ctx, frontendType, groupName, route, v)
 }
 
+// GroupBroadcastWithOptions mocks base method.
+func (m *MockPitaya) GroupBroadcastWithOptions(ctx context.Context, frontendType, groupName, route string, v any, options groups.BroadcastOptions) (groups.BroadcastResult, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GroupBroadcastWithOptions", ctx, frontendType, groupName, route, v, options)
+	ret0, _ := ret[0].(groups.BroadcastResult)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GroupBroadcastWithOptions indicates an expected call of GroupBroadcastWithOptions.
+func (mr *MockPitayaMockRecorder) GroupBroadcastWithOptions(ctx, frontendType, groupName, route, v, options any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GroupBroadcastWithOptions", reflect.TypeOf((*MockPitaya)(nil).GroupBroadcastWithOptions), ctx, frontendType, groupName, route, v, options)
+}
+
 // GroupContainsMember mocks base method.
 func (m *MockPitaya) GroupContainsMember(ctx context.Context, groupName, uid string) (bool, error) {
 	m.ctrl.T.Helper()
@@ -473,6 +489,21 @@ func (m *MockPitaya) GroupMembers(ctx context.Context, groupName string) ([]stri
 func (mr *MockPitayaMockRecorder) GroupMembers(ctx, groupName any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GroupMembers", reflect.TypeOf((*MockPitaya)(nil).GroupMembers), ctx, groupName)
+}
+
+// GroupMembersPage mocks base method.
+func (m *MockPitaya) GroupMembersPage(ctx context.Context, groupName string, options groups.MemberPageOptions) (groups.MemberPage, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GroupMembersPage", ctx, groupName, options)
+	ret0, _ := ret[0].(groups.MemberPage)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// GroupMembersPage indicates an expected call of GroupMembersPage.
+func (mr *MockPitayaMockRecorder) GroupMembersPage(ctx, groupName, options any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GroupMembersPage", reflect.TypeOf((*MockPitaya)(nil).GroupMembersPage), ctx, groupName, options)
 }
 
 // GroupRemoveAll mocks base method.

@@ -130,23 +130,8 @@ func (h *HandlerService) Dispatch(thread int) {
 }
 
 // DispatchContext dispatches timer work until the owning App lifecycle ends.
-func (h *HandlerService) DispatchContext(ctx context.Context, thread int) {
-	ticks := timer.GlobalTicker.C
-	for {
-		// Calls to remote servers block calls to local server
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticks: // execute cron task
-			timer.Cron()
-
-		case t := <-timer.Manager.ChCreatedTimer: // new Timers
-			timer.AddTimer(t)
-
-		case id := <-timer.Manager.ChClosingTimer: // closing Timers
-			timer.RemoveTimer(id)
-		}
-	}
+func (h *HandlerService) DispatchContext(ctx context.Context, _ int) {
+	timer.Manager.Run(ctx, timer.GlobalTicker.C)
 }
 
 // Register registers components

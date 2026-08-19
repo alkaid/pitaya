@@ -34,12 +34,14 @@ import (
 	messagemocks "github.com/alkaid/pitaya/v2/conn/message/mocks"
 	"github.com/alkaid/pitaya/v2/conn/packet"
 	"github.com/alkaid/pitaya/v2/constants"
+	pcontext "github.com/alkaid/pitaya/v2/context"
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/route"
 	serializemocks "github.com/alkaid/pitaya/v2/serialize/mocks"
 	"github.com/alkaid/pitaya/v2/session"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 )
 
@@ -357,4 +359,54 @@ func TestAgentRemoteSendRequest(t *testing.T) {
 			assert.Equal(t, table.resp, resp)
 		})
 	}
+}
+
+func TestAgentRemoteSendRequestAddsTargetOwnerFence(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockSD := newRemoteTestServiceDiscovery(ctrl)
+	mockRPCClient := clustermocks.NewMockRPCClient(ctrl)
+	target := cluster.NewServer("frontend-1", "connector", true)
+	target.SetOwnerEpoch(73)
+	mockSD.EXPECT().GetServer(target.ID).Return(target, nil)
+	mockRPCClient.EXPECT().Call(
+		gomock.Any(),
+		protos.RPCType_User,
+		gomock.Any(),
+		gomock.Nil(),
+		gomock.Any(),
+		target,
+	).DoAndReturn(func(
+		ctx context.Context,
+		_ protos.RPCType,
+		_ *route.Route,
+		_ session.Session,
+		_ *message.Message,
+		_ *cluster.Server,
+	) (*protos.Response, error) {
+		assert.Equal(t, target.ID, pcontext.GetFromPropagateCtx(ctx, constants.OwnerServerIDKey))
+		assert.Equal(t, "73", pcontext.GetFromPropagateCtx(ctx, constants.OwnerEpochKey))
+		return &protos.Response{}, nil
+	})
+
+	remote, err := NewRemote(
+		&protos.Session{},
+		"",
+		mockRPCClient,
+		nil,
+		nil,
+		mockSD,
+		target.ID,
+		nil,
+		session.NewSessionPool(),
+		protos.RPCType_User,
+	)
+	require.NoError(t, err)
+
+	_, err = remote.SendRequest(
+		context.Background(),
+		target.ID,
+		constants.SessionBindRoute,
+		[]byte("bind"),
+	)
+	require.NoError(t, err)
 }

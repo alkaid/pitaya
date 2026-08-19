@@ -21,18 +21,39 @@
 package pitaya
 
 import (
+	"context"
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/alkaid/pitaya/v2/acceptor"
 	clustermocks "github.com/alkaid/pitaya/v2/cluster/mocks"
 	"github.com/alkaid/pitaya/v2/config"
+	"github.com/alkaid/pitaya/v2/constants"
+	pcontext "github.com/alkaid/pitaya/v2/context"
+	"github.com/alkaid/pitaya/v2/protos"
+	"github.com/alkaid/pitaya/v2/service"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 )
+
+type builderIdempotencyStore struct {
+	calls int
+}
+
+func (s *builderIdempotencyStore) Execute(
+	_ context.Context,
+	_, _ string,
+	_ func(context.Context) (*protos.Response, error),
+) (*protos.Response, error) {
+	s.calls++
+	return &protos.Response{Data: []byte("durable")}, nil
+}
 
 func TestDefaultBuilderBuildsWithoutReloadConfig(t *testing.T) {
 	for _, table := range tables {
@@ -110,8 +131,77 @@ func TestBuilderPassesRPCFanoutConcurrency(t *testing.T) {
 	builder := NewDefaultBuilder(false, "cluster", Cluster, nil, *pitayaConfig)
 	app := builder.Build().(*App)
 
-	configuredConcurrency := reflect.ValueOf(app.remoteService).Elem().FieldByName("fanoutConcurrency").Int()
+	fanout := reflect.ValueOf(app.remoteService).Elem().FieldByName("fanout")
+	configuredConcurrency := fanout.Elem().FieldByName("concurrency").Int()
 	assert.Equal(t, int64(7), configuredConcurrency)
+}
+
+func TestBuilderPassesRPCIdempotencyStore(t *testing.T) {
+	pitayaConfig := config.NewDefaultPitayaConfig()
+	builder := NewDefaultBuilder(false, "cluster", Cluster, nil, *pitayaConfig)
+	store := &builderIdempotencyStore{}
+	builder.Config.Cluster.RPC.Idempotency.Enabled = false
+	builder.IdempotencyStore = store
+
+	app := builder.Build().(*App)
+	builder.Server.SetOwnerEpoch(1)
+	ctx := builder.Server.WithOwnerFencingMetadata(context.Background())
+	ctx = pcontext.AddToPropagateCtx(ctx, constants.IdempotencyKey, "builder-store-1")
+	response, err := app.remoteService.Call(ctx, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []byte("durable"), response.Data)
+	assert.Equal(t, 1, store.calls)
+}
+
+func TestBuilderConfiguresDefaultRedisRPCIdempotencyStore(t *testing.T) {
+	pitayaConfig := config.NewDefaultPitayaConfig()
+	builder := NewDefaultBuilder(false, "cluster", Cluster, nil, *pitayaConfig)
+
+	assert.Nil(t, builder.IdempotencyStore, "nil means Build should resolve the configured default store")
+	app := builder.Build().(*App)
+	configuredStore := reflect.ValueOf(app.remoteService).Elem().FieldByName("idempotencyStore")
+	require.False(t, configuredStore.IsNil())
+	assert.Equal(t, reflect.TypeOf(&service.RedisIdempotencyStore{}), configuredStore.Elem().Type())
+}
+
+func TestBuilderResolvesRPCIdempotencyConfigAtBuild(t *testing.T) {
+	t.Run("disable after construction", func(t *testing.T) {
+		pitayaConfig := config.NewDefaultPitayaConfig()
+		builder := NewDefaultBuilder(false, "cluster", Cluster, nil, *pitayaConfig)
+		builder.Config.Cluster.RPC.Idempotency.Enabled = false
+
+		app := builder.Build().(*App)
+		configuredStore := reflect.ValueOf(app.remoteService).Elem().FieldByName("idempotencyStore")
+		assert.Equal(t, reflect.TypeOf(&service.MemoryIdempotencyStore{}), configuredStore.Elem().Type())
+	})
+
+	t.Run("enable and update options after construction", func(t *testing.T) {
+		pitayaConfig := config.NewDefaultPitayaConfig()
+		pitayaConfig.Cluster.RPC.Idempotency.Enabled = false
+		builder := NewDefaultBuilder(false, "cluster", Cluster, nil, *pitayaConfig)
+		builder.Config.Cluster.RPC.Idempotency.Enabled = true
+		builder.Config.Cluster.RPC.Idempotency.KeyPrefix = "tenant:commands:"
+		builder.Config.Cluster.RPC.Idempotency.ResultTTL = 21 * time.Minute
+
+		app := builder.Build().(*App)
+		configuredStore := reflect.ValueOf(app.remoteService).Elem().FieldByName("idempotencyStore")
+		assert.Equal(t, reflect.TypeOf(&service.RedisIdempotencyStore{}), configuredStore.Elem().Type())
+		options := configuredStore.Elem().Elem().FieldByName("options")
+		assert.Equal(t, "tenant:commands:", options.FieldByName("KeyPrefix").String())
+		assert.Equal(t, 21*time.Minute, time.Duration(options.FieldByName("ResultTTL").Int()))
+	})
+}
+
+func TestBuilderUsesMemoryRPCIdempotencyFallbackWhenDisabled(t *testing.T) {
+	pitayaConfig := config.NewDefaultPitayaConfig()
+	pitayaConfig.Cluster.RPC.Idempotency.Enabled = false
+	builder := NewDefaultBuilder(false, "cluster", Cluster, nil, *pitayaConfig)
+
+	assert.Nil(t, builder.IdempotencyStore)
+	app := builder.Build().(*App)
+	configuredStore := reflect.ValueOf(app.remoteService).Elem().FieldByName("idempotencyStore")
+	require.False(t, configuredStore.IsNil())
+	assert.Equal(t, reflect.TypeOf(&service.MemoryIdempotencyStore{}), configuredStore.Elem().Type())
 }
 
 func TestBuilderReadsTrustedProxyConfigAtBuild(t *testing.T) {
@@ -121,6 +211,53 @@ func TestBuilderReadsTrustedProxyConfigAtBuild(t *testing.T) {
 	builder.Config.Acceptor.TrustedProxyCIDRs = []string{"not-a-cidr"}
 
 	assert.Panics(t, func() {
+		builder.Build()
+	})
+}
+
+func TestBuilderValidatesConfigBeforeConstructingDependencies(t *testing.T) {
+	pitayaConfig := config.NewDefaultPitayaConfig()
+	pitayaConfig.Metrics.Period = 0
+
+	assert.Panics(t, func() {
+		NewDefaultBuilder(false, "standalone", Standalone, nil, *pitayaConfig)
+	})
+}
+
+func TestBuilderLoadsSessionRedisTLSBeforeConstructingClient(t *testing.T) {
+	pitayaConfig := config.NewDefaultPitayaConfig()
+	secretPath := filepath.Join(t.TempDir(), "tenant-secret-ca.pem")
+	pitayaConfig.Storage.Redis.TLS = config.TLSConfig{
+		Enabled: true,
+		CAFile:  secretPath,
+	}
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		NewDefaultBuilder(false, "standalone", Standalone, nil, *pitayaConfig)
+	}()
+	require.NotNil(t, recovered)
+	assert.Contains(t, fmt.Sprint(recovered), "pitaya.storage.redis.tls.cafile")
+	assert.NotContains(t, fmt.Sprint(recovered), secretPath)
+}
+
+func TestBuilderRevalidatesMutatedConfigAtBuild(t *testing.T) {
+	pitayaConfig := config.NewDefaultPitayaConfig()
+	builder := NewDefaultBuilder(false, "standalone", Standalone, nil, *pitayaConfig)
+	builder.Config.Metrics.Period = 0
+
+	assert.Panics(t, func() {
+		builder.Build()
+	})
+}
+
+func TestBuilderRejectsNilMetricsReporter(t *testing.T) {
+	pitayaConfig := config.NewDefaultPitayaConfig()
+	builder := NewDefaultBuilder(false, "standalone", Standalone, nil, *pitayaConfig)
+	builder.MetricsReporters = append(builder.MetricsReporters, nil)
+
+	assert.PanicsWithError(t, "nil metrics reporter at index 0", func() {
 		builder.Build()
 	})
 }

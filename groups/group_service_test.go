@@ -22,6 +22,7 @@ package groups
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -29,6 +30,39 @@ import (
 
 	"github.com/alkaid/pitaya/v2/constants"
 )
+
+type cancelAfterErrChecksContext struct {
+	context.Context
+	remaining int
+}
+
+func (c *cancelAfterErrChecksContext) Err() error {
+	c.remaining--
+	if c.remaining <= 0 {
+		return context.Canceled
+	}
+	return nil
+}
+
+func TestNewMemberSnapshotStopsDuringSort(t *testing.T) {
+	members := make([]string, 3*memberSortChunkSize)
+	for index := range members {
+		members[index] = fmt.Sprintf("member-%08d", len(members)-index)
+	}
+	ctx := &cancelAfterErrChecksContext{Context: context.Background(), remaining: 5}
+
+	snapshot, err := NewMemberSnapshot(ctx, members)
+
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, snapshot)
+}
+
+func TestNewMemberSnapshotRejectsDuplicateMembers(t *testing.T) {
+	snapshot, err := NewMemberSnapshot(context.Background(), []string{"b", "a", "a"})
+
+	assert.ErrorIs(t, err, constants.ErrGroupPageCursor)
+	assert.Nil(t, snapshot)
+}
 
 func testCreateDuplicatedGroup(gs GroupService, t *testing.T) {
 	ctx := context.Background()
@@ -280,4 +314,57 @@ func testMembers(gs GroupService, t *testing.T) {
 	res, err := gs.GroupMembers(ctx, "testGroupMembers")
 	assert.NoError(t, err)
 	assert.ElementsMatch(t, []string{"someid1", "someid2"}, res)
+}
+
+func testMembersPage(gs GroupService, t *testing.T) {
+	t.Helper()
+	paged, ok := gs.(PagedGroupService)
+	if !assert.True(t, ok, "group service must implement pagination") {
+		return
+	}
+
+	ctx := context.Background()
+	groupName := "testGroupMembersPage"
+	assert.NoError(t, gs.GroupCreate(ctx, groupName))
+	for _, uid := range []string{"uid-04", "uid-01", "uid-03", "uid-02", "uid-05"} {
+		assert.NoError(t, gs.GroupAddMember(ctx, groupName, uid))
+	}
+
+	var got []string
+	cursor := ""
+	for {
+		page, err := paged.GroupMembersPage(ctx, groupName, MemberPageOptions{Limit: 2, Cursor: cursor})
+		assert.NoError(t, err)
+		got = append(got, page.Members...)
+		if page.NextCursor == "" {
+			break
+		}
+		assert.NotEqual(t, cursor, page.NextCursor)
+		cursor = page.NextCursor
+	}
+	assert.Equal(t, []string{"uid-01", "uid-02", "uid-03", "uid-04", "uid-05"}, got)
+
+	_, err := paged.GroupMembersPage(ctx, groupName, MemberPageOptions{Limit: MaxMemberPageSize + 1})
+	assert.ErrorIs(t, err, constants.ErrGroupPageLimit)
+	_, err = paged.GroupMembersPage(ctx, groupName, MemberPageOptions{Limit: 2, Cursor: "not*base64"})
+	assert.ErrorIs(t, err, constants.ErrGroupPageCursor)
+}
+
+func testEmptyUIDRejected(gs GroupService, t *testing.T) {
+	t.Helper()
+	ctx := context.Background()
+	groupName := "testEmptyUIDRejected"
+	assert.NoError(t, gs.GroupCreate(ctx, groupName))
+
+	assert.ErrorIs(t, gs.GroupAddMember(ctx, groupName, ""), constants.ErrEmptyUID)
+	_, err := gs.GroupContainsMember(ctx, groupName, "")
+	assert.ErrorIs(t, err, constants.ErrEmptyUID)
+	assert.ErrorIs(t, gs.GroupRemoveMember(ctx, groupName, ""), constants.ErrEmptyUID)
+}
+
+func TestPaginateMembersRejectsEmptyUIDWithoutTruncating(t *testing.T) {
+	page, err := PaginateMembers([]string{"", "b"}, MemberPageOptions{Limit: 1})
+
+	assert.ErrorIs(t, err, constants.ErrEmptyUID)
+	assert.Empty(t, page)
 }

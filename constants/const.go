@@ -117,6 +117,18 @@ var RouteKey = "req-route"
 // to be reported
 var MetricTagsKey = "metric-tags"
 
+// IdempotencyKey identifies one logical RPC command across retries.
+var IdempotencyKey = "rpc.idempotency-key"
+
+// IdempotencyFanoutKey marks a command that must be deduplicated independently
+// by every fanout target. It is framework-owned RPC metadata.
+var IdempotencyFanoutKey = "rpc.idempotency-fanout"
+
+// OwnerServerIDKey and OwnerEpochKey fence RPCs to the service-discovery
+// generation selected by the caller.
+var OwnerServerIDKey = "rpc.owner-server-id"
+var OwnerEpochKey = "rpc.owner-epoch"
+
 // GRPCHostKey is the key for grpc host on server metadata
 var GRPCHostKey = "grpcHost"
 

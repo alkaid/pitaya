@@ -21,7 +21,7 @@ type retryPanicOutcome struct {
 }
 
 func (o *retryPanicOutcome) Error() string {
-	return fmt.Sprint(o.value)
+	return recoveredWorkerPanicMessage(o.value)
 }
 
 func (o *retryPanicOutcome) Unwrap() error {
@@ -37,7 +37,7 @@ func (r *MiddlewareRetry) Call(queue string, message *Msg, next func() bool) (ac
 			defer conn.Close()
 			if retry(message) {
 				message.Set("queue", queue)
-				message.Set("error_message", fmt.Sprintf("%v", e))
+				message.Set("error_message", recoveredWorkerPanicMessage(e))
 				retryCount := incrementRetry(message)
 
 				retryOptions, _ := message.Get("retry_options").Map()
@@ -69,6 +69,10 @@ func (r *MiddlewareRetry) Call(queue string, message *Msg, next func() bool) (ac
 	acknowledge = next()
 
 	return
+}
+
+func recoveredWorkerPanicMessage(value any) string {
+	return fmt.Sprintf("worker job panic (%T)", value)
 }
 
 func retry(message *Msg) bool {

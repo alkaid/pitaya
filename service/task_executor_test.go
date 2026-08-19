@@ -22,6 +22,11 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+type panicFormattingTaskValue struct{}
+
+func (panicFormattingTaskValue) Error() string  { panic("task panic Error called") }
+func (panicFormattingTaskValue) String() string { panic("task panic String called") }
+
 func TestExecuteTaskOutcomes(t *testing.T) {
 	t.Run("direct", func(t *testing.T) {
 		var calls atomic.Int32
@@ -104,12 +109,13 @@ func TestExecuteTaskOutcomes(t *testing.T) {
 
 	t.Run("executor_panic", func(t *testing.T) {
 		executor := component.TaskExecutorFunc(func(context.Context, component.Task) error {
-			panic("executor panic")
+			panic("sensitive executor value")
 		})
 		err := executeTask(context.Background(), executor, func(context.Context) error {
 			return nil
 		})
-		assert.ErrorContains(t, err, "task executor panic: executor panic")
+		assert.ErrorIs(t, err, component.ErrTaskExecutorPanic)
+		assert.NotContains(t, err.Error(), "sensitive executor value")
 	})
 
 	t.Run("task_panic", func(t *testing.T) {
@@ -117,10 +123,21 @@ func TestExecuteTaskOutcomes(t *testing.T) {
 			return task(ctx)
 		})
 		err := executeTask(context.Background(), executor, func(context.Context) error {
-			panic("task panic")
+			panic("sensitive task value")
 		})
 		assert.ErrorIs(t, err, component.ErrTaskPanic)
-		assert.ErrorContains(t, err, "task panic")
+		assert.NotContains(t, err.Error(), "sensitive task value")
+	})
+
+	t.Run("panic_value_formatters_are_not_invoked", func(t *testing.T) {
+		executor := component.TaskExecutorFunc(func(context.Context, component.Task) error {
+			panic(panicFormattingTaskValue{})
+		})
+		var err error
+		assert.NotPanics(t, func() {
+			err = executeTask(context.Background(), executor, func(context.Context) error { return nil })
+		})
+		assert.ErrorIs(t, err, component.ErrTaskExecutorPanic)
 	})
 
 	t.Run("cancelled", func(t *testing.T) {

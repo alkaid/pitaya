@@ -21,6 +21,7 @@
 package metrics
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -250,7 +251,17 @@ func (p *PrometheusReporter) registerMetrics(
 	constLabels, additionalLabels map[string]string,
 	spec *models.CustomMetricsSpec,
 	registerer prometheus.Registerer,
-) error {
+) (err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = recoveredPrometheusError("configure prometheus metrics", recovered)
+		}
+	}()
+	if spec == nil {
+		return errors.New("custom prometheus metrics spec must not be nil")
+	}
+	constLabels = cloneLabelMap(constLabels)
+	additionalLabels = cloneLabelMap(additionalLabels)
 
 	constLabels["game"] = p.game
 	constLabels["serverType"] = p.serverType
@@ -261,6 +272,7 @@ func (p *PrometheusReporter) registerMetrics(
 	for key := range additionalLabels {
 		additionalLabelsKeys = append(additionalLabelsKeys, key)
 	}
+	sort.Strings(additionalLabelsKeys)
 
 	if err := p.registerCustomMetrics(constLabels, additionalLabelsKeys, spec, collectorSet); err != nil {
 		return err
@@ -507,6 +519,14 @@ func (p *PrometheusReporter) registerMetrics(
 	return nil
 }
 
+func cloneLabelMap(labels map[string]string) map[string]string {
+	cloned := make(map[string]string, len(labels))
+	for key, value := range labels {
+		cloned[key] = value
+	}
+	return cloned
+}
+
 func newPrometheusReporter(
 	serverType string,
 	config config.MetricsConfig,
@@ -569,57 +589,88 @@ func getPrometheusReporter(
 }
 
 // ReportSummary reports a summary metric
-func (p *PrometheusReporter) ReportSummary(metric string, labels map[string]string, value float64) error {
+func (p *PrometheusReporter) ReportSummary(metric string, labels map[string]string, value float64) (err error) {
+	defer recoverPrometheusReport(metric, prometheusSummary, &err)
 	sum := p.summaryReportersMap[metric]
 	if sum != nil {
-		labels = p.ensureLabels(labels)
-		sum.With(labels).Observe(value)
+		observer, err := sum.GetMetricWith(p.withDefaultLabels(labels))
+		if err != nil {
+			return fmt.Errorf("invalid labels for prometheus summary %q: %w", metric, err)
+		}
+		observer.Observe(value)
 		return nil
 	}
 	return constants.ErrMetricNotKnown
 }
 
 // ReportHistogram reports a histogram metric
-func (p *PrometheusReporter) ReportHistogram(metric string, labels map[string]string, value float64) error {
+func (p *PrometheusReporter) ReportHistogram(metric string, labels map[string]string, value float64) (err error) {
+	defer recoverPrometheusReport(metric, prometheusHistogram, &err)
 	hist := p.histogramReportersMap[metric]
 	if hist != nil {
-		labels = p.ensureLabels(labels)
-		hist.With(labels).Observe(value)
+		observer, err := hist.GetMetricWith(p.withDefaultLabels(labels))
+		if err != nil {
+			return fmt.Errorf("invalid labels for prometheus histogram %q: %w", metric, err)
+		}
+		observer.Observe(value)
 		return nil
 	}
 	return constants.ErrMetricNotKnown
 }
 
 // ReportCount reports a summary metric
-func (p *PrometheusReporter) ReportCount(metric string, labels map[string]string, count float64) error {
+func (p *PrometheusReporter) ReportCount(metric string, labels map[string]string, count float64) (err error) {
+	defer recoverPrometheusReport(metric, prometheusCounter, &err)
 	cnt := p.countReportersMap[metric]
 	if cnt != nil {
-		labels = p.ensureLabels(labels)
-		cnt.With(labels).Add(count)
+		counter, err := cnt.GetMetricWith(p.withDefaultLabels(labels))
+		if err != nil {
+			return fmt.Errorf("invalid labels for prometheus counter %q: %w", metric, err)
+		}
+		counter.Add(count)
 		return nil
 	}
 	return constants.ErrMetricNotKnown
 }
 
 // ReportGauge reports a gauge metric
-func (p *PrometheusReporter) ReportGauge(metric string, labels map[string]string, value float64) error {
+func (p *PrometheusReporter) ReportGauge(metric string, labels map[string]string, value float64) (err error) {
+	defer recoverPrometheusReport(metric, prometheusGauge, &err)
 	g := p.gaugeReportersMap[metric]
 	if g != nil {
-		labels = p.ensureLabels(labels)
-		g.With(labels).Set(value)
+		gauge, err := g.GetMetricWith(p.withDefaultLabels(labels))
+		if err != nil {
+			return fmt.Errorf("invalid labels for prometheus gauge %q: %w", metric, err)
+		}
+		gauge.Set(value)
 		return nil
 	}
 	return constants.ErrMetricNotKnown
 }
 
-// ensureLabels checks if labels contains the additionalLabels values,
-// otherwise adds them with the default values
-func (p *PrometheusReporter) ensureLabels(labels map[string]string) map[string]string {
+func recoverPrometheusReport(metric string, kind prometheusMetricKind, err *error) {
+	if recovered := recover(); recovered != nil {
+		*err = recoveredPrometheusError(fmt.Sprintf("report prometheus %s %q", kind, metric), recovered)
+	}
+}
+
+func recoveredPrometheusError(operation string, recovered any) error {
+	return fmt.Errorf("%s: recovered panic of type %T", operation, recovered)
+}
+
+// withDefaultLabels returns a caller-independent label set. GetMetricWith uses
+// the Vec's declared variable labels as the allowlist and reports missing or
+// unexpected labels as errors instead of panicking.
+func (p *PrometheusReporter) withDefaultLabels(labels map[string]string) prometheus.Labels {
+	completed := make(prometheus.Labels, len(labels)+len(p.additionalLabels))
+	for key, value := range labels {
+		completed[key] = value
+	}
 	for key, defaultVal := range p.additionalLabels {
-		if _, ok := labels[key]; !ok {
-			labels[key] = defaultVal
+		if _, ok := completed[key]; !ok {
+			completed[key] = defaultVal
 		}
 	}
 
-	return labels
+	return completed
 }
