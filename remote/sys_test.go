@@ -70,6 +70,45 @@ func (p *backendCoordinatorPool) SetBackendCoordinator(coordinator session.Backe
 	*p.coordinator = coordinator
 }
 
+type standaloneSessionCache struct {
+	session.CacheInterface
+	loaded map[string]string
+	writes map[string]string
+}
+
+func (c *standaloneSessionCache) Hgetall(string) (map[string]string, error) {
+	return c.loaded, nil
+}
+
+func (c *standaloneSessionCache) Hmset(_ string, fields map[string]string) error {
+	c.writes = fields
+	return nil
+}
+
+func TestStandaloneFrontendBindSkipsClusterBroadcast(t *testing.T) {
+	t.Parallel()
+
+	pool := session.NewSessionPool()
+	cache := &standaloneSessionCache{
+		loaded: map[string]string{},
+	}
+	pool.SetClusterCache(cache)
+
+	server := cluster.NewServer("frontend-1", "connector", true)
+	NewSys(pool, server, nil, nil, nil).Init()
+
+	sess, isNew := pool.NewSession(nil, true)
+	require.True(t, isNew)
+
+	customData := map[string]any{"source": "standalone"}
+	require.NoError(t, sess.Bind(context.Background(), "user-1", customData, nil))
+
+	assert.Same(t, sess, pool.GetSessionByUID("user-1"))
+	assert.Equal(t, customData, sess.GetData())
+	require.NotNil(t, cache.writes)
+	assert.Equal(t, "1", cache.writes["o"])
+}
+
 func TestBindSession(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)

@@ -10,6 +10,7 @@
 package mocks
 
 import (
+	context "context"
 	net "net"
 	reflect "reflect"
 	time "time"
@@ -263,16 +264,32 @@ func (mr *MockAcceptorMockRecorder) IsRunning() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "IsRunning", reflect.TypeOf((*MockAcceptor)(nil).IsRunning))
 }
 
-// ListenAndServe mocks base method.
-func (m *MockAcceptor) ListenAndServe() {
+// Ready mocks base method.
+func (m *MockAcceptor) Ready() <-chan error {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "ListenAndServe")
+	ret := m.ctrl.Call(m, "Ready")
+	ret0, _ := ret[0].(<-chan error)
+	return ret0
 }
 
-// ListenAndServe indicates an expected call of ListenAndServe.
-func (mr *MockAcceptorMockRecorder) ListenAndServe() *gomock.Call {
+// Ready indicates an expected call of Ready.
+func (mr *MockAcceptorMockRecorder) Ready() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ListenAndServe", reflect.TypeOf((*MockAcceptor)(nil).ListenAndServe))
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Ready", reflect.TypeOf((*MockAcceptor)(nil).Ready))
+}
+
+// Serve mocks base method.
+func (m *MockAcceptor) Serve(arg0 context.Context) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Serve", arg0)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// Serve indicates an expected call of Serve.
+func (mr *MockAcceptorMockRecorder) Serve(arg0 any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Serve", reflect.TypeOf((*MockAcceptor)(nil).Serve), arg0)
 }
 
 // Stop mocks base method.

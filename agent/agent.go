@@ -116,6 +116,7 @@ type (
 		RemoteAddr() net.Addr
 		String() string
 		GetStatus() int32
+		TransitionStatus(from, to int32) bool
 		Kick(ctx context.Context, reason ...session.CloseReason) error
 		SetLastAt()
 		SetStatus(state int32)
@@ -533,6 +534,20 @@ func (a *agentImpl) GetStatus() int32 {
 	return atomic.LoadInt32(&a.state)
 }
 
+// TransitionStatus advances an agent only if it is still in the expected
+// state. Agent implementations must provide the same atomic compare-and-swap
+// semantics so Close cannot race a handshake back into a live state.
+func TransitionStatus(a Agent, from, to int32) bool {
+	return a.TransitionStatus(from, to)
+}
+
+func (a *agentImpl) TransitionStatus(from, to int32) bool {
+	if from == constants.StatusClosed && to != constants.StatusClosed {
+		return false
+	}
+	return atomic.CompareAndSwapInt32(&a.state, from, to)
+}
+
 // Kick sends a kick packet to a client
 func (a *agentImpl) Kick(ctx context.Context, reason ...session.CloseReason) error {
 	// packet encode
@@ -555,21 +570,49 @@ func (a *agentImpl) SetLastAt() {
 	atomic.StoreInt64(&a.lastAt, time.Now().Unix())
 }
 
-// SetStatus sets the agent status
+// SetStatus sets the agent status. Closed is terminal and cannot be
+// overwritten by a concurrent handshake transition.
 func (a *agentImpl) SetStatus(state int32) {
-	atomic.StoreInt32(&a.state, state)
+	for {
+		current := a.GetStatus()
+		if current == constants.StatusClosed && state != constants.StatusClosed {
+			return
+		}
+		if atomic.CompareAndSwapInt32(&a.state, current, state) {
+			return
+		}
+	}
 }
 
 // Handle handles the messages from and to a client
 func (a *agentImpl) Handle() {
+	var runtimeWG sync.WaitGroup
 	defer func() {
 		a.Session.Close(nil)
+		runtimeWG.Wait()
 		logger.Zap.Debug("Session handle goroutine exit", zap.Int64("ID", a.Session.ID()), zap.String("UID", a.Session.UID()))
 	}()
 
-	co.Go(func() { a.write() })
-	co.Go(func() { a.heartbeat() })
-	co.Go(func() { a.keepClusterCacheAlive() })
+	runtimeTasks := []struct {
+		name string
+		run  func()
+	}{
+		{name: "write", run: a.write},
+		{name: "heartbeat", run: a.heartbeat},
+		{name: "cluster cache keepalive", run: a.keepClusterCacheAlive},
+	}
+	for _, task := range runtimeTasks {
+		task := task
+		runtimeWG.Add(1)
+		if err := co.Submit(func() {
+			defer runtimeWG.Done()
+			task.run()
+		}); err != nil {
+			runtimeWG.Done()
+			logger.Zap.Error("start agent runtime task failed", zap.String("task", task.name), zap.Error(err))
+			return
+		}
+	}
 	<-a.chDie // agent closed signal
 }
 

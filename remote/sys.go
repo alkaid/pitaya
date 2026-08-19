@@ -98,6 +98,9 @@ func (sys *Sys) Init() {
 			logW.Error("session binding error", zap.Error(err))
 			return err
 		}
+		if sys.remote == nil {
+			return nil
+		}
 		// 通知所有server已经成功绑定
 		var r *route.Route
 		msg := &protos.BindMsg{
@@ -152,6 +155,9 @@ func (sys *Sys) Init() {
 				logW.Error("session on close error", zap.Error(err))
 				return
 			}
+		}
+		if sys.remote == nil {
+			return
 		}
 		// 通知所有 server
 		r, err := route.Decode(constants.SessionClosedRoute)

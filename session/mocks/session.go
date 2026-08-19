@@ -1130,6 +1130,18 @@ func (mr *MockSessionPoolMockRecorder) EncodeSessionData(data any) *gomock.Call 
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "EncodeSessionData", reflect.TypeOf((*MockSessionPool)(nil).EncodeSessionData), data)
 }
 
+// ForceCloseAll mocks base method.
+func (m *MockSessionPool) ForceCloseAll() {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "ForceCloseAll")
+}
+
+// ForceCloseAll indicates an expected call of ForceCloseAll.
+func (mr *MockSessionPoolMockRecorder) ForceCloseAll() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ForceCloseAll", reflect.TypeOf((*MockSessionPool)(nil).ForceCloseAll))
+}
+
 // GetSessionByID mocks base method.
 func (m *MockSessionPool) GetSessionByID(id int64) session.Session {
 	m.ctrl.T.Helper()

@@ -112,18 +112,47 @@ func ReportNumberOfConnectedClients(reporters []Reporter, number int64) {
 
 // ReportSysMetrics reports sys metrics
 func ReportSysMetrics(reporters []Reporter, period time.Duration) {
+	ReportSysMetricsContext(context.Background(), reporters, period)
+}
+
+// ReportSysMetricsContext reports sys metrics until the context is canceled.
+func ReportSysMetricsContext(ctx context.Context, reporters []Reporter, period time.Duration) {
+	if ctx.Err() != nil {
+		return
+	}
+
+	reportSysMetrics(reporters)
+
+	timer := time.NewTimer(period)
+	defer timer.Stop()
+
 	for {
-		for _, r := range reporters {
-			num := runtime.NumGoroutine()
-			m := &runtime.MemStats{}
-			runtime.ReadMemStats(m)
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			if ctx.Err() != nil {
+				return
+			}
 
-			r.ReportGauge(Goroutines, map[string]string{}, float64(num))
-			r.ReportGauge(HeapSize, map[string]string{}, float64(m.Alloc))
-			r.ReportGauge(HeapObjects, map[string]string{}, float64(m.HeapObjects))
+			reportSysMetrics(reporters)
+			if ctx.Err() != nil {
+				return
+			}
+			timer.Reset(period)
 		}
+	}
+}
 
-		time.Sleep(period)
+func reportSysMetrics(reporters []Reporter) {
+	for _, r := range reporters {
+		num := runtime.NumGoroutine()
+		m := &runtime.MemStats{}
+		runtime.ReadMemStats(m)
+
+		r.ReportGauge(Goroutines, map[string]string{}, float64(num))
+		r.ReportGauge(HeapSize, map[string]string{}, float64(m.Alloc))
+		r.ReportGauge(HeapObjects, map[string]string{}, float64(m.HeapObjects))
 	}
 }
 

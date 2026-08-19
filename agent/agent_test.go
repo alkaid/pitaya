@@ -933,6 +933,43 @@ func TestAgentSetStatus(t *testing.T) {
 	}
 }
 
+func TestAgentStatusTransitionsAreAtomicAndClosedIsTerminal(t *testing.T) {
+	ag := &agentImpl{state: constants.StatusStart}
+
+	assert.True(t, TransitionStatus(ag, constants.StatusStart, constants.StatusHandshakeValidated))
+	assert.Equal(t, constants.StatusHandshakeValidated, ag.GetStatus())
+	assert.False(t, TransitionStatus(ag, constants.StatusStart, constants.StatusWorking))
+	assert.True(t, TransitionStatus(ag, constants.StatusHandshakeValidated, constants.StatusWorking))
+
+	ag.SetStatus(constants.StatusClosed)
+	ag.SetStatus(constants.StatusWorking)
+	assert.Equal(t, constants.StatusClosed, ag.GetStatus())
+	assert.False(t, TransitionStatus(ag, constants.StatusClosed, constants.StatusWorking))
+}
+
+func TestAgentCloseWinsConcurrentHandshakeAck(t *testing.T) {
+	const attempts = 100
+	for range attempts {
+		ag := &agentImpl{state: constants.StatusHandshakeValidated}
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			ag.SetStatus(constants.StatusClosed)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			TransitionStatus(ag, constants.StatusHandshakeValidated, constants.StatusWorking)
+		}()
+		close(start)
+		wg.Wait()
+		assert.Equal(t, constants.StatusClosed, ag.GetStatus())
+	}
+}
+
 func TestOnSessionClosed(t *testing.T) {
 	ctrl := gomock.NewController(t)
 
@@ -1089,7 +1126,7 @@ func TestAnswerWithError(t *testing.T) {
 	}
 }
 
-func TestAgentHeartbeat(t *testing.T) {
+func TestAgentHeartbeatClosesUnhandshakenConnectionAfterProgressiveTimeout(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -1114,6 +1151,7 @@ func TestAgentHeartbeat(t *testing.T) {
 	})
 	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, 1*time.Second, 1, nil, mockMessageEncoder, nil, sessionPool, "").(*agentImpl)
 	assert.NotNil(t, ag)
+	require.Equal(t, constants.StatusStart, ag.GetStatus())
 
 	mockConn.EXPECT().RemoteAddr().MaxTimes(1)
 	mockConn.EXPECT().Close().MaxTimes(1)
@@ -1136,6 +1174,7 @@ func TestAgentHeartbeat(t *testing.T) {
 	ticks <- lastAt.Add(3 * time.Second)
 	waitForChannelClose(t, done, time.Second)
 	waitForChannelClose(t, ag.chDie, time.Second)
+	assert.Equal(t, constants.StatusClosed, ag.GetStatus())
 	observed := helpers.ShouldEventuallyReceive(t, callbackState).(sessionCloseObservation)
 	assert.False(t, observed.online)
 	assert.False(t, observed.registered)
@@ -1263,20 +1302,21 @@ func TestAgentHandle(t *testing.T) {
 
 	mockSerializer := serializemocks.NewMockSerializer(ctrl)
 	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
-	heartbeatPacket := heartbeatAndHandshakeMocks(mockEncoder)
+	heartbeatAndHandshakeMocks(mockEncoder)
 	mockConn := mocks.NewMockPlayerConn(ctrl)
 	messageEncoder := message.NewMessagesEncoder(false)
 	mockSerializer.EXPECT().GetName()
 	sessionPool := session.NewSessionPool()
 	sessionPool.SetClusterCache(session.NewRedisCache(nil, 10*time.Second))
-	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, 1*time.Second, 1, nil, messageEncoder, nil, sessionPool, "").(*agentImpl)
+	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, time.Minute, 1, nil, messageEncoder, nil, sessionPool, "").(*agentImpl)
 	assert.NotNil(t, ag)
+	assert.True(t, TransitionStatus(ag, constants.StatusStart, constants.StatusHandshakeValidated))
+	assert.True(t, TransitionStatus(ag, constants.StatusHandshakeValidated, constants.StatusWorking))
+	ag.SetLastAt()
 
 	expectedBytes := []byte("bla")
 
-	// Sends two heartbeats and then times out
-	mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil).Times(3)
-	mockConn.EXPECT().Write(heartbeatPacket).Return(0, nil).Times(2)
+	mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
 	var wg sync.WaitGroup
 	wg.Add(1)
 
@@ -1293,7 +1333,95 @@ func TestAgentHandle(t *testing.T) {
 	go ag.Handle()
 
 	wg.Wait()
+	ag.Session.Close(nil)
 	waitForChannelClose(t, ag.chDie, 5*time.Second)
+}
+
+func TestAgentHandleWaitsForAdmittedRuntimeTasks(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockSerializer := serializemocks.NewMockSerializer(ctrl)
+	mockSerializer.EXPECT().GetName()
+	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
+	heartbeatAndHandshakeMocks(mockEncoder)
+	mockConn := mocks.NewMockPlayerConn(ctrl)
+	messageEncoder := message.NewMessagesEncoder(false)
+	sessionPool := session.NewSessionPool()
+	sessionPool.SetClusterCache(session.NewRedisCache(nil, time.Hour))
+	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, time.Hour, 1, nil, messageEncoder, nil, sessionPool, "").(*agentImpl)
+
+	expectedBytes := []byte("blocked write")
+	writeStarted := make(chan struct{})
+	releaseWrite := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(releaseWrite) }) })
+
+	mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
+	mockConn.EXPECT().Write(expectedBytes).DoAndReturn(func([]byte) (int, error) {
+		close(writeStarted)
+		<-releaseWrite
+		return len(expectedBytes), nil
+	})
+	mockConn.EXPECT().RemoteAddr().Return(&mockAddr{}).MaxTimes(1)
+	mockConn.EXPECT().Close().Return(nil).MaxTimes(1)
+
+	ag.chSend <- pendingWrite{data: expectedBytes}
+	handleDone := make(chan struct{})
+	go func() {
+		ag.Handle()
+		close(handleDone)
+	}()
+
+	waitForChannelClose(t, writeStarted, time.Second)
+	ag.Session.Close(nil)
+
+	select {
+	case <-handleDone:
+		t.Fatal("Handle returned while an admitted write task was still running")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	releaseOnce.Do(func() { close(releaseWrite) })
+	waitForChannelClose(t, handleDone, time.Second)
+}
+
+func TestAgentHandleAllowsHandshakeBeyondSingleHeartbeatInterval(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	defer ctrl.Finish()
+
+	mockSerializer := serializemocks.NewMockSerializer(ctrl)
+	mockEncoder := codecmocks.NewMockPacketEncoder(ctrl)
+	heartbeatAndHandshakeMocks(mockEncoder)
+	mockConn := mocks.NewMockPlayerConn(ctrl)
+	messageEncoder := message.NewMessagesEncoder(false)
+	mockSerializer.EXPECT().GetName()
+	mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil).AnyTimes()
+	mockConn.EXPECT().Write(gomock.Any()).Return(0, nil).AnyTimes()
+	mockConn.EXPECT().RemoteAddr().Return(&mockAddr{}).AnyTimes()
+	mockConn.EXPECT().Close().Return(nil).MaxTimes(1)
+
+	sessionPool := session.NewSessionPool()
+	sessionPool.SetClusterCache(session.NewRedisCache(nil, 10*time.Second))
+	heartbeatTimeout := 100 * time.Millisecond
+	ag := newAgent(mockConn, nil, mockEncoder, mockSerializer, heartbeatTimeout, 1, nil, messageEncoder, nil, sessionPool, "").(*agentImpl)
+
+	go ag.Handle()
+	timer := time.NewTimer(heartbeatTimeout + heartbeatTimeout/2)
+	defer timer.Stop()
+	select {
+	case <-ag.chDie:
+		t.Fatal("agent closed before a delayed handshake ACK could arrive")
+	case <-timer.C:
+	}
+
+	require.True(t, TransitionStatus(ag, constants.StatusStart, constants.StatusHandshakeValidated))
+	require.True(t, TransitionStatus(ag, constants.StatusHandshakeValidated, constants.StatusWorking))
+	ag.SetLastAt()
+
+	ag.Session.Close(nil)
+	waitForChannelClose(t, ag.chDie, time.Second)
+	assert.Equal(t, constants.StatusClosed, ag.GetStatus())
 }
 
 func TestNatsRPCServerReportMetrics(t *testing.T) {

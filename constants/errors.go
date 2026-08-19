@@ -72,6 +72,7 @@ var (
 	ErrRPCRequestTimeout              = errors.New("rpc client: request timeout")
 	ErrRPCClientNotInitialized        = errors.New("RPC client is not running")
 	ErrRPCJobAlreadyRegistered        = errors.New("rpc job was already registered")
+	ErrWorkerStopped                  = errors.New("worker is stopped")
 	ErrRPCLocal                       = errors.New("RPC must be to a different server type")
 	ErrRPCServerNotInitialized        = errors.New("RPC server is not running")
 	ErrReplyShouldBeNotNull           = errors.New("reply must not be null")

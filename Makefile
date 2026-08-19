@@ -59,7 +59,7 @@ test-unit:
 	@go test ./... -count=1
 
 test-race:
-	@GOWORK=off GOFLAGS= go test -race ./co ./session ./agent ./cluster ./service ./router -count=10 -timeout=10m
+	@GOWORK=off GOFLAGS= go test -race ./co ./session ./agent ./cluster ./service ./router ./acceptor ./timer ./logger ./config -count=10 -timeout=10m
 
 test-integration:
 	@./scripts/test-integration.sh

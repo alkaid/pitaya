@@ -122,7 +122,11 @@ func TestStop(t *testing.T) {
 }
 
 func TestSetTimerBacklog(t *testing.T) {
-	t.Parallel()
+	originalBacklog := timerBacklog
+	t.Cleanup(func() {
+		timerBacklog = originalBacklog
+	})
+
 	assert.Equal(t, 1<<8, timerBacklog)
 	SetTimerBacklog(10)
 	// if c is < 16, we force 16

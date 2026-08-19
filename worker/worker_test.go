@@ -6,12 +6,14 @@ import (
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 
 	"github.com/alkaid/ants/v2"
+	"github.com/alkaid/pitaya/v2/constants"
+	workers "github.com/alkaid/pitaya/v2/internal/workers"
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/worker/mocks"
 	"github.com/stretchr/testify/assert"
-	workers "github.com/topfreegames/go-workers"
 	"go.uber.org/mock/gomock"
 )
 
@@ -51,6 +53,57 @@ func TestStartPropagatesSubmissionError(t *testing.T) {
 	}
 	assert.ErrorIs(t, panicErr, ants.ErrPoolClosed)
 	assert.False(t, w.Started())
+}
+
+func TestStopCancelsLifecycleWhileJobsReadContext(t *testing.T) {
+	lifecycleCtx, cancel := context.WithCancel(context.Background())
+	w := &Worker{lifecycle: lifecycleCtx, cancel: cancel}
+	w.started.Store(true)
+	contextRead := make(chan struct{})
+	w.quit = func() {
+		_ = w.context()
+		close(contextRead)
+	}
+	observedCtx := w.context()
+	stopDone := make(chan struct{})
+	go func() {
+		w.Stop()
+		close(stopDone)
+	}()
+
+	select {
+	case <-observedCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not cancel the worker lifecycle context")
+	}
+	select {
+	case <-contextRead:
+	case <-time.After(time.Second):
+		t.Fatal("concurrent worker context read deadlocked with Stop")
+	}
+	select {
+	case <-stopDone:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not wait for the worker runtime to exit")
+	}
+	assert.False(t, w.Started())
+	assert.ErrorIs(t, w.RegisterRPCJob(nil), constants.ErrWorkerStopped)
+}
+
+func TestStopClearsRegisteredRuntimeBeforeStart(t *testing.T) {
+	quitCalled := false
+	w := &Worker{
+		registered: true,
+		quit: func() {
+			quitCalled = true
+		},
+	}
+
+	w.Stop()
+
+	assert.True(t, quitCalled)
+	assert.False(t, w.registered)
+	assert.ErrorIs(t, w.RegisterRPCJob(nil), constants.ErrWorkerStopped)
 }
 
 func TestParsedRPCJob(t *testing.T) {

@@ -131,6 +131,7 @@ type SessionPool interface {
 	OnAfterBindBackend(f OnSessionBindBackendFunc)
 	OnAfterKickBackend(f OnSessionKickBackendFunc)
 	CloseAll()
+	ForceCloseAll()
 	AddHandshakeValidator(name string, f func(data *HandshakeData) error)
 	EncodeSessionData(data map[string]interface{}) ([]byte, error)
 	DecodeSessionData(encodedData []byte) (map[string]interface{}, error)
@@ -573,25 +574,41 @@ func (pool *sessionPoolImpl) OnSessionClose(f OnSessionCloseFunc) {
 
 // CloseAll calls Close on all sessions
 func (pool *sessionPoolImpl) CloseAll() {
+	pool.closeAll(false)
+}
+
+// ForceCloseAll closes every current session without waiting for in-flight
+// requests. App shutdown calls this only after connection admission and all
+// connection handlers have stopped, so no new frontend session can race in.
+func (pool *sessionPoolImpl) ForceCloseAll() {
+	pool.closeAll(true)
+}
+
+func (pool *sessionPoolImpl) closeAll(force bool) {
 	logger.Log.Infof("closing all sessions, %d sessions", pool.GetSessionCount())
 	for pool.GetSessionCount() > 0 {
 		pool.sessionsByID.Range(func(_, value interface{}) bool {
 			s := value.(Session)
-			if s.HasRequestsInFlight() {
+			if !force && s.HasRequestsInFlight() {
 				reqsInFlight := s.GetRequestsInFlight()
 				reqsInFlight.mu.RLock()
 				for _, route := range reqsInFlight.m {
 					logger.Log.Debugf("Session for user %s is waiting on a response for route %s from a remote server. Delaying session close.", s.UID(), route)
 				}
 				reqsInFlight.mu.RUnlock()
-				return false
-			} else {
-				s.Close(nil)
 				return true
 			}
+			s.Close(nil)
+			return true
 		})
 		remaining := pool.GetSessionCount()
 		logger.Log.Debugf("%d sessions remaining", remaining)
+		if force {
+			if remaining > 0 {
+				logger.Log.Warnf("force close returned with %d sessions still registered", remaining)
+			}
+			break
+		}
 		if remaining > 0 {
 			time.Sleep(100 * time.Millisecond)
 		}

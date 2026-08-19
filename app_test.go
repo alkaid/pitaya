@@ -22,12 +22,15 @@ package pitaya
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"reflect"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,14 +43,20 @@ import (
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/helpers"
+	"github.com/alkaid/pitaya/v2/logger"
+	acceptormocks "github.com/alkaid/pitaya/v2/mocks"
 	"github.com/alkaid/pitaya/v2/route"
 	"github.com/alkaid/pitaya/v2/router"
 	"github.com/alkaid/pitaya/v2/session/mocks"
 	"github.com/alkaid/pitaya/v2/timer"
 	"github.com/alkaid/viper"
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/mock/gomock"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/protobuf/types/descriptorpb"
 )
 
@@ -71,6 +80,153 @@ type backendCoordinatorTestPool struct {
 }
 
 func (*backendCoordinatorTestPool) SetBackendCoordinator(session.BackendCoordinator) {}
+
+type forceCloseTrackingPool struct {
+	session.SessionPool
+	forceCloseCalled atomic.Bool
+}
+
+func (p *forceCloseTrackingPool) ForceCloseAll() {
+	p.forceCloseCalled.Store(true)
+	p.SessionPool.ForceCloseAll()
+}
+
+type unexpectedExitAcceptor struct {
+	ready    chan error
+	connChan chan acceptor.PlayerConn
+}
+
+type readyGateAcceptor struct {
+	name             string
+	connChan         chan acceptor.PlayerConn
+	readyGate        chan struct{}
+	readyDelivered   chan struct{}
+	serveStarted     chan struct{}
+	releaseReadyOnce sync.Once
+	connChanCalls    atomic.Int32
+}
+
+type initOrderAcceptor struct {
+	ready        chan error
+	serveChecked chan error
+	connChan     chan acceptor.PlayerConn
+	check        func() error
+}
+
+type blockingStopAcceptor struct {
+	*unexpectedExitAcceptor
+	stopStarted chan struct{}
+	releaseStop chan struct{}
+	stopDone    chan struct{}
+}
+
+type readyMarkerObserverModule struct {
+	MyMod
+	zapLogger *zap.Logger
+}
+
+func (m *readyMarkerObserverModule) AfterInit() {
+	logger.Zap = m.zapLogger
+}
+
+func newReadyGateAcceptor(name string) *readyGateAcceptor {
+	return &readyGateAcceptor{
+		name:           name,
+		connChan:       make(chan acceptor.PlayerConn),
+		readyGate:      make(chan struct{}),
+		readyDelivered: make(chan struct{}),
+		serveStarted:   make(chan struct{}),
+	}
+}
+
+func newInitOrderAcceptor(check func() error) *initOrderAcceptor {
+	return &initOrderAcceptor{
+		ready:        make(chan error, 1),
+		serveChecked: make(chan error, 1),
+		connChan:     make(chan acceptor.PlayerConn),
+		check:        check,
+	}
+}
+
+func (a *initOrderAcceptor) Serve(ctx context.Context) error {
+	err := a.check()
+	a.serveChecked <- err
+	close(a.serveChecked)
+	a.ready <- err
+	close(a.ready)
+	if err != nil {
+		return err
+	}
+	<-ctx.Done()
+	return nil
+}
+
+func (a *initOrderAcceptor) Ready() <-chan error                   { return a.ready }
+func (*initOrderAcceptor) Stop()                                   {}
+func (*initOrderAcceptor) GetAddr() string                         { return "init-order" }
+func (a *initOrderAcceptor) GetConnChan() chan acceptor.PlayerConn { return a.connChan }
+func (*initOrderAcceptor) EnableProxyProtocol()                    {}
+func (*initOrderAcceptor) IsRunning() bool                         { return true }
+func (*initOrderAcceptor) GetConfiguredAddress() string            { return "init-order" }
+
+func (a *readyGateAcceptor) releaseReady() {
+	a.releaseReadyOnce.Do(func() {
+		close(a.readyGate)
+	})
+}
+
+func (a *readyGateAcceptor) Serve(ctx context.Context) error {
+	close(a.serveStarted)
+	<-ctx.Done()
+	return nil
+}
+
+func (a *readyGateAcceptor) Ready() <-chan error {
+	ready := make(chan error)
+	go func() {
+		<-a.readyGate
+		ready <- nil
+		close(ready)
+		close(a.readyDelivered)
+	}()
+	return ready
+}
+
+func (*readyGateAcceptor) Stop()             {}
+func (a *readyGateAcceptor) GetAddr() string { return a.name }
+func (a *readyGateAcceptor) GetConnChan() chan acceptor.PlayerConn {
+	a.connChanCalls.Add(1)
+	return a.connChan
+}
+func (*readyGateAcceptor) EnableProxyProtocol()           {}
+func (*readyGateAcceptor) IsRunning() bool                { return true }
+func (a *readyGateAcceptor) GetConfiguredAddress() string { return a.name }
+
+func newUnexpectedExitAcceptor() *unexpectedExitAcceptor {
+	return &unexpectedExitAcceptor{
+		ready:    make(chan error, 1),
+		connChan: make(chan acceptor.PlayerConn),
+	}
+}
+
+func (a *unexpectedExitAcceptor) Serve(context.Context) error {
+	a.ready <- nil
+	return nil
+}
+
+func (a *unexpectedExitAcceptor) Ready() <-chan error                   { return a.ready }
+func (*unexpectedExitAcceptor) Stop()                                   {}
+func (*unexpectedExitAcceptor) GetAddr() string                         { return "" }
+func (a *unexpectedExitAcceptor) GetConnChan() chan acceptor.PlayerConn { return a.connChan }
+func (*unexpectedExitAcceptor) EnableProxyProtocol()                    {}
+func (*unexpectedExitAcceptor) IsRunning() bool                         { return false }
+func (*unexpectedExitAcceptor) GetConfiguredAddress() string            { return "early-exit" }
+
+func (a *blockingStopAcceptor) Stop() {
+	close(a.stopStarted)
+	defer close(a.stopDone)
+	<-a.releaseStop
+}
 
 func newAppTestBuilder(
 	isFrontend bool,
@@ -196,7 +352,7 @@ func TestSetDictionary(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, dict, message.GetDictionary())
 
-	app.running = true
+	app.configurationLocked.Store(true)
 	err = app.SetDictionary(dict)
 	assert.EqualError(t, constants.ErrChangeDictionaryWhileRunning, err.Error())
 }
@@ -216,7 +372,7 @@ func TestAddRoute(t *testing.T) {
 	})
 	assert.NoError(t, err)
 
-	app.running = true
+	app.configurationLocked.Store(true)
 	err = app.AddRoute("somesv", func(ctx context.Context, route *route.Route, payload []byte, servers map[string]*cluster.Server, session session.Session) (*cluster.Server, error) {
 		return nil, nil
 	})
@@ -226,10 +382,210 @@ func TestAddRoute(t *testing.T) {
 func TestShutdown(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
 	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			app.Shutdown()
+		}()
+	}
+	wg.Wait()
+
+	select {
+	case <-app.stopCh:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown signal was not published")
+	}
+}
+
+func TestShutdownToleratesClosedLegacyDieChannel(t *testing.T) {
+	builderConfig := config.NewDefaultPitayaConfig()
+	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
+	close(app.dieChan)
+	assert.NotPanics(t, app.Shutdown)
+}
+
+func TestInternalDependencyFailureStopsAppWhenLegacyEventIsObserved(t *testing.T) {
+	builderConfig := config.NewDefaultPitayaConfig()
+	builder := newAppTestBuilder(false, "dependency-failure", Standalone, nil, *builderConfig)
+	app := builder.Build().(*App)
+	started := make(chan struct{})
+	app.OnStarted(func() { close(started) })
+
+	appDone := make(chan interface{}, 1)
 	go func() {
-		app.Shutdown()
+		defer func() { appDone <- recover() }()
+		app.Start()
 	}()
-	<-app.dieChan
+	defer app.Shutdown()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("App did not start")
+	}
+
+	legacyObserved := make(chan bool, 1)
+	go func() { legacyObserved <- <-app.GetDieChan() }()
+	builder.dependencyDieChan <- true
+
+	select {
+	case recovered := <-appDone:
+		assert.Nil(t, recovered)
+	case <-time.After(5 * time.Second):
+		t.Fatal("internal dependency failure did not stop App")
+	}
+	select {
+	case observed := <-legacyObserved:
+		assert.True(t, observed)
+	case <-time.After(time.Second):
+		t.Fatal("internal dependency failure was not mirrored to the legacy channel")
+	}
+}
+
+func TestStopAcceptorsReportsBlockedDispatcher(t *testing.T) {
+	app := &App{dispatchersStopped: true}
+	app.acceptCtx, app.cancelAccept = context.WithCancel(context.Background())
+
+	release := make(chan struct{})
+	app.dispatcherWG.Add(1)
+	go func() {
+		defer app.dispatcherWG.Done()
+		<-release
+	}()
+
+	err := app.stopAcceptorsWithin(20 * time.Millisecond)
+	assert.ErrorIs(t, err, ErrDispatcherShutdownTimeout)
+	assert.NotErrorIs(t, err, ErrAcceptorShutdownTimeout)
+
+	close(release)
+	app.dispatcherWG.Wait()
+}
+
+func TestStopAcceptorsReportsBlockedAcceptor(t *testing.T) {
+	app := &App{acceptorsStopped: true, dispatchersStopped: true}
+	app.acceptCtx, app.cancelAccept = context.WithCancel(context.Background())
+
+	release := make(chan struct{})
+	app.acceptorWG.Add(1)
+	go func() {
+		defer app.acceptorWG.Done()
+		<-release
+	}()
+
+	err := app.stopAcceptorsWithin(20 * time.Millisecond)
+	assert.ErrorIs(t, err, ErrAcceptorShutdownTimeout)
+	assert.NotErrorIs(t, err, ErrDispatcherShutdownTimeout)
+
+	close(release)
+	app.acceptorWG.Wait()
+}
+
+func TestStopAcceptorsReportsBlockingStop(t *testing.T) {
+	acc := &blockingStopAcceptor{
+		unexpectedExitAcceptor: newUnexpectedExitAcceptor(),
+		stopStarted:            make(chan struct{}),
+		releaseStop:            make(chan struct{}),
+		stopDone:               make(chan struct{}),
+	}
+	app := &App{
+		acceptors:          []acceptor.Acceptor{acc},
+		acceptorsStopped:   true,
+		dispatchersStopped: true,
+	}
+	app.acceptCtx, app.cancelAccept = context.WithCancel(context.Background())
+
+	startedAt := time.Now()
+	err := app.stopAcceptorsWithin(20 * time.Millisecond)
+	assert.ErrorIs(t, err, ErrAcceptorShutdownTimeout)
+	assert.NotErrorIs(t, err, ErrDispatcherShutdownTimeout)
+	assert.Less(t, time.Since(startedAt), time.Second, "blocking Stop bypassed the shutdown deadline")
+	select {
+	case <-acc.stopStarted:
+	default:
+		t.Fatal("Acceptor.Stop was not called")
+	}
+
+	close(acc.releaseStop)
+	select {
+	case <-acc.stopDone:
+	case <-time.After(time.Second):
+		t.Fatal("blocking Acceptor.Stop did not exit after release")
+	}
+	app.acceptorWG.Wait()
+}
+
+func TestStopConnectionsWaitsForEveryAdmittedHandler(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	conn := acceptormocks.NewMockPlayerConn(ctrl)
+	closeCalled := make(chan struct{})
+	conn.EXPECT().Close().DoAndReturn(func() error {
+		close(closeCalled)
+		return nil
+	})
+
+	app := &App{connections: make(map[*trackedPlayerConn]struct{})}
+	tracked := &trackedPlayerConn{PlayerConn: conn}
+	require.True(t, app.trackConnection(tracked))
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		app.stopConnectionsAndWait()
+		close(shutdownDone)
+	}()
+
+	select {
+	case <-closeCalled:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not close the admitted connection")
+	}
+	select {
+	case <-shutdownDone:
+		t.Fatal("shutdown crossed the handler barrier before the admitted handler exited")
+	default:
+	}
+
+	late := &trackedPlayerConn{PlayerConn: conn}
+	assert.False(t, app.trackConnection(late), "shutdown accepted a late connection handler")
+	app.untrackConnection(tracked)
+	app.handlerWG.Done()
+
+	select {
+	case <-shutdownDone:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not return after the admitted handler exited")
+	}
+}
+
+func TestRuntimeQuiescenceTimeoutSkipsFinalSessionSweep(t *testing.T) {
+	pool := &forceCloseTrackingPool{SessionPool: session.NewSessionPool()}
+	app := newTestAppForComponents(pool)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	app.OnStarted(func() {
+		close(started)
+		<-release
+	})
+	app.startBackgroundTasks()
+	<-started
+
+	err := app.quiesceRuntimeBefore(time.Now().Add(20 * time.Millisecond))
+	require.ErrorIs(t, err, ErrRuntimeShutdownTimeout)
+	assert.False(t, pool.forceCloseCalled.Load(), "timed-out quiescence must not start the final session sweep")
+
+	close(release)
+	backgroundDone := make(chan struct{})
+	go func() {
+		app.backgroundWG.Wait()
+		close(backgroundDone)
+	}()
+	select {
+	case <-backgroundDone:
+	case <-time.After(time.Second):
+		t.Fatal("onStarted callback did not exit after release")
+	}
+	assert.False(t, pool.forceCloseCalled.Load(), "late barrier completion must not start the final session sweep")
 }
 
 func TestConfigureDefaultMetricsReporter(t *testing.T) {
@@ -299,12 +655,24 @@ func TestStartAndListenStandalone(t *testing.T) {
 	builder := newAppTestBuilder(true, "testtype", Standalone, map[string]string{}, *builderConfig)
 	builder.AddAcceptor(acc)
 	app := builder.Build().(*App)
+	externalReady := acc.Ready()
 
+	appDone := make(chan struct{})
 	go func() {
+		defer close(appDone)
 		app.Start()
 	}()
+	assert.NoError(t, <-externalReady)
+	t.Cleanup(func() {
+		app.Shutdown()
+		select {
+		case <-appDone:
+		case <-time.After(5 * time.Second):
+			t.Error("timed out waiting for standalone app shutdown")
+		}
+	})
 	helpers.ShouldEventuallyReturn(t, func() bool {
-		return app.running
+		return app.running.Load()
 	}, true)
 
 	assert.NotNil(t, app.handlerService)
@@ -313,9 +681,265 @@ func TestStartAndListenStandalone(t *testing.T) {
 	assert.NotEmpty(t, acc.GetAddr())
 	helpers.ShouldEventuallyReturn(t, func() error {
 		n, err := net.Dial("tcp", acc.GetAddr())
-		defer n.Close()
+		if err == nil {
+			defer n.Close()
+		}
 		return err
 	}, nil, 10*time.Millisecond, 100*time.Millisecond)
+
+	addr := acc.GetAddr()
+	var shutdowns sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		shutdowns.Add(1)
+		go func() {
+			defer shutdowns.Done()
+			app.Shutdown()
+		}()
+	}
+	shutdowns.Wait()
+	select {
+	case <-appDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for standalone app shutdown")
+	}
+
+	conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+	if err == nil {
+		conn.Close()
+		t.Fatal("acceptor still accepted connections after App.Start returned")
+	}
+}
+
+func TestAppInitializesComponentsAndModulesBeforeStartingAcceptors(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig()
+	cfg.Concurrency.Handler.Dispatch = 0
+	component := &MyComp{}
+	module := &MyMod{name: "init-order"}
+	acc := newInitOrderAcceptor(func() error {
+		if !component.running {
+			return errors.New("component was not initialized before acceptor Serve")
+		}
+		if !module.running {
+			return errors.New("module was not initialized before acceptor Serve")
+		}
+		return nil
+	})
+
+	builder := newAppTestBuilder(true, "init-order", Standalone, nil, *cfg)
+	builder.AddAcceptor(acc)
+	app := builder.Build().(*App)
+	app.Register(component)
+	require.NoError(t, app.RegisterModule(module, "init-order"))
+
+	done := make(chan any, 1)
+	go func() {
+		defer func() { done <- recover() }()
+		app.Start()
+	}()
+
+	require.NoError(t, <-acc.serveChecked)
+	require.Eventually(t, app.IsRunning, time.Second, time.Millisecond)
+	app.Shutdown()
+	select {
+	case panicValue := <-done:
+		require.Nil(t, panicValue)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for app shutdown")
+	}
+}
+
+func TestAppWaitsForAllAcceptorsBeforeStartingConnectionReaders(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig()
+	cfg.Concurrency.Handler.Dispatch = 0
+	first := newReadyGateAcceptor("first")
+	second := newReadyGateAcceptor("second")
+	builder := newAppTestBuilder(true, "readiness-order", Standalone, nil, *cfg)
+	builder.AddAcceptor(first)
+	builder.AddAcceptor(second)
+	app := builder.Build().(*App)
+
+	startResult := make(chan any, 1)
+	go func() {
+		defer func() {
+			startResult <- recover()
+		}()
+		app.Start()
+	}()
+
+	var stopOnce sync.Once
+	stopApp := func() {
+		stopOnce.Do(func() {
+			first.releaseReady()
+			second.releaseReady()
+			app.Shutdown()
+			select {
+			case panicValue := <-startResult:
+				if panicValue != nil {
+					t.Errorf("App.Start panicked: %v", panicValue)
+				}
+			case <-time.After(5 * time.Second):
+				t.Error("timed out waiting for app shutdown")
+			}
+		})
+	}
+	t.Cleanup(stopApp)
+
+	for _, started := range []<-chan struct{}{first.serveStarted, second.serveStarted} {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("acceptor Serve did not start")
+		}
+	}
+
+	first.releaseReady()
+	select {
+	case <-first.readyDelivered:
+	case <-time.After(time.Second):
+		t.Fatal("first acceptor readiness was not consumed")
+	}
+	require.Never(t, func() bool {
+		return first.connChanCalls.Load() != 0 || second.connChanCalls.Load() != 0
+	}, 200*time.Millisecond, 5*time.Millisecond, "connection reader started before every acceptor was ready")
+	assert.False(t, app.IsRunning())
+
+	second.releaseReady()
+	select {
+	case <-second.readyDelivered:
+	case <-time.After(time.Second):
+		t.Fatal("second acceptor readiness was not consumed")
+	}
+	require.Eventually(t, func() bool {
+		return first.connChanCalls.Load() == 1 && second.connChanCalls.Load() == 1
+	}, time.Second, 5*time.Millisecond, "connection readers did not start after all acceptors became ready")
+	require.Eventually(t, app.IsRunning, time.Second, 5*time.Millisecond)
+
+	stopApp()
+}
+
+func TestAppPublishesReadyMarkerOnlyAfterAcceptorsReady(t *testing.T) {
+	core, observed := observer.New(zap.InfoLevel)
+	previousLogger := logger.Zap
+	t.Cleanup(func() { logger.Zap = previousLogger })
+
+	cfg := config.NewDefaultPitayaConfig()
+	cfg.Concurrency.Handler.Dispatch = 0
+	acc := newReadyGateAcceptor("ready-marker")
+	builder := newAppTestBuilder(true, "ready-marker", Standalone, nil, *cfg)
+	builder.AddAcceptor(acc)
+	app := builder.Build().(*App)
+	require.NoError(t, app.RegisterModule(&readyMarkerObserverModule{
+		MyMod:     MyMod{name: "ready-marker-observer"},
+		zapLogger: zap.New(core),
+	}, "ready-marker-observer"))
+
+	startResult := make(chan any, 1)
+	go func() {
+		defer func() { startResult <- recover() }()
+		app.Start()
+	}()
+
+	var stopOnce sync.Once
+	stopApp := func() {
+		stopOnce.Do(func() {
+			acc.releaseReady()
+			app.Shutdown()
+			select {
+			case panicValue := <-startResult:
+				if panicValue != nil {
+					t.Errorf("App.Start panicked: %v", panicValue)
+				}
+			case <-time.After(5 * time.Second):
+				t.Error("timed out waiting for app shutdown")
+			}
+		})
+	}
+	t.Cleanup(stopApp)
+
+	select {
+	case <-acc.serveStarted:
+	case <-time.After(time.Second):
+		t.Fatal("acceptor Serve did not start")
+	}
+	require.Never(t, func() bool {
+		return observed.FilterMessage("all modules started!").Len() != 0
+	}, 100*time.Millisecond, 5*time.Millisecond, "readiness marker was published before the acceptor was ready")
+
+	acc.releaseReady()
+	require.Eventually(t, func() bool {
+		return observed.FilterMessage("all modules started!").Len() == 1
+	}, time.Second, 5*time.Millisecond, "readiness marker was not published after the acceptor became ready")
+	require.True(t, app.IsRunning())
+
+	stopApp()
+}
+
+func TestAppStartsAndStopsWSSAcceptor(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig()
+	acc := acceptor.NewWSAcceptor(
+		"127.0.0.1:0",
+		"acceptor/fixtures/server.crt",
+		"acceptor/fixtures/server.key",
+	)
+	builder := newAppTestBuilder(true, "wss", Standalone, nil, *cfg)
+	builder.AddAcceptor(acc)
+	app := builder.Build().(*App)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		app.Start()
+	}()
+	t.Cleanup(func() {
+		app.Shutdown()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("timed out waiting for WSS app shutdown")
+		}
+	})
+	helpers.ShouldEventuallyReturn(t, app.IsRunning, true)
+
+	dialer := websocket.Dialer{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}} // #nosec G402 -- test fixture certificate
+	conn, _, err := dialer.Dial("wss://"+acc.GetAddr(), nil)
+	assert.NoError(t, err)
+	if conn != nil {
+		assert.NoError(t, conn.Close())
+	}
+
+	addr := acc.GetAddr()
+	app.Shutdown()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for WSS app shutdown")
+	}
+	plainConn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+	if err == nil {
+		plainConn.Close()
+		t.Fatal("WSS listener remained open after shutdown")
+	}
+}
+
+func TestAppStopsWhenAcceptorReturnsNilUnexpectedly(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig()
+	builder := newAppTestBuilder(true, "early-exit", Standalone, nil, *cfg)
+	builder.AddAcceptor(newUnexpectedExitAcceptor())
+	app := builder.Build().(*App)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		app.Start()
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		app.Shutdown()
+		t.Fatal("App did not stop after its acceptor returned unexpectedly")
+	}
+	assert.False(t, app.IsRunning())
 }
 
 func TestStartAndListenCluster(t *testing.T) {
@@ -330,19 +954,19 @@ func TestStartAndListenCluster(t *testing.T) {
 	var err error
 	natsClientConfig := config.NewDefaultPitayaConfig().Cluster.RPC.Client.Nats
 	natsClientConfig.Connect = fmt.Sprintf("nats://%s", nsAddr)
-	builder.RPCClient, err = cluster.NewNatsRPCClient(natsClientConfig, builder.Server, builder.MetricsReporters, builder.DieChan)
+	builder.RPCClient, err = cluster.NewNatsRPCClient(natsClientConfig, builder.Server, builder.MetricsReporters, builder.dependencyDieChan)
 	if err != nil {
 		panic(err.Error())
 	}
 
 	natsServerConfig := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
 	natsServerConfig.Connect = fmt.Sprintf("nats://%s", nsAddr)
-	builder.RPCServer, err = cluster.NewNatsRPCServer(natsServerConfig, builder.Server, builder.MetricsReporters, builder.DieChan, builder.SessionPool)
+	builder.RPCServer, err = cluster.NewNatsRPCServer(natsServerConfig, builder.Server, builder.MetricsReporters, builder.dependencyDieChan, builder.SessionPool)
 	if err != nil {
 		panic(err.Error())
 	}
 
-	etcdSD, err := cluster.NewEtcdServiceDiscovery(config.NewDefaultPitayaConfig().Cluster.SD.Etcd, builder.Server, builder.DieChan, cli)
+	etcdSD, err := cluster.NewEtcdServiceDiscovery(config.NewDefaultPitayaConfig().Cluster.SD.Etcd, builder.Server, builder.dependencyDieChan, cli)
 	builder.ServiceDiscovery = etcdSD
 	assert.NoError(t, err)
 	acc := acceptor.NewTCPAcceptor("0.0.0.0:0")
@@ -376,7 +1000,9 @@ func TestStartAndListenCluster(t *testing.T) {
 	assert.NotEmpty(t, acc.GetAddr())
 	helpers.ShouldEventuallyReturn(t, func() error {
 		n, err := net.Dial("tcp", acc.GetAddr())
-		defer n.Close()
+		if err == nil {
+			defer n.Close()
+		}
 		return err
 	}, nil, 10*time.Millisecond, 100*time.Millisecond)
 }
@@ -520,6 +1146,7 @@ func TestStartWorker(t *testing.T) {
 	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
 
 	app.StartWorker()
+	t.Cleanup(app.worker.Stop)
 	assert.True(t, app.worker.Started())
 }
 
@@ -557,7 +1184,7 @@ func TestAppStatelessStartupFailsFast(t *testing.T) {
 
 	ants.Release()
 	assert.True(t, errors.Is(recoverError(app.Start), ants.ErrPoolClosed))
-	assert.False(t, app.running)
+	assert.False(t, app.running.Load())
 	assert.False(t, acc.IsRunning())
 	assert.False(t, comp.running)
 	assert.Equal(t, 1, comp.initCount)
@@ -572,8 +1199,9 @@ func TestAppStatelessStartupFailsFast(t *testing.T) {
 func TestRegisterRPCJob(t *testing.T) {
 	t.Run("register_once", func(t *testing.T) {
 		builderConfig := config.NewDefaultPitayaConfig()
-		app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig)
+		app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
 		app.StartWorker()
+		t.Cleanup(app.worker.Stop)
 
 		err := app.RegisterRPCJob(nil)
 		assert.NoError(t, err)
@@ -581,8 +1209,9 @@ func TestRegisterRPCJob(t *testing.T) {
 
 	t.Run("register_twice", func(t *testing.T) {
 		builderConfig := config.NewDefaultPitayaConfig()
-		app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig)
+		app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
 		app.StartWorker()
+		t.Cleanup(app.worker.Stop)
 
 		err := app.RegisterRPCJob(nil)
 		assert.NoError(t, err)

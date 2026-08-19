@@ -21,26 +21,29 @@
 package acceptor
 
 import (
+	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
-	"go.uber.org/zap"
 	"io"
-	"io/ioutil"
 	"net"
+	"sync"
+	"time"
 
 	"github.com/alkaid/pitaya/v2/conn/codec"
 	"github.com/alkaid/pitaya/v2/constants"
-	"github.com/alkaid/pitaya/v2/logger"
 )
 
 // TCPAcceptor struct
 type TCPAcceptor struct {
-	addr          string
-	connChan      chan PlayerConn
-	listener      net.Listener
-	running       bool
-	certs         []tls.Certificate
-	proxyProtocol bool
+	addr      string
+	connChan  chan PlayerConn
+	lifecycle acceptorLifecycle
+
+	configMu                   sync.RWMutex
+	certs                      []tls.Certificate
+	proxyProtocol              bool
+	proxyProtocolHeaderTimeout time.Duration
 }
 
 type tcpPlayerConn struct {
@@ -54,7 +57,7 @@ func (t *tcpPlayerConn) RemoteAddr() net.Addr {
 
 // GetNextMessage reads the next message available in the stream
 func (t *tcpPlayerConn) GetNextMessage() (b []byte, err error) {
-	header, err := ioutil.ReadAll(io.LimitReader(t.Conn, codec.HeadLength))
+	header, err := io.ReadAll(io.LimitReader(t.Conn, codec.HeadLength))
 	if err != nil {
 		return nil, err
 	}
@@ -66,7 +69,7 @@ func (t *tcpPlayerConn) GetNextMessage() (b []byte, err error) {
 	if err != nil {
 		return nil, err
 	}
-	msgData, err := ioutil.ReadAll(io.LimitReader(t.Conn, int64(msgSize)))
+	msgData, err := io.ReadAll(io.LimitReader(t.Conn, int64(msgSize)))
 	if err != nil {
 		return nil, err
 	}
@@ -94,20 +97,17 @@ func NewTCPAcceptor(addr string, certs ...string) *TCPAcceptor {
 
 func NewTLSAcceptor(addr string, certs ...tls.Certificate) *TCPAcceptor {
 	return &TCPAcceptor{
-		addr:          addr,
-		connChan:      make(chan PlayerConn),
-		running:       false,
-		certs:         certs,
-		proxyProtocol: false,
+		addr:                       addr,
+		connChan:                   make(chan PlayerConn),
+		lifecycle:                  newAcceptorLifecycle(),
+		certs:                      certs,
+		proxyProtocolHeaderTimeout: DefaultProxyProtocolHeaderTimeout,
 	}
 }
 
 // GetAddr returns the addr the acceptor will listen on
 func (a *TCPAcceptor) GetAddr() string {
-	if a.listener != nil {
-		return a.listener.Addr().String()
-	}
-	return ""
+	return a.lifecycle.boundAddr()
 }
 
 // GetConnChan gets a connection channel
@@ -117,89 +117,146 @@ func (a *TCPAcceptor) GetConnChan() chan PlayerConn {
 
 // Stop stops the acceptor
 func (a *TCPAcceptor) Stop() {
-	a.running = false
-	a.listener.Close()
+	a.lifecycle.stop()
 }
 
-func (a *TCPAcceptor) hasTLSCertificates() bool {
-	return len(a.certs) > 0
+// Ready returns an independent channel which receives and then closes with the
+// one-time bind result. Calls made after startup replay the same result.
+func (a *TCPAcceptor) Ready() <-chan error {
+	return a.lifecycle.readyChan()
 }
 
-// ListenAndServe using tcp acceptor
-func (a *TCPAcceptor) ListenAndServe() {
-
-	listener := a.createBaseListener()
-
-	if a.hasTLSCertificates() {
-		listener = a.listenAndServeTLS(listener)
-	}
-
-	a.listener = listener
-	a.running = true
-	a.serve()
+// ListenAndServe is a compatibility wrapper around Serve.
+func (a *TCPAcceptor) ListenAndServe() error {
+	return a.Serve(context.Background())
 }
 
 // ListenAndServeTLS listens using tls
-func (a *TCPAcceptor) ListenAndServeTLS(cert, key string) {
-	listener := a.createBaseListener()
+func (a *TCPAcceptor) ListenAndServeTLS(cert, key string) error {
+	if err := a.lifecycle.begin(); err != nil {
+		return err
+	}
 
 	crt, err := tls.LoadX509KeyPair(cert, key)
 	if err != nil {
-		logger.Sugar.Fatalf("Failed to listen: %s", err.Error())
+		err = fmt.Errorf("%w: %v", constants.ErrInvalidCertificates, err)
+		a.lifecycle.fail(err)
+		return err
 	}
 
+	a.configMu.Lock()
 	a.certs = append(a.certs, crt)
+	a.configMu.Unlock()
+	return a.serveStarted(context.Background())
+}
 
-	a.listener = a.listenAndServeTLS(listener)
-	a.running = true
-	a.serve()
+// Serve binds the configured address and accepts connections until ctx is
+// canceled, Stop is called, or the listener returns an error.
+func (a *TCPAcceptor) Serve(ctx context.Context) error {
+	if err := a.lifecycle.begin(); err != nil {
+		return err
+	}
+	return a.serveStarted(ctx)
+}
+
+func (a *TCPAcceptor) serveStarted(ctx context.Context) error {
+	if ctx == nil {
+		a.lifecycle.fail(ErrNilServeContext)
+		return ErrNilServeContext
+	}
+
+	certs, proxyProtocol, proxyHeaderTimeout := a.configSnapshot()
+	listener, err := a.createBaseListener(ctx, proxyProtocol, proxyHeaderTimeout)
+	if err != nil {
+		a.lifecycle.fail(err)
+		return err
+	}
+	if len(certs) > 0 {
+		listener = a.listenAndServeTLS(listener, certs)
+	}
+	if err := a.lifecycle.publish(listener); err != nil {
+		return err
+	}
+
+	watchDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			a.Stop()
+		case <-watchDone:
+		}
+	}()
+
+	err = a.serve(ctx, listener)
+	close(watchDone)
+	a.Stop()
+	return err
+}
+
+func (a *TCPAcceptor) configSnapshot() ([]tls.Certificate, bool, time.Duration) {
+	a.configMu.RLock()
+	defer a.configMu.RUnlock()
+
+	certs := append([]tls.Certificate(nil), a.certs...)
+	return certs, a.proxyProtocol, a.proxyProtocolHeaderTimeout
 }
 
 // Create base listener
-func (a *TCPAcceptor) createBaseListener() net.Listener {
-	// Create raw listener
-	baseListener, err := net.Listen("tcp", a.addr)
+func (a *TCPAcceptor) createBaseListener(ctx context.Context, proxyProtocol bool, proxyHeaderTimeout time.Duration) (net.Listener, error) {
+	baseListener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", a.addr)
 	if err != nil {
-		logger.Log.Fatalf("Failed to listen: %s", err.Error())
+		return nil, err
 	}
 
-	// Wrap listener in ProxyProto
-	baseListener = &ProxyProtocolListener{Listener: baseListener, proxyProtocolEnabled: &a.proxyProtocol}
-
-	return baseListener
+	return &ProxyProtocolListener{
+		Listener:             baseListener,
+		ProxyProtocolEnabled: proxyProtocol,
+		HeaderTimeout:        proxyHeaderTimeout,
+	}, nil
 }
 
 // ListenAndServeTLS listens using tls
-func (a *TCPAcceptor) listenAndServeTLS(listener net.Listener) net.Listener {
-
-	tlsCfg := &tls.Config{Certificates: a.certs}
-	tlsListener := tls.NewListener(listener, tlsCfg)
-
-	return tlsListener
+func (a *TCPAcceptor) listenAndServeTLS(listener net.Listener, certs []tls.Certificate) net.Listener {
+	return tls.NewListener(listener, &tls.Config{Certificates: certs})
 }
 
 func (a *TCPAcceptor) EnableProxyProtocol() {
+	a.configMu.Lock()
+	defer a.configMu.Unlock()
 	a.proxyProtocol = true
 }
 
-func (a *TCPAcceptor) serve() {
-	defer a.Stop()
-	for a.running {
-		conn, err := a.listener.Accept()
+func (a *TCPAcceptor) serve(ctx context.Context, listener net.Listener) error {
+	for {
+		conn, err := listener.Accept()
 		if err != nil {
-			logger.Zap.Error("Failed to accept TCP connection", zap.Error(err))
-			continue
+			if isProxyProtocolError(err) {
+				continue
+			}
+			if ctx.Err() != nil || !a.IsRunning() || errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			return fmt.Errorf("accept TCP connection: %w", err)
 		}
 
-		a.connChan <- &tcpPlayerConn{
+		playerConn := &tcpPlayerConn{
 			Conn:       conn,
 			remoteAddr: conn.RemoteAddr(),
+		}
+		select {
+		case a.connChan <- playerConn:
+		case <-ctx.Done():
+			_ = conn.Close()
+			return nil
+		case <-a.lifecycle.doneChan():
+			_ = conn.Close()
+			return nil
 		}
 	}
 }
 
 func (a *TCPAcceptor) IsRunning() bool {
-	return a.running
+	return a.lifecycle.isRunning()
 }
 
 func (a *TCPAcceptor) GetConfiguredAddress() string {

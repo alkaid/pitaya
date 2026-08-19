@@ -1,19 +1,38 @@
 package worker
 
 import (
+	"context"
 	"strconv"
 	"time"
 
+	workers "github.com/alkaid/pitaya/v2/internal/workers"
 	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/metrics"
-
-	workers "github.com/topfreegames/go-workers"
 )
 
 // Report sends periodic of worker reports
 func Report(reporters []metrics.Reporter, period time.Duration) {
+	ReportContext(context.Background(), reporters, period)
+}
+
+// ReportContext sends periodic worker reports until the context is canceled.
+func ReportContext(ctx context.Context, reporters []metrics.Reporter, period time.Duration) {
+	if ctx.Err() != nil {
+		return
+	}
+
+	timer := time.NewTimer(period)
+	defer timer.Stop()
+
 	for {
-		time.Sleep(period)
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			if ctx.Err() != nil {
+				return
+			}
+		}
 
 		workerStats := workers.GetStats()
 		for _, r := range reporters {
@@ -21,6 +40,11 @@ func Report(reporters []metrics.Reporter, period time.Duration) {
 			reportQueueSizes(r, workerStats.Enqueued)
 			reportJobsTotal(r, workerStats.Failed, workerStats.Processed)
 		}
+
+		if ctx.Err() != nil {
+			return
+		}
+		timer.Reset(period)
 	}
 }
 

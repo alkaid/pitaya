@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nuid"
@@ -58,7 +59,8 @@ import (
 )
 
 var (
-	handlerType = "handler"
+	handlerType              = "handler"
+	ErrHandlerServiceStopped = errors.New("handler service is stopping")
 )
 
 type (
@@ -74,6 +76,11 @@ type (
 		agentFactory     agent.AgentFactory
 		handlerPool      *HandlerPool
 		handlers         map[string]*component.Handler // all handler method
+		taskMu           sync.Mutex
+		taskWG           sync.WaitGroup
+		tasksClosed      bool
+		taskCtx          context.Context
+		cancelTasks      context.CancelFunc
 	}
 
 	unhandledMessage struct {
@@ -97,6 +104,7 @@ func NewHandlerService(
 	handlerHooks *pipeline.HandlerHooks,
 	handlerPool *HandlerPool,
 ) *HandlerService {
+	taskCtx, cancelTasks := context.WithCancel(context.Background())
 	h := &HandlerService{
 		services:         make(map[string]*component.Service),
 		decoder:          packetDecoder,
@@ -107,6 +115,8 @@ func NewHandlerService(
 		metricsReporters: metricsReporters,
 		handlerPool:      handlerPool,
 		handlers:         make(map[string]*component.Handler),
+		taskCtx:          taskCtx,
+		cancelTasks:      cancelTasks,
 	}
 
 	h.handlerHooks = handlerHooks
@@ -116,13 +126,18 @@ func NewHandlerService(
 
 // Dispatch message to corresponding logic handler
 func (h *HandlerService) Dispatch(thread int) {
-	// TODO: This timer is being stopped multiple times, it probably doesn't need to be stopped here
-	defer timer.GlobalTicker.Stop()
+	h.DispatchContext(context.Background(), thread)
+}
 
+// DispatchContext dispatches timer work until the owning App lifecycle ends.
+func (h *HandlerService) DispatchContext(ctx context.Context, thread int) {
+	ticks := timer.GlobalTicker.C
 	for {
 		// Calls to remote servers block calls to local server
 		select {
-		case <-timer.GlobalTicker.C: // execute cron task
+		case <-ctx.Done():
+			return
+		case <-ticks: // execute cron task
 			timer.Cron()
 
 		case t := <-timer.Manager.ChCreatedTimer: // new Timers
@@ -171,14 +186,24 @@ func (h *HandlerService) Handle(conn acceptor.PlayerConn) {
 	// create a client agent and startup write goroutine
 	a := h.agentFactory.CreateAgent(conn)
 
-	// startup agent goroutine
-	co.Go(func() { a.Handle() })
+	// Keep the agent lifecycle inside this connection handler so App shutdown can
+	// wait until its final cleanup and logging have completed.
+	agentDone := make(chan struct{})
+	if err := co.Submit(func() {
+		defer close(agentDone)
+		a.Handle()
+	}); err != nil {
+		a.GetSession().Close(nil)
+		logger.Zap.Error("Failed to start agent", zap.Error(err))
+		return
+	}
 
 	logger.Log.Debugf("New session established: %s", a.String())
 
 	// guarantee agent related resource is destroyed
 	defer func() {
 		a.GetSession().Close(nil)
+		<-agentDone
 		logger.Log.Debugf("Session read goroutine exit, SessionID=%d, UID=%s", a.GetSession().ID(), a.GetSession().UID())
 	}()
 
@@ -219,9 +244,27 @@ func (h *HandlerService) Handle(conn acceptor.PlayerConn) {
 	}
 }
 
+// HandleContext closes the accepted connection when the App ends the
+// connection lifecycle. This also covers handlers that were admitted to the
+// worker pool but had not created their Agent when shutdown began.
+func (h *HandlerService) HandleContext(ctx context.Context, conn acceptor.PlayerConn) {
+	if ctx == nil {
+		h.Handle(conn)
+		return
+	}
+	stopClose := context.AfterFunc(ctx, func() {
+		_ = conn.Close()
+	})
+	defer stopClose()
+	h.Handle(conn)
+}
+
 func (h *HandlerService) processPacket(a agent.Agent, p *packet.Packet) error {
 	switch p.Type {
 	case packet.Handshake:
+		if status := a.GetStatus(); status != constants.StatusStart {
+			return rejectPacketForStatus(a, p.Type, status, constants.StatusStart)
+		}
 		logger.Log.Debug("Received handshake packet")
 
 		// Parse the json sent with the handshake by the client
@@ -248,14 +291,17 @@ func (h *HandlerService) processPacket(a agent.Agent, p *packet.Packet) error {
 			return fmt.Errorf("handshake validation failed: %w. SessionId=%d", err, a.GetSession().ID())
 		}
 
+		if !agent.TransitionStatus(a, constants.StatusStart, constants.StatusHandshakeValidated) {
+			return rejectPacketForStatus(a, p.Type, a.GetStatus(), constants.StatusStart)
+		}
+
+		a.GetSession().SetHandshakeData(handshakeData)
 		if err := a.SendHandshakeResponse(); err != nil {
 			logger.Zap.Error("Error sending handshake response", zap.Error(err))
 			return err
 		}
 		logger.Log.Debugf("Session handshake Id=%d, Remote=%s", a.GetSession().ID(), a.RemoteAddr())
 
-		a.GetSession().SetHandshakeData(handshakeData)
-		a.SetStatus(constants.StatusHandshake)
 		// ipversion 暂时用不到
 		//err := a.GetSession().Set(constants.IPVersionKey, a.IPVersion())
 		//if err != nil {
@@ -265,13 +311,14 @@ func (h *HandlerService) processPacket(a agent.Agent, p *packet.Packet) error {
 		logger.Zap.Debug("Successfully saved handshake data")
 
 	case packet.HandshakeAck:
-		a.SetStatus(constants.StatusWorking)
+		if !agent.TransitionStatus(a, constants.StatusHandshakeValidated, constants.StatusWorking) {
+			return rejectPacketForStatus(a, p.Type, a.GetStatus(), constants.StatusHandshakeValidated)
+		}
 		logger.Log.Debugf("Receive handshake ACK Id=%d, Remote=%s", a.GetSession().ID(), a.RemoteAddr())
 
 	case packet.Data:
-		if a.GetStatus() < constants.StatusWorking {
-			return fmt.Errorf("receive data on socket which is not yet ACK, session will be closed immediately, remote=%s",
-				a.RemoteAddr().String())
+		if status := a.GetStatus(); status != constants.StatusWorking {
+			return rejectPacketForStatus(a, p.Type, status, constants.StatusWorking)
 		}
 
 		msg, err := message.Decode(p.Data)
@@ -281,9 +328,12 @@ func (h *HandlerService) processPacket(a agent.Agent, p *packet.Packet) error {
 		h.processMessage(a, msg)
 
 	case packet.Heartbeat:
-		var rawUnixMillTime int64 = 0
-		if len(p.Data) > 0 {
-			rawUnixMillTime = int64(binary.BigEndian.Uint64(p.Data))
+		if status := a.GetStatus(); status != constants.StatusWorking {
+			return rejectPacketForStatus(a, p.Type, status, constants.StatusWorking)
+		}
+		rawUnixMillTime, err := decodeHeartbeatTimestamp(p.Data)
+		if err != nil {
+			return err
 		}
 		if err := a.SendHeartbeatResponse(rawUnixMillTime); err != nil {
 			logger.Zap.Error("Error sending handshake response", zap.Error(err))
@@ -291,22 +341,43 @@ func (h *HandlerService) processPacket(a agent.Agent, p *packet.Packet) error {
 		}
 
 	case packet.HeartbeatAck:
-		var rawUnixMillTime int64 = 0
-		if len(p.Data) > 0 {
-			rawUnixMillTime = int64(binary.BigEndian.Uint64(p.Data))
-			if rawUnixMillTime > 0 {
-				lastTime := time.UnixMilli(rawUnixMillTime)
-				latency := time.Now().Sub(lastTime)
-				if latency > time.Millisecond*100 {
-					logger.Zap.Debug("client latency too much", zap.Int64("id", a.GetSession().ID()), zap.String("uid", a.GetSession().UID()), zap.Duration("latency", latency))
-				}
-				// TODO 上报监控
-			}
+		if status := a.GetStatus(); status != constants.StatusWorking {
+			return rejectPacketForStatus(a, p.Type, status, constants.StatusWorking)
 		}
+		rawUnixMillTime, err := decodeHeartbeatTimestamp(p.Data)
+		if err != nil {
+			return err
+		}
+		if rawUnixMillTime > 0 {
+			lastTime := time.UnixMilli(rawUnixMillTime)
+			latency := time.Since(lastTime)
+			if latency > time.Millisecond*100 {
+				logger.Zap.Debug("client latency too much", zap.Int64("id", a.GetSession().ID()), zap.String("uid", a.GetSession().UID()), zap.Duration("latency", latency))
+			}
+			// TODO 上报监控
+		}
+
+	default:
+		return rejectPacketForStatus(a, p.Type, a.GetStatus(), constants.StatusWorking)
 	}
 
 	a.SetLastAt()
 	return nil
+}
+
+func decodeHeartbeatTimestamp(data []byte) (int64, error) {
+	if len(data) == 0 {
+		return 0, nil
+	}
+	if len(data) != 8 {
+		return 0, fmt.Errorf("invalid heartbeat payload length %d: expected 0 or 8 bytes", len(data))
+	}
+	return int64(binary.BigEndian.Uint64(data)), nil
+}
+
+func rejectPacketForStatus(a agent.Agent, packetType packet.Type, actual, expected int32) error {
+	a.GetSession().Close(nil)
+	return fmt.Errorf("unexpected packet type %d for agent status %d, expected status %d", packetType, actual, expected)
 }
 
 func (h *HandlerService) processMessage(a agent.Agent, msg *message.Message) {
@@ -343,13 +414,13 @@ func (h *HandlerService) processMessage(a agent.Agent, msg *message.Message) {
 
 	if r.SvType == h.server.Type {
 		// 派发给session独立线程避免互相影响
-		err = a.GetSession().Go(ctx, func(ctx context.Context) {
+		err = h.submitSessionTask(a.GetSession(), ctx, func(ctx context.Context) {
 			metrics.ReportMessageProcessDelayFromCtx(ctx, h.metricsReporters, "local")
 			h.localProcess(ctx, a, r, msg)
 		})
 	} else {
 		if h.remoteService != nil {
-			err = a.GetSession().Go(ctx, func(ctx context.Context) {
+			err = h.submitSessionTask(a.GetSession(), ctx, func(ctx context.Context) {
 				metrics.ReportMessageProcessDelayFromCtx(ctx, h.metricsReporters, "remote")
 				h.remoteService.remoteProcess(ctx, nil, a, r, msg)
 			})
@@ -367,6 +438,56 @@ func (h *HandlerService) processMessage(a agent.Agent, msg *message.Message) {
 			return
 		}
 		a.AnswerWithError(ctx, msg.ID, publicErr)
+	}
+}
+
+func (h *HandlerService) submitSessionTask(sess session.Session, ctx context.Context, task func(context.Context)) error {
+	h.taskMu.Lock()
+	if h.tasksClosed {
+		h.taskMu.Unlock()
+		return ErrHandlerServiceStopped
+	}
+	h.taskWG.Add(1)
+	h.taskMu.Unlock()
+
+	taskCtx, cancelTask := contextWithLifecycle(ctx, h.taskCtx)
+	err := sess.Go(taskCtx, func(ctx context.Context) {
+		defer cancelTask()
+		defer h.taskWG.Done()
+		task(ctx)
+	})
+	if err != nil {
+		cancelTask()
+		h.taskWG.Done()
+	}
+	return err
+}
+
+// DrainTasks closes task admission and waits for every accepted local or
+// remote handler task. Call it only after all connection handlers have exited.
+func (h *HandlerService) DrainTasks() {
+	h.taskMu.Lock()
+	h.tasksClosed = true
+	cancelTasks := h.cancelTasks
+	h.taskMu.Unlock()
+	if cancelTasks != nil {
+		cancelTasks()
+	}
+	h.taskWG.Wait()
+}
+
+func contextWithLifecycle(parent, lifecycle context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	if lifecycle == nil {
+		return ctx, cancel
+	}
+	stopLifecycle := context.AfterFunc(lifecycle, cancel)
+	return ctx, func() {
+		stopLifecycle()
+		cancel()
 	}
 }
 

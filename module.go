@@ -143,12 +143,20 @@ func (app *App) maxModuleSessionCount() int64 {
 	return count
 }
 
-// shutdownModules starts all modules in reverse order
-func (app *App) shutdownModules() {
-	for i := len(app.modulesArr) - 1; i >= 0; i-- {
-		app.modulesArr[i].module.BeforeShutdown()
-	}
+// beforeShutdownModules closes module-owned admission and waits for module
+// workers while the remaining module resources are still available.
+func (app *App) beforeShutdownModules() {
+	app.beforeModulesOnce.Do(func() {
+		for i := len(app.modulesArr) - 1; i >= 0; i-- {
+			app.modulesArr[i].module.BeforeShutdown()
+		}
+	})
+}
 
+// shutdownModules releases all modules in reverse order after runtime work has
+// drained. Calling it directly preserves the complete two-phase lifecycle.
+func (app *App) shutdownModules() {
+	app.beforeShutdownModules()
 	for i := len(app.modulesArr) - 1; i >= 0; i-- {
 		name := app.modulesArr[i].name
 		mod := app.modulesArr[i].module

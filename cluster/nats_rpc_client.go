@@ -24,6 +24,8 @@ import (
 	"context"
 	"fmt"
 	"github.com/alkaid/goerrors/errors"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alkaid/goerrors/apierrors"
@@ -47,11 +49,13 @@ import (
 // NatsRPCClient struct
 type NatsRPCClient struct {
 	conn                   *nats.Conn
+	terminalCallbackDone   <-chan struct{}
 	connString             string
 	connectionTimeout      time.Duration
 	maxReconnectionRetries int
 	reqTimeout             time.Duration
-	running                bool
+	running                atomic.Bool
+	shutdownOnce           sync.Once
 	server                 *Server
 	metricsReporters       []metrics.Reporter
 	appDieChan             chan bool
@@ -66,7 +70,6 @@ func NewNatsRPCClient(
 ) (*NatsRPCClient, error) {
 	ns := &NatsRPCClient{
 		server:            server,
-		running:           false,
 		metricsReporters:  metricsReporters,
 		appDieChan:        appDieChan,
 		connectionTimeout: nats.DefaultTimeout,
@@ -108,7 +111,7 @@ func (ns *NatsRPCClient) BroadcastSessionBind(uid string) error {
 
 // Send publishes a message in a given topic
 func (ns *NatsRPCClient) Send(topic string, data []byte) error {
-	if !ns.running {
+	if !ns.running.Load() {
 		return constants.ErrRPCClientNotInitialized
 	}
 	return ns.conn.Publish(topic, data)
@@ -155,7 +158,7 @@ func (ns *NatsRPCClient) Publish(
 	ctx = tracing.RPCStartSpan(ctx, spanInfo)
 	defer tracing.FinishSpan(ctx, err)
 
-	if !ns.running {
+	if !ns.running.Load() {
 		err = constants.ErrRPCClientNotInitialized
 		return nil, errors.WithStack(err)
 	}
@@ -187,7 +190,7 @@ func (ns *NatsRPCClient) Publish(
 		}
 		return nil, nil
 	}
-	if !ns.running {
+	if !ns.running.Load() {
 		return nil, constants.ErrRPCClientNotInitialized
 	}
 	uid := ""
@@ -268,7 +271,7 @@ func (ns *NatsRPCClient) Call(
 	ctx = tracing.RPCStartSpan(ctx, spanInfo)
 	defer tracing.FinishSpan(ctx, err)
 
-	if !ns.running {
+	if !ns.running.Load() {
 		err = constants.ErrRPCClientNotInitialized
 		return nil, errors.WithStack(err)
 	}
@@ -370,7 +373,7 @@ func (ns *NatsRPCClient) Fork(
 	ctx = tracing.RPCStartSpan(ctx, spanInfo)
 	defer tracing.FinishSpan(ctx, err)
 
-	if !ns.running {
+	if !ns.running.Load() {
 		err = constants.ErrRPCClientNotInitialized
 		return errors.WithStack(err)
 	}
@@ -398,11 +401,11 @@ func (ns *NatsRPCClient) Fork(
 
 // Init inits nats rpc client
 func (ns *NatsRPCClient) Init() error {
-	ns.running = true
 	logger.Log.Debugf("connecting to nats (client) with timeout of %s", ns.connectionTimeout)
-	conn, err := setupNatsConn(
+	conn, terminalCallbackDone, err := setupTrackedNatsConn(
 		ns.connString,
 		ns.appDieChan,
+		nil,
 		nats.MaxReconnects(ns.maxReconnectionRetries),
 		nats.Timeout(ns.connectionTimeout),
 	)
@@ -410,22 +413,35 @@ func (ns *NatsRPCClient) Init() error {
 		return err
 	}
 	ns.conn = conn
+	ns.terminalCallbackDone = terminalCallbackDone
+	ns.running.Store(true)
 	return nil
 }
 
 // AfterInit runs after initialization
 func (ns *NatsRPCClient) AfterInit() {}
 
-// BeforeShutdown runs before shutdown
+// BeforeShutdown keeps outbound RPC available while already-admitted handler
+// tasks drain. Shutdown closes admission after that drain completes.
 func (ns *NatsRPCClient) BeforeShutdown() {}
 
-// Shutdown stops nats rpc server
+// Shutdown stops nats rpc client
 func (ns *NatsRPCClient) Shutdown() error {
+	ns.stop()
+	ns.shutdownOnce.Do(func() {
+		if ns.conn == nil {
+			return
+		}
+		ns.conn.Close()
+		if ns.terminalCallbackDone != nil {
+			<-ns.terminalCallbackDone
+		}
+	})
 	return nil
 }
 
 func (ns *NatsRPCClient) stop() {
-	ns.running = false
+	ns.running.Store(false)
 }
 
 func (ns *NatsRPCClient) getSubscribeChannel() string {

@@ -59,7 +59,7 @@ func TestNewNatsRPCClient(t *testing.T) {
 	assert.NotNil(t, n)
 	assert.Equal(t, sv, n.server)
 	assert.Equal(t, mockMetricsReporters, n.metricsReporters)
-	assert.False(t, n.running)
+	assert.False(t, n.running.Load())
 }
 
 func TestNatsRPCClientConfigure(t *testing.T) {
@@ -99,9 +99,9 @@ func TestNatsRPCClientStop(t *testing.T) {
 	sv := getServer()
 	n, _ := NewNatsRPCClient(cfg, sv, nil, nil)
 	// change it to true to ensure it goes to false
-	n.running = true
+	n.running.Store(true)
 	n.stop()
-	assert.False(t, n.running)
+	assert.False(t, n.running.Load())
 }
 
 func TestNatsRPCClientInitShouldFailIfConnFails(t *testing.T) {
@@ -124,11 +124,72 @@ func TestNatsRPCClientInit(t *testing.T) {
 	rpcClient, _ := NewNatsRPCClient(cfg, sv, nil, nil)
 	err := rpcClient.Init()
 	assert.NoError(t, err)
-	assert.True(t, rpcClient.running)
+	assert.True(t, rpcClient.running.Load())
 
 	// should setup conn
 	assert.NotNil(t, rpcClient.conn)
 	assert.True(t, rpcClient.conn.IsConnected())
+}
+
+func TestNatsRPCClientShutdownWaitsForTerminalCallback(t *testing.T) {
+	s := helpers.GetTestNatsServer(t)
+	defer s.Shutdown()
+
+	callbackStarted := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(releaseCallback)
+		}
+	}()
+	conn, terminalCallbackDone, err := setupTrackedNatsConn(
+		fmt.Sprintf("nats://%s", s.Addr()),
+		nil,
+		func() {
+			close(callbackStarted)
+			<-releaseCallback
+		},
+	)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Client.Nats
+	rpcClient, err := NewNatsRPCClient(cfg, getServer(), nil, nil)
+	require.NoError(t, err)
+	rpcClient.conn = conn
+	rpcClient.terminalCallbackDone = terminalCallbackDone
+	rpcClient.running.Store(true)
+
+	rpcClient.BeforeShutdown()
+	assert.True(t, rpcClient.running.Load())
+	assert.False(t, conn.IsClosed())
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- rpcClient.Shutdown()
+	}()
+	select {
+	case <-callbackStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not start the terminal NATS callback")
+	}
+	select {
+	case <-shutdownDone:
+		t.Fatal("Shutdown returned while the terminal NATS callback was running")
+	default:
+	}
+
+	close(releaseCallback)
+	released = true
+	select {
+	case err := <-shutdownDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not return after the terminal NATS callback exited")
+	}
+	assert.True(t, conn.IsClosed())
+	require.NoError(t, rpcClient.Shutdown())
 }
 
 func TestNatsRPCClientBroadcastSessionBind(t *testing.T) {

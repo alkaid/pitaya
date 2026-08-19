@@ -80,11 +80,16 @@ func mustConnectToWS(t *testing.T, write []byte, w *WSAcceptor, protocol string)
 	t.Helper()
 	helpers.ShouldEventuallyReturn(t, func() error {
 		addr := fmt.Sprintf("%s://%s", protocol, w.GetAddr())
-		dialer := websocket.DefaultDialer
+		dialer := *websocket.DefaultDialer
+		if protocol == "wss" {
+			dialer.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec -- test certificate
+		}
 		conn, _, err := dialer.Dial(addr, nil)
-		dialer.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-		conn.WriteMessage(websocket.BinaryMessage, write)
-		return err
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		return conn.WriteMessage(websocket.BinaryMessage, write)
 	}, nil, 30*time.Millisecond, 100*time.Millisecond)
 }
 

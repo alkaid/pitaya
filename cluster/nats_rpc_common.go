@@ -22,18 +22,46 @@ package cluster
 
 import (
 	"fmt"
+	"sync"
 
 	"go.uber.org/zap"
 
-	nats "github.com/nats-io/nats.go"
 	"github.com/alkaid/pitaya/v2/logger"
+	nats "github.com/nats-io/nats.go"
 )
 
 func getChannel(serverType, serverID string) string {
 	return fmt.Sprintf("pitaya/servers/%s/%s", serverType, serverID)
 }
 
+func signalAppDie(appDieChan chan bool) {
+	if appDieChan == nil {
+		return
+	}
+	// Legacy callers can still supply or close this channel. Internal lifecycle
+	// code never closes it, and signaling must never block a transport callback.
+	defer func() {
+		_ = recover()
+	}()
+	select {
+	case appDieChan <- true:
+	default:
+	}
+}
+
 func setupNatsConn(connectString string, appDieChan chan bool, options ...nats.Option) (*nats.Conn, error) {
+	nc, _, err := setupTrackedNatsConn(connectString, appDieChan, nil, options...)
+	return nc, err
+}
+
+func setupTrackedNatsConn(
+	connectString string,
+	appDieChan chan bool,
+	terminalCallback func(),
+	options ...nats.Option,
+) (*nats.Conn, <-chan struct{}, error) {
+	terminalCallbackDone := make(chan struct{})
+	var terminalCallbackOnce sync.Once
 	natsOptions := append(
 		options,
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {
@@ -43,6 +71,12 @@ func setupNatsConn(connectString string, appDieChan chan bool, options ...nats.O
 			logger.Log.Warnf("reconnected to nats server %s with address %s in cluster %s!", nc.ConnectedServerName(), nc.ConnectedAddr(), nc.ConnectedClusterName())
 		}),
 		nats.ClosedHandler(func(nc *nats.Conn) {
+			defer terminalCallbackOnce.Do(func() {
+				close(terminalCallbackDone)
+			})
+			if terminalCallback != nil {
+				terminalCallback()
+			}
 			err := nc.LastError()
 			if err == nil {
 				logger.Log.Warn("nats connection closed with no error.")
@@ -50,9 +84,7 @@ func setupNatsConn(connectString string, appDieChan chan bool, options ...nats.O
 			}
 
 			logger.Zap.Error("nats connection closed", zap.Error(err))
-			if appDieChan != nil {
-				appDieChan <- true
-			}
+			signalAppDie(appDieChan)
 		}),
 		nats.ErrorHandler(func(nc *nats.Conn, sub *nats.Subscription, err error) {
 			if err == nats.ErrSlowConsumer {
@@ -67,7 +99,7 @@ func setupNatsConn(connectString string, appDieChan chan bool, options ...nats.O
 
 	nc, err := nats.Connect(connectString, natsOptions...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return nc, nil
+	return nc, terminalCallbackDone, nil
 }

@@ -26,15 +26,17 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"sync"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 
 	"github.com/alkaid/pitaya/v2/co"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/constants"
+	workers "github.com/alkaid/pitaya/v2/internal/workers"
 	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/logger/interfaces"
-	workers "github.com/topfreegames/go-workers"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -43,7 +45,13 @@ type Worker struct {
 	concurrency int
 	registered  bool
 	opts        *config.EnqueueOpts
-	started     bool
+	startStopMu sync.Mutex
+	lifecycleMu sync.RWMutex
+	lifecycle   context.Context
+	cancel      context.CancelFunc
+	started     atomic.Bool
+	stopped     bool
+	quit        func()
 }
 
 // NewWorker configures and returns a *Worker
@@ -69,12 +77,13 @@ func NewWorker(config config.WorkerConfig, opts config.EnqueueOpts) (*Worker, er
 	return &Worker{
 		concurrency: config.Concurrency,
 		opts:        &opts,
+		quit:        workers.QuitAndReset,
 	}, nil
 }
 
 // SetLogger overwrites worker logger
 func (w *Worker) SetLogger(logger interfaces.Logger) {
-	workers.Logger = logger
+	workers.SetLogger(logger)
 }
 
 // Start starts worker in another goroutine and panics if it cannot be admitted.
@@ -86,16 +95,68 @@ func (w *Worker) Start() {
 
 // StartWithError starts worker in another goroutine and reports admission errors.
 func (w *Worker) StartWithError() error {
-	if err := co.Submit(workers.Start); err != nil {
+	w.startStopMu.Lock()
+	defer w.startStopMu.Unlock()
+	if w.started.Load() {
+		return nil
+	}
+	w.lifecycleMu.Lock()
+	w.lifecycle, w.cancel = context.WithCancel(context.Background())
+	w.lifecycleMu.Unlock()
+	started := make(chan struct{})
+	if err := co.Submit(func() {
+		defer close(started)
+		workers.Start()
+	}); err != nil {
+		w.lifecycleMu.RLock()
+		cancel := w.cancel
+		w.lifecycleMu.RUnlock()
+		cancel()
 		return fmt.Errorf("start worker: %w", err)
 	}
-	w.started = true
+	<-started
+	w.started.Store(true)
+	w.stopped = false
 	return nil
+}
+
+// Stop stops accepting worker jobs, cancels the context passed to an active RPC
+// job, and waits for the go-workers runtime to exit.
+func (w *Worker) Stop() {
+	if w == nil {
+		return
+	}
+	w.startStopMu.Lock()
+	defer w.startStopMu.Unlock()
+	w.lifecycleMu.RLock()
+	cancel := w.cancel
+	w.lifecycleMu.RUnlock()
+	if cancel != nil {
+		cancel()
+	}
+	w.stopped = true
+	if w.started.Swap(false) || w.registered {
+		quit := w.quit
+		if quit == nil {
+			quit = workers.QuitAndReset
+		}
+		quit()
+	}
+	w.registered = false
 }
 
 // Started returns true if worker was started
 func (w *Worker) Started() bool {
-	return w != nil && w.started
+	return w != nil && w.started.Load()
+}
+
+func (w *Worker) context() context.Context {
+	w.lifecycleMu.RLock()
+	defer w.lifecycleMu.RUnlock()
+	if w.lifecycle == nil {
+		return context.Background()
+	}
+	return w.lifecycle
 }
 
 // EnqueueRPC enqueues rpc job to worker
@@ -130,6 +191,11 @@ func (w *Worker) EnqueueRPCWithOptions(
 
 // RegisterRPCJob registers a RPC job
 func (w *Worker) RegisterRPCJob(rpcJob RPCJob) error {
+	w.startStopMu.Lock()
+	defer w.startStopMu.Unlock()
+	if w.stopped {
+		return constants.ErrWorkerStopped
+	}
 	if w.registered {
 		return constants.ErrRPCJobAlreadyRegistered
 	}
@@ -174,7 +240,7 @@ func (w *Worker) parsedRPCJob(rpcJob RPCJob) func(*workers.Msg) {
 			panic(err)
 		}
 
-		ctx := context.Background()
+		ctx := w.context()
 
 		logger.Log.Debugf("executing rpc func to %s", rpcInfo.Route)
 		err = rpcJob.RPC(ctx, serverID, rpcInfo.Route, reply, arg)

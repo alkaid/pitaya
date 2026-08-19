@@ -25,9 +25,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alkaid/pitaya/v2/helpers"
 	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
-	"github.com/alkaid/pitaya/v2/helpers"
 )
 
 func getServer() *Server {
@@ -42,6 +42,25 @@ func TestNatsRPCCommonGetChannel(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, "pitaya/servers/type1/sv1", getChannel("type1", "sv1"))
 	assert.Equal(t, "pitaya/servers/2type1/2sv1", getChannel("2type1", "2sv1"))
+}
+
+func TestSignalAppDieIsIdempotentAndNonBlocking(t *testing.T) {
+	full := make(chan bool, 1)
+	full <- true
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		signalAppDie(full)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("signalAppDie blocked on a full channel")
+	}
+
+	closed := make(chan bool)
+	close(closed)
+	assert.NotPanics(t, func() { signalAppDie(closed) })
 }
 
 func TestNatsRPCCommonSetupNatsConn(t *testing.T) {
@@ -64,7 +83,7 @@ func TestNatsRPCCommonCloseHandler(t *testing.T) {
 	t.Parallel()
 	s := helpers.GetTestNatsServer(t)
 
-	dieChan := make(chan bool)
+	dieChan := make(chan bool, 1)
 
 	conn, err := setupNatsConn(fmt.Sprintf("nats://%s", s.Addr()), dieChan, nats.MaxReconnects(1),
 		nats.ReconnectWait(1*time.Millisecond))

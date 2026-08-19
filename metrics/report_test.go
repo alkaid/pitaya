@@ -25,6 +25,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,6 +37,83 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/mock/gomock"
 )
+
+type sysMetricsLifecycleReporter struct {
+	calls     atomic.Int64
+	firstCall chan struct{}
+}
+
+func newSysMetricsLifecycleReporter() *sysMetricsLifecycleReporter {
+	return &sysMetricsLifecycleReporter{firstCall: make(chan struct{})}
+}
+
+func (r *sysMetricsLifecycleReporter) ReportCount(string, map[string]string, float64) error {
+	return nil
+}
+
+func (r *sysMetricsLifecycleReporter) ReportSummary(string, map[string]string, float64) error {
+	return nil
+}
+
+func (r *sysMetricsLifecycleReporter) ReportHistogram(string, map[string]string, float64) error {
+	return nil
+}
+
+func (r *sysMetricsLifecycleReporter) ReportGauge(string, map[string]string, float64) error {
+	if r.calls.Add(1) == 1 {
+		close(r.firstCall)
+	}
+	return nil
+}
+
+func TestReportSysMetricsContextCancellation(t *testing.T) {
+	t.Run("before start", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		reporter := newSysMetricsLifecycleReporter()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			ReportSysMetricsContext(ctx, []Reporter{reporter}, time.Hour)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("ReportSysMetricsContext did not return for an already canceled context")
+		}
+		if got := reporter.calls.Load(); got != 0 {
+			t.Fatalf("reported %d gauges for an already canceled context", got)
+		}
+	})
+
+	t.Run("after start", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		reporter := newSysMetricsLifecycleReporter()
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			ReportSysMetricsContext(ctx, []Reporter{reporter}, time.Hour)
+		}()
+
+		select {
+		case <-reporter.firstCall:
+		case <-time.After(time.Second):
+			t.Fatal("ReportSysMetricsContext did not report immediately")
+		}
+		cancel()
+
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("ReportSysMetricsContext did not return after cancellation")
+		}
+		if got := reporter.calls.Load(); got != 3 {
+			t.Fatalf("reported %d gauges before cancellation, want 3", got)
+		}
+	})
+}
 
 func TestReportTimingFromCtx(t *testing.T) {
 	t.Run("test-duration", func(t *testing.T) {

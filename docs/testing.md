@@ -246,13 +246,14 @@ The complete targeted race lane is:
 make test-race
 ```
 
-It runs `co`, `session`, `agent`, `cluster`, `service`, and `router` ten times
-under the race detector, with a fixed 10-minute test timeout. The Tests workflow
-runs this lane on pushes to `main` and on manual dispatch, with a 15-minute job
-timeout so checkout and setup do not consume the test's diagnostic window. It is
-not part of `verify-fast` or the default pull-request matrix. The target forces
-`GOWORK=off` and clears inherited `GOFLAGS`, so caller settings cannot skip or
-narrow the required packages and repetitions.
+It runs `co`, `session`, `agent`, `cluster`, `service`, `router`, `acceptor`,
+`timer`, `logger`, and `config` ten times under the race detector, with a fixed
+10-minute test timeout. The Tests workflow runs this lane on pushes to `main`
+and on manual dispatch, with a 15-minute job timeout so checkout and setup do
+not consume the test's diagnostic window. It is not part of `verify-fast` or
+the default pull-request matrix. The target forces `GOWORK=off` and clears
+inherited `GOFLAGS`, so caller settings cannot skip or narrow the required
+packages and repetitions.
 
 Concurrency changes must still run the affected packages with `-race` and
 repeated counts chosen for the risk before they reach `main`.

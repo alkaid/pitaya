@@ -196,6 +196,30 @@ func TestCloseAll(t *testing.T) {
 	}
 }
 
+func TestForceCloseAllDoesNotWaitForRequestsInFlight(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	entity := mocks.NewMockNetworkEntity(ctrl)
+	entity.EXPECT().Close(nil).Times(2)
+
+	pool := NewSessionPool().(*sessionPoolImpl)
+	busy := newTestSession(pool, entity, true)
+	_ = newTestSession(pool, entity, true)
+	busy.SetRequestInFlight("request-id", "room.lookup", true)
+
+	done := make(chan struct{})
+	go func() {
+		pool.ForceCloseAll()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("ForceCloseAll waited for an in-flight request")
+	}
+	assert.Zero(t, pool.GetSessionCount())
+	assert.Zero(t, pool.GetUserCount())
+}
+
 func TestNew(t *testing.T) {
 	tables := []struct {
 		name     string

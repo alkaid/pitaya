@@ -24,9 +24,11 @@ import (
 	"context"
 	encjson "encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/alkaid/goerrors/apierrors"
 	agentmocks "github.com/alkaid/pitaya/v2/agent/mocks"
@@ -48,6 +50,7 @@ import (
 	"github.com/alkaid/pitaya/v2/session/mocks"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 )
 
@@ -257,6 +260,87 @@ func TestHandlerServiceProcessMessageReportsSubmissionError(t *testing.T) {
 	svc.processMessage(mockAgent, msg)
 }
 
+func TestHandlerServiceDrainTasksWaitsForAcceptedTask(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockSession := mocks.NewMockSession(ctrl)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	mockSession.EXPECT().Go(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, task func(context.Context)) error {
+			go task(ctx)
+			return nil
+		},
+	)
+
+	svc := NewHandlerService(nil, nil, 0, 0, nil, nil, nil, nil, nil, NewHandlerPool())
+	require.NoError(t, svc.submitSessionTask(mockSession, context.Background(), func(context.Context) {
+		close(started)
+		<-release
+	}))
+	<-started
+
+	drained := make(chan struct{})
+	go func() {
+		svc.DrainTasks()
+		close(drained)
+	}()
+	require.Eventually(t, func() bool {
+		svc.taskMu.Lock()
+		defer svc.taskMu.Unlock()
+		return svc.tasksClosed
+	}, time.Second, time.Millisecond)
+	select {
+	case <-drained:
+		t.Fatal("DrainTasks returned while an accepted task was running")
+	default:
+	}
+
+	close(release)
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("DrainTasks did not return after the accepted task completed")
+	}
+	assert.ErrorIs(t, svc.submitSessionTask(mockSession, context.Background(), func(context.Context) {}), ErrHandlerServiceStopped)
+}
+
+func TestHandlerServiceDrainTasksCancelsAcceptedTaskContext(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockSession := mocks.NewMockSession(ctrl)
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	mockSession.EXPECT().Go(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, task func(context.Context)) error {
+			go task(ctx)
+			return nil
+		},
+	)
+
+	svc := NewHandlerService(nil, nil, 0, 0, nil, nil, nil, nil, nil, NewHandlerPool())
+	require.NoError(t, svc.submitSessionTask(mockSession, context.Background(), func(ctx context.Context) {
+		close(started)
+		<-ctx.Done()
+		close(canceled)
+	}))
+	<-started
+
+	drained := make(chan struct{})
+	go func() {
+		svc.DrainTasks()
+		close(drained)
+	}()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("DrainTasks did not cancel the accepted task context")
+	}
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("DrainTasks did not return after the canceled task exited")
+	}
+}
+
 func TestHandlerServiceProcessNotifyLogsSubmissionErrorWithoutResponse(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	submitErr := errors.New("stateful pool rejected notify")
@@ -382,15 +466,14 @@ func TestHandlerServiceLocalProcess(t *testing.T) {
 
 func TestHandlerServiceProcessPacketHandshake(t *testing.T) {
 	tables := []struct {
-		name         string
-		packet       *packet.Packet
-		socketStatus int32
-		validator    func(data *session.HandshakeData) error
-		errStr       string
+		name      string
+		packet    *packet.Packet
+		validator func(data *session.HandshakeData) error
+		errStr    string
 	}{
-		{"invalid_handshake_data", &packet.Packet{Type: packet.Handshake, Data: []byte("asiodjasd")}, constants.StatusClosed, nil, "invalid handshake data"},
-		{"validator_error", &packet.Packet{Type: packet.Handshake, Data: []byte(`{"sys":{"platform":"mac"}}`)}, constants.StatusClosed, func(data *session.HandshakeData) error { return errors.New("validation failed") }, "handshake validation failed"},
-		{"valid_handshake_data", &packet.Packet{Type: packet.Handshake, Data: []byte(`{"sys":{"platform":"mac"}}`)}, constants.StatusHandshake, func(data *session.HandshakeData) error { return nil }, ""},
+		{"invalid_handshake_data", &packet.Packet{Type: packet.Handshake, Data: []byte("asiodjasd")}, nil, "invalid handshake data"},
+		{"validator_error", &packet.Packet{Type: packet.Handshake, Data: []byte(`{"sys":{"platform":"mac"}}`)}, func(data *session.HandshakeData) error { return errors.New("validation failed") }, "handshake validation failed"},
+		{"valid_handshake_data", &packet.Packet{Type: packet.Handshake, Data: []byte(`{"sys":{"platform":"mac"}}`)}, func(data *session.HandshakeData) error { return nil }, ""},
 	}
 	for _, table := range tables {
 		t.Run(table.name, func(t *testing.T) {
@@ -412,13 +495,15 @@ func TestHandlerServiceProcessPacketHandshake(t *testing.T) {
 			if table.errStr == "" {
 				handshakeData := &session.HandshakeData{}
 				_ = encjson.Unmarshal(table.packet.Data, handshakeData)
+				mockAgent.EXPECT().GetStatus().Return(constants.StatusStart)
+				mockAgent.EXPECT().TransitionStatus(constants.StatusStart, constants.StatusHandshakeValidated).Return(true)
 				mockAgent.EXPECT().RemoteAddr().Return(&mockAddr{})
-				mockAgent.EXPECT().SetStatus(table.socketStatus).Times(1)
 				mockAgent.EXPECT().SendHandshakeResponse().Return(nil).Times(1)
 				mockAgent.EXPECT().SetLastAt().Times(1)
 
 				mockSession.EXPECT().SetHandshakeData(handshakeData).Times(1)
 			} else {
+				mockAgent.EXPECT().GetStatus().Return(constants.StatusStart)
 				mockAgent.EXPECT().SendHandshakeErrorResponse().Return(nil).Times(1)
 				mockSession.EXPECT().Close(nil).Times(1)
 			}
@@ -436,41 +521,130 @@ func TestHandlerServiceProcessPacketHandshake(t *testing.T) {
 	}
 }
 
+func TestHandlerServiceRejectsDuplicateOrOutOfOrderHandshake(t *testing.T) {
+	for _, status := range []int32{constants.StatusHandshakeValidated, constants.StatusWorking, constants.StatusClosed} {
+		t.Run(fmt.Sprintf("status_%d", status), func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			mockSession := mocks.NewMockSession(ctrl)
+			mockSession.EXPECT().Close(nil)
+			mockAgent := agentmocks.NewMockAgent(ctrl)
+			mockAgent.EXPECT().GetStatus().Return(status)
+			mockAgent.EXPECT().GetSession().Return(mockSession)
+
+			svc := NewHandlerService(nil, nil, 1, 1, nil, nil, nil, nil, nil, NewHandlerPool())
+			err := svc.processPacket(mockAgent, &packet.Packet{Type: packet.Handshake, Data: []byte(`{}`)})
+			assert.ErrorContains(t, err, "unexpected packet type")
+		})
+	}
+}
+
 func TestHandlerServiceProcessPacketHandshakeAck(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
+	tables := []struct {
+		name    string
+		status  int32
+		wantErr bool
+	}{
+		{"ack_first", constants.StatusStart, true},
+		{"valid_ack", constants.StatusHandshakeValidated, false},
+		{"duplicate_ack", constants.StatusWorking, true},
+		{"ack_after_close", constants.StatusClosed, true},
+	}
+	for _, table := range tables {
+		t.Run(table.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
 
-	mockSession := mocks.NewMockSession(ctrl)
-	mockSession.EXPECT().ID().Return(int64(1)).Times(1)
+			mockSession := mocks.NewMockSession(ctrl)
+			mockAgent := agentmocks.NewMockAgent(ctrl)
+			if table.wantErr {
+				mockAgent.EXPECT().TransitionStatus(constants.StatusHandshakeValidated, constants.StatusWorking).Return(false)
+				mockAgent.EXPECT().GetStatus().Return(table.status)
+				mockAgent.EXPECT().GetSession().Return(mockSession)
+				mockSession.EXPECT().Close(nil)
+			} else {
+				mockAgent.EXPECT().TransitionStatus(constants.StatusHandshakeValidated, constants.StatusWorking).Return(true)
+				mockAgent.EXPECT().GetSession().Return(mockSession)
+				mockSession.EXPECT().ID().Return(int64(1))
+				mockAgent.EXPECT().RemoteAddr().Return(&mockAddr{})
+				mockAgent.EXPECT().SetLastAt()
+			}
 
-	handlerPool := NewHandlerPool()
-	svc := NewHandlerService(nil, nil, 1, 1, nil, nil, nil, nil, nil, handlerPool)
-
-	mockAgent := agentmocks.NewMockAgent(ctrl)
-	mockAgent.EXPECT().GetSession().Return(mockSession).Times(1)
-	mockAgent.EXPECT().SetStatus(constants.StatusWorking).Times(1)
-	mockAgent.EXPECT().RemoteAddr().Return(&mockAddr{})
-	mockAgent.EXPECT().SetLastAt()
-
-	err := svc.processPacket(mockAgent, &packet.Packet{Type: packet.HandshakeAck})
-	assert.NoError(t, err)
+			svc := NewHandlerService(nil, nil, 1, 1, nil, nil, nil, nil, nil, NewHandlerPool())
+			err := svc.processPacket(mockAgent, &packet.Packet{Type: packet.HandshakeAck})
+			if table.wantErr {
+				assert.ErrorContains(t, err, "unexpected packet type")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestHandlerServiceProcessPacketHeartbeat(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
+	tables := []struct {
+		name       string
+		packetType packet.Type
+		status     int32
+		wantErr    bool
+	}{
+		{"heartbeat_first", packet.Heartbeat, constants.StatusStart, true},
+		{"heartbeat_ack_first", packet.HeartbeatAck, constants.StatusStart, true},
+		{"heartbeat_before_ack", packet.Heartbeat, constants.StatusHandshakeValidated, true},
+		{"heartbeat_ack_before_ack", packet.HeartbeatAck, constants.StatusHandshakeValidated, true},
+		{"working_heartbeat", packet.Heartbeat, constants.StatusWorking, false},
+		{"working_heartbeat_ack", packet.HeartbeatAck, constants.StatusWorking, false},
+	}
+	for _, table := range tables {
+		t.Run(table.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
 
-	mockAgent := agentmocks.NewMockAgent(ctrl)
-	gomock.InOrder(
-		mockAgent.EXPECT().SendHeartbeatResponse(int64(0)).Return(nil),
-		mockAgent.EXPECT().SetLastAt(),
-	)
+			mockAgent := agentmocks.NewMockAgent(ctrl)
+			mockAgent.EXPECT().GetStatus().Return(table.status)
+			if table.wantErr {
+				mockSession := mocks.NewMockSession(ctrl)
+				mockAgent.EXPECT().GetSession().Return(mockSession)
+				mockSession.EXPECT().Close(nil)
+			} else {
+				if table.packetType == packet.Heartbeat {
+					mockAgent.EXPECT().SendHeartbeatResponse(int64(0)).Return(nil)
+				}
+				mockAgent.EXPECT().SetLastAt()
+			}
 
-	handlerPool := NewHandlerPool()
-	svc := NewHandlerService(nil, nil, 1, 1, nil, nil, nil, nil, nil, handlerPool)
+			svc := NewHandlerService(nil, nil, 1, 1, nil, nil, nil, nil, nil, NewHandlerPool())
+			err := svc.processPacket(mockAgent, &packet.Packet{Type: table.packetType})
+			if table.wantErr {
+				assert.ErrorContains(t, err, "unexpected packet type")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
 
-	err := svc.processPacket(mockAgent, &packet.Packet{Type: packet.Heartbeat})
-	assert.NoError(t, err)
+func TestHandlerServiceRejectsInvalidHeartbeatPayloadLength(t *testing.T) {
+	for _, packetType := range []packet.Type{packet.Heartbeat, packet.HeartbeatAck} {
+		for _, size := range []int{1, 7, 9} {
+			t.Run(fmt.Sprintf("type_%d_size_%d", packetType, size), func(t *testing.T) {
+				ctrl := gomock.NewController(t)
+				mockAgent := agentmocks.NewMockAgent(ctrl)
+				mockAgent.EXPECT().GetStatus().Return(constants.StatusWorking)
+
+				svc := NewHandlerService(nil, nil, 1, 1, nil, nil, nil, nil, nil, NewHandlerPool())
+				var err error
+				require.NotPanics(t, func() {
+					err = svc.processPacket(mockAgent, &packet.Packet{
+						Type: packetType,
+						Data: make([]byte, size),
+					})
+				})
+				assert.ErrorContains(t, err, "invalid heartbeat payload length")
+			})
+		}
+	}
 }
 
 func TestHandlerServiceProcessPacketData(t *testing.T) {
@@ -485,7 +659,9 @@ func TestHandlerServiceProcessPacketData(t *testing.T) {
 		socketStatus int32
 		errStr       string
 	}{
-		{"not_acked_socket", &packet.Packet{Type: packet.Data, Data: []byte("ok")}, constants.StatusStart, "not yet ACK"},
+		{"data_first", &packet.Packet{Type: packet.Data, Data: []byte("ok")}, constants.StatusStart, "unexpected packet type"},
+		{"data_before_ack", &packet.Packet{Type: packet.Data, Data: []byte("ok")}, constants.StatusHandshakeValidated, "unexpected packet type"},
+		{"data_after_close", &packet.Packet{Type: packet.Data, Data: []byte("ok")}, constants.StatusClosed, "unexpected packet type"},
 		{"failed_decode", &packet.Packet{Type: packet.Data, Data: []byte("ok")}, constants.StatusWorking, "wrong message type"},
 		{"success", &packet.Packet{Type: packet.Data, Data: encodedMsg}, constants.StatusWorking, ""},
 	}
@@ -499,8 +675,9 @@ func TestHandlerServiceProcessPacketData(t *testing.T) {
 			mockAgent := agentmocks.NewMockAgent(ctrl)
 
 			mockAgent.EXPECT().GetStatus().Return(table.socketStatus)
-			if table.socketStatus < constants.StatusWorking {
-				mockAgent.EXPECT().RemoteAddr().Return(&mockAddr{})
+			if table.socketStatus != constants.StatusWorking {
+				mockAgent.EXPECT().GetSession().Return(mockSession)
+				mockSession.EXPECT().Close(nil)
 			} else {
 				if table.errStr == "" {
 					mockAgent.EXPECT().GetSession().Return(mockSession).Times(1)
@@ -556,7 +733,8 @@ func TestHandlerServiceHandle(t *testing.T) {
 	mockSession.EXPECT().Close(nil)
 
 	mockAgent.EXPECT().String().Return("")
-	mockAgent.EXPECT().SetStatus(constants.StatusHandshake)
+	mockAgent.EXPECT().GetStatus().Return(constants.StatusStart)
+	mockAgent.EXPECT().TransitionStatus(constants.StatusStart, constants.StatusHandshakeValidated).Return(true)
 	mockAgent.EXPECT().GetSession().Return(mockSession).Times(6)
 	mockAgent.EXPECT().RemoteAddr().Return(&mockAddr{}).AnyTimes()
 	mockAgent.EXPECT().SetLastAt().Do(func() {

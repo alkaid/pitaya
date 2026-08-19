@@ -69,8 +69,10 @@ printf '%s\n' \
 	'./docs/logging.md:The deprecated `github.com/alkaid/pitaya/v2/logger/logrus` adapter and `github.com/alkaid/pitaya/v2/logger/test` helper have been removed. There is no compatibility shim and no general `pitaya.SetLogger` replacement.' \
 	'./docs/logging.md:The client no longer accepts a Logrus level. Construct it with the current API and provide an explicit disconnect reason:' \
 	'./docs/logging.md:`worker.SetLogger` remains a separate legacy integration that accepts `logger/interfaces.Logger`. Applications that still call it must own that adapter while migrating; Pitaya no longer provides a Logrus implementation for it.' \
-	'./docs/migration-v2-ak.md:## Removed Logrus packages' \
-	'./docs/migration-v2-ak.md:The first-party `logger/logrus` adapter and `logger/test` helper were removed' \
+	'./docs/migration-v2-ak.md:### 已删除的 Logrus 包' \
+	'./docs/migration-v2-ak.md:`RegisterRPCJob` 与 `Stop` 现在串行。`Stop` 已开始或完成、且 Worker 尚未通过 `Start` 或 `StartWithError` 再次启动时，注册返回新增的 `constants.ErrWorkerStopped`。需要在同一进程重新使用 Worker 的代码必须先重新启动，再重新注册 RPC job；不能依赖上一个生命周期保留的 manager。`Worker.SetLogger` 仍保留，并通过稳定 facade 并发更新，不要求恢复已删除的第一方 Logrus adapter。' \
+	'./docs/migration-v2-ak.md:服务端日志改用当前基于 Zap 的 `logger` API。client 包仍保留独立的 logger hook，但它不能替代服务端全局日志配置；需要继续使用 Logrus 的应用应自行维护 adapter。' \
+	'./docs/migration-v2-ak.md:第一方 `logger/logrus` 适配器和 `logger/test` 测试辅助包已删除，不提供兼容层。' \
 	'./docs/testing.md:| `logrus-verify` | Removed first-party Logrus packages do not reappear |' | \
 	LC_ALL=C sort >"$expected_doc_hits"
 LC_ALL=C sort "$doc_hits" >"$actual_doc_hits"
@@ -84,7 +86,7 @@ rg -q -F 'github.com/alkaid/pitaya/v2/logger/logrus' "$repo_root/docs/logging.md
 	echo "logging migration no longer documents the removed adapter" >&2
 	exit 1
 }
-rg -q -F '`logger/logrus` adapter' "$repo_root/docs/migration-v2-ak.md" || {
+rg -q -F '`logger/logrus` 适配器' "$repo_root/docs/migration-v2-ak.md" || {
 	echo "fork migration no longer documents the removed adapter" >&2
 	exit 1
 }

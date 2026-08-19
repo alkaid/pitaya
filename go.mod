@@ -41,8 +41,9 @@ require (
 )
 
 require (
+	github.com/bitly/go-simplejson v0.5.1
+	github.com/gomodule/redigo v1.9.2
 	github.com/spf13/cast v1.10.0
-	github.com/topfreegames/go-workers v1.2.1
 	go.uber.org/mock v0.6.0
 	golang.org/x/sys v0.46.0
 	k8s.io/utils v0.0.0-20250502105355-0f33e8f1c979
@@ -63,7 +64,6 @@ require (
 	github.com/armon/go-metrics v0.4.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bgentry/speakeasy v0.2.0 // indirect
-	github.com/bitly/go-simplejson v0.5.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cheggaaa/pb/v3 v3.1.6 // indirect
@@ -85,7 +85,6 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.2.2 // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
-	github.com/gomodule/redigo v1.9.2 // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect

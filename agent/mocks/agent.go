@@ -290,6 +290,20 @@ func (mr *MockAgentMockRecorder) String() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "String", reflect.TypeOf((*MockAgent)(nil).String))
 }
 
+// TransitionStatus mocks base method.
+func (m *MockAgent) TransitionStatus(from, to int32) bool {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "TransitionStatus", from, to)
+	ret0, _ := ret[0].(bool)
+	return ret0
+}
+
+// TransitionStatus indicates an expected call of TransitionStatus.
+func (mr *MockAgentMockRecorder) TransitionStatus(from, to any) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "TransitionStatus", reflect.TypeOf((*MockAgent)(nil).TransitionStatus), from, to)
+}
+
 // MockAgentFactory is a mock of AgentFactory interface.
 type MockAgentFactory struct {
 	ctrl     *gomock.Controller

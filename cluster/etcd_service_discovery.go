@@ -541,12 +541,8 @@ func (sd *etcdServiceDiscovery) watchLeaseChan(ctx context.Context, leaseID clie
 }
 
 func (sd *etcdServiceDiscovery) signalAppDie(ctx context.Context) {
-	if sd.appDieChan == nil {
-		return
-	}
-	select {
-	case sd.appDieChan <- true:
-	case <-ctx.Done():
+	if ctx.Err() == nil {
+		signalAppDie(sd.appDieChan)
 	}
 }
 

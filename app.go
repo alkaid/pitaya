@@ -22,11 +22,14 @@ package pitaya
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"go.uber.org/zap"
@@ -365,34 +368,63 @@ type Pitaya interface {
 
 // App is the base app struct
 type App struct {
-	acceptors          []acceptor.Acceptor
-	config             config.PitayaConfig
-	dieChan            chan bool
-	heartbeat          time.Duration
-	router             *router.Router
-	rpcClient          cluster.RPCClient
-	rpcServer          cluster.RPCServer
-	metricsReporters   []metrics.Reporter
-	metricsReporterMgr metrics.Reporter
-	running            bool
-	serializer         serialize.Serializer
-	server             *cluster.Server
-	serverMode         ServerMode
-	serviceDiscovery   cluster.ServiceDiscovery
-	startAt            time.Time
-	worker             *worker.Worker
-	remoteService      *service.RemoteService
-	handlerService     *service.HandlerService
-	handlerComp        []regComp
-	remoteComp         []regComp
-	modulesMap         map[string]interfaces.Module
-	modulesArr         []moduleWrapper
-	sessionModulesArr  []sessionModuleWrapper
-	groups             groups.GroupService
-	sessionPool        session.SessionPool
-	redis              redis.Cmdable
-	conf               *config.Config
-	onStarted          func()
+	acceptors           []acceptor.Acceptor
+	config              config.PitayaConfig
+	dieChan             chan bool
+	dependencyDieChan   <-chan bool
+	heartbeat           time.Duration
+	router              *router.Router
+	rpcClient           cluster.RPCClient
+	rpcServer           cluster.RPCServer
+	metricsReporters    []metrics.Reporter
+	metricsReporterMgr  metrics.Reporter
+	running             atomic.Bool
+	configurationLocked atomic.Bool
+	serializer          serialize.Serializer
+	server              *cluster.Server
+	serverMode          ServerMode
+	serviceDiscovery    cluster.ServiceDiscovery
+	startAt             time.Time
+	worker              *worker.Worker
+	remoteService       *service.RemoteService
+	handlerService      *service.HandlerService
+	handlerComp         []regComp
+	remoteComp          []regComp
+	modulesMap          map[string]interfaces.Module
+	modulesArr          []moduleWrapper
+	sessionModulesArr   []sessionModuleWrapper
+	groups              groups.GroupService
+	sessionPool         session.SessionPool
+	redis               redis.Cmdable
+	conf                *config.Config
+	onStarted           func()
+	stopCh              chan struct{}
+	stopOnce            sync.Once
+	acceptCtx           context.Context
+	cancelAccept        context.CancelFunc
+	connectionCtx       context.Context
+	cancelConnections   context.CancelFunc
+	backgroundCtx       context.Context
+	cancelBackground    context.CancelFunc
+	acceptorWG          sync.WaitGroup
+	dispatcherWG        sync.WaitGroup
+	backgroundWG        sync.WaitGroup
+	acceptorsStopped    bool
+	dispatchersStopped  bool
+	handlerWG           sync.WaitGroup
+	stopAcceptorsOnce   sync.Once
+	stopConnectionsOnce sync.Once
+	stopBackgroundOnce  sync.Once
+	beforeModulesOnce   sync.Once
+	drainTasksOnce      sync.Once
+	forceSessionsOnce   sync.Once
+	connectionsMu       sync.Mutex
+	connections         map[*trackedPlayerConn]struct{}
+	connectionsStopped  bool
+}
+
+type trackedPlayerConn struct {
+	acceptor.PlayerConn
 }
 
 // NewApp is the base constructor for a pitaya app instance
@@ -414,30 +446,74 @@ func NewApp(
 	metricsReporters []metrics.Reporter,
 	config config.PitayaConfig,
 ) *App {
+	return newApp(
+		serverMode,
+		serializer,
+		acceptors,
+		dieChan,
+		dieChan,
+		router,
+		server,
+		rpcClient,
+		rpcServer,
+		worker,
+		serviceDiscovery,
+		remoteService,
+		handlerService,
+		groups,
+		sessionPool,
+		metricsReporters,
+		config,
+	)
+}
+
+func newApp(
+	serverMode ServerMode,
+	serializer serialize.Serializer,
+	acceptors []acceptor.Acceptor,
+	dieChan chan bool,
+	dependencyDieChan <-chan bool,
+	router *router.Router,
+	server *cluster.Server,
+	rpcClient cluster.RPCClient,
+	rpcServer cluster.RPCServer,
+	worker *worker.Worker,
+	serviceDiscovery cluster.ServiceDiscovery,
+	remoteService *service.RemoteService,
+	handlerService *service.HandlerService,
+	groups groups.GroupService,
+	sessionPool session.SessionPool,
+	metricsReporters []metrics.Reporter,
+	config config.PitayaConfig,
+) *App {
 	app := &App{
-		server:            server,
-		config:            config,
-		rpcClient:         rpcClient,
-		rpcServer:         rpcServer,
-		worker:            worker,
-		serviceDiscovery:  serviceDiscovery,
-		remoteService:     remoteService,
-		handlerService:    handlerService,
-		groups:            groups,
-		startAt:           time.Now(),
-		dieChan:           dieChan,
-		acceptors:         acceptors,
-		metricsReporters:  metricsReporters,
-		serverMode:        serverMode,
-		running:           false,
-		serializer:        serializer,
-		router:            router,
-		handlerComp:       make([]regComp, 0),
-		remoteComp:        make([]regComp, 0),
-		modulesMap:        make(map[string]interfaces.Module),
-		modulesArr:        []moduleWrapper{},
-		sessionModulesArr: []sessionModuleWrapper{},
-		sessionPool:       sessionPool,
+		server:             server,
+		config:             config,
+		rpcClient:          rpcClient,
+		rpcServer:          rpcServer,
+		worker:             worker,
+		serviceDiscovery:   serviceDiscovery,
+		remoteService:      remoteService,
+		handlerService:     handlerService,
+		groups:             groups,
+		startAt:            time.Now(),
+		dieChan:            dieChan,
+		dependencyDieChan:  dependencyDieChan,
+		acceptors:          acceptors,
+		metricsReporters:   metricsReporters,
+		serverMode:         serverMode,
+		serializer:         serializer,
+		router:             router,
+		handlerComp:        make([]regComp, 0),
+		remoteComp:         make([]regComp, 0),
+		modulesMap:         make(map[string]interfaces.Module),
+		modulesArr:         []moduleWrapper{},
+		sessionModulesArr:  []sessionModuleWrapper{},
+		sessionPool:        sessionPool,
+		stopCh:             make(chan struct{}),
+		connections:        make(map[*trackedPlayerConn]struct{}),
+		acceptorsStopped:   true,
+		dispatchersStopped: true,
 	}
 	if app.heartbeat == time.Duration(0) {
 		app.heartbeat = config.Heartbeat.Interval
@@ -448,7 +524,8 @@ func NewApp(
 	return app
 }
 
-// GetDieChan gets the channel that the app sinalizes when its going to die
+// GetDieChan returns the legacy dependency-failure event channel. Callers may
+// signal it but must not close it; use Shutdown to stop the App.
 func (app *App) GetDieChan() chan bool {
 	return app.dieChan
 }
@@ -556,11 +633,10 @@ func (app *App) PushAfterRemoteHook(afterFunc pipeline.AfterHandlerTempl) {
 	app.remoteService.GetRemoteHooks().AfterHandler.PushBack(afterFunc)
 }
 
-// IsRunning indicates if the Pitaya app has been initialized. Note: This
-// doesn't cover acceptors, only the pitaya internal registration and modules
-// initialization.
+// IsRunning is true only after modules are initialized and all acceptors are
+// ready. It becomes false before listeners are stopped during shutdown.
 func (app *App) IsRunning() bool {
-	return app.running
+	return app.running.Load()
 }
 
 func (app *App) SetSessionCache(cache session.CacheInterface) {
@@ -647,12 +723,36 @@ func (app *App) initSysRemotes() {
 	)
 }
 
-func (app *App) periodicMetrics() {
+func (app *App) startBackgroundTasks() {
+	app.backgroundCtx, app.cancelBackground = context.WithCancel(context.Background())
 	period := app.config.Metrics.Period
-	go metrics.ReportSysMetrics(app.metricsReporters, period)
+	if len(app.metricsReporters) > 0 {
+		app.backgroundWG.Add(1)
+		go func() {
+			defer app.backgroundWG.Done()
+			metrics.ReportSysMetricsContext(app.backgroundCtx, app.metricsReporters, period)
+		}()
+	}
 
-	if app.worker.Started() {
-		go worker.Report(app.metricsReporters, period)
+	if app.worker != nil && app.worker.Started() && len(app.metricsReporters) > 0 {
+		app.backgroundWG.Add(1)
+		go func() {
+			defer app.backgroundWG.Done()
+			worker.ReportContext(app.backgroundCtx, app.metricsReporters, period)
+		}()
+	}
+
+	if app.onStarted != nil {
+		app.backgroundWG.Add(1)
+		go func() {
+			defer app.backgroundWG.Done()
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					logger.Zap.Error("onStarted callback panicked", zap.Any("panic", recovered))
+				}
+			}()
+			app.onStarted()
+		}()
 	}
 }
 
@@ -662,6 +762,10 @@ func (app *App) OnStarted(fun func()) {
 
 // Start starts the app. It panics if a required runtime task cannot be admitted.
 func (app *App) Start() {
+	// Runtime configuration is immutable once startup begins. Readiness may turn
+	// false during drain while handlers still read routes and the dictionary.
+	app.configurationLocked.Store(true)
+
 	if !app.server.Frontend && len(app.acceptors) > 0 {
 		logger.Log.Fatal("acceptors are not allowed on backend servers")
 	}
@@ -690,23 +794,25 @@ func (app *App) Start() {
 	}
 
 	if err := app.listen(); err != nil {
+		deadline := time.Now().Add(runtimeShutdownTimeout)
+		acceptorErr := app.stopAcceptorsWithin(minDuration(dispatcherShutdownTimeout, time.Until(deadline)))
+		quiesceErr := app.quiesceRuntimeBefore(deadline)
 		timer.GlobalTicker.Stop()
+		if shutdownErr := errors.Join(acceptorErr, quiesceErr); shutdownErr != nil {
+			logger.Zap.Error("skipping session, module, and component teardown because runtime shutdown did not quiesce")
+			panic(fmt.Errorf("start app: %v: %w", err, shutdownErr))
+		}
+		app.forceCloseSessions()
+		app.shutdownModules()
 		app.shutdownComponents()
 		panic(fmt.Errorf("start app: %w", err))
 	}
-	app.periodicMetrics()
+	app.startBackgroundTasks()
 
 	defer func() {
 		timer.GlobalTicker.Stop()
-		app.running = false
+		app.running.Store(false)
 	}()
-
-	// 用户回调
-	if app.onStarted != nil {
-		co.Go(func() {
-			app.onStarted()
-		})
-	}
 
 	sg := make(chan os.Signal, 1)
 	signal.Notify(sg, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGKILL, syscall.SIGTERM)
@@ -721,44 +827,64 @@ func (app *App) Start() {
 		return count
 	}
 
-	// stop server
+	// Stop accepting traffic before draining sessions or tearing down modules.
+	var shutdownSignal os.Signal
 	select {
+	case <-app.dependencyDieChan:
+		logger.Zap.Warn("the app will shutdown in a few seconds")
+		app.signalStop()
+		if app.dependencyDieChan != app.dieChan {
+			signalLegacyDie(app.dieChan)
+		}
 	case <-app.dieChan:
 		logger.Zap.Warn("the app will shutdown in a few seconds")
-	case s := <-sg:
-		logger.Sugar.Warn("got signal: ", s, ", shutting down...")
-		logger.Sugar.Warn("got signal: ", s, ", shutting down...")
-		if app.config.Session.Drain.Enabled && s == syscall.SIGTERM {
-			logger.Sugar.Info("Session drain is enabled, draining all sessions before shutting down")
-			timeoutTimer := time.NewTimer(app.config.Session.Drain.Timeout)
-			app.startModuleSessionDraining()
-		loop:
-			for {
-				if maxSessionCount() == 0 {
-					logger.Sugar.Info("All sessions drained")
-					break loop
+		app.signalStop()
+	case <-app.stopCh:
+		logger.Zap.Warn("the app will shutdown in a few seconds")
+	case shutdownSignal = <-sg:
+		logger.Sugar.Warn("got signal: ", shutdownSignal, ", shutting down...")
+		app.signalStop()
+	}
+
+	app.running.Store(false)
+	acceptorErr := app.stopAcceptors()
+
+	if app.config.Session.Drain.Enabled && shutdownSignal == syscall.SIGTERM {
+		logger.Sugar.Info("Session drain is enabled, draining all sessions before shutting down")
+		timeoutTimer := time.NewTimer(app.config.Session.Drain.Timeout)
+		defer timeoutTimer.Stop()
+		app.startModuleSessionDraining()
+	loop:
+		for {
+			if maxSessionCount() == 0 {
+				logger.Sugar.Info("All sessions drained")
+				break loop
+			}
+			select {
+			case nextSignal := <-sg:
+				logger.Sugar.Warn("got signal: ", nextSignal)
+				if nextSignal == syscall.SIGINT {
+					logger.Log.Warnf("Bypassing session draing due to SIGINT. %d sessions will be immediately terminated", maxSessionCount())
 				}
-				select {
-				case s := <-sg:
-					logger.Sugar.Warn("got signal: ", s)
-					if s == syscall.SIGINT {
-						logger.Log.Warnf("Bypassing session draing due to SIGINT. %d sessions will be immediately terminated", maxSessionCount())
-					}
-					break loop
-				case <-timeoutTimer.C:
-					logger.Sugar.Warnf("Session drain has reached maximum timeout. %d sessions will be immediately terminated", maxSessionCount())
-					break loop
-				case <-time.After(app.config.Session.Drain.Period):
-					logger.Sugar.Infof("Waiting for all sessions to finish: %d sessions remaining...", maxSessionCount())
-				}
+				break loop
+			case <-timeoutTimer.C:
+				logger.Sugar.Warnf("Session drain has reached maximum timeout. %d sessions will be immediately terminated", maxSessionCount())
+				break loop
+			case <-time.After(app.config.Session.Drain.Period):
+				logger.Sugar.Infof("Waiting for all sessions to finish: %d sessions remaining...", maxSessionCount())
 			}
 		}
-		close(app.dieChan)
 	}
 
 	logger.Zap.Warn("server is stopping...")
 
-	app.sessionPool.CloseAll()
+	deadline := time.Now().Add(runtimeShutdownTimeout)
+	quiesceErr := app.quiesceRuntimeBefore(deadline)
+	if shutdownErr := errors.Join(acceptorErr, quiesceErr); shutdownErr != nil {
+		logger.Zap.Error("skipping session, module, and component teardown because runtime shutdown did not quiesce")
+		panic(shutdownErr)
+	}
+	app.forceCloseSessions()
 	app.shutdownModules()
 	app.shutdownComponents()
 }
@@ -768,11 +894,6 @@ func (app *App) listen() error {
 	// create global ticker instance, timer precision could be customized
 	// by SetTimerPrecision
 	timer.GlobalTicker = time.NewTicker(timer.Precision)
-
-	logger.Sugar.Infof("starting server %s:%s", app.server.Type, app.server.ID)
-	if err := app.startRuntimeTasks(); err != nil {
-		return err
-	}
 
 	// 改为强制唯一session
 	// if app.serverMode == Cluster && app.config.Session.Unique {
@@ -791,54 +912,367 @@ func (app *App) listen() error {
 
 	app.startModules()
 
-	logger.Zap.Info("all modules started!")
+	logger.Sugar.Infof("starting server %s:%s", app.server.Type, app.server.ID)
+	if err := app.startRuntimeTasks(); err != nil {
+		return err
+	}
 
-	app.running = true
+	app.running.Store(true)
+	logger.Zap.Info("all modules started!")
 	return nil
 }
 
+const (
+	acceptorStartupTimeout    = 10 * time.Second
+	dispatcherShutdownTimeout = 5 * time.Second
+	runtimeShutdownTimeout    = 30 * time.Second
+)
+
+// ErrDispatcherShutdownTimeout means a synchronous timer callback prevented a
+// safe module/component teardown. Start panics with this error so supervisors
+// cannot mistake the fail-stop path for a completed graceful shutdown.
+var ErrDispatcherShutdownTimeout = errors.New("pitaya: handler dispatcher shutdown timed out")
+
+// ErrAcceptorShutdownTimeout means an Acceptor ignored both context cancellation
+// and Stop. App shutdown enters fail-stop mode and does not tear down dependencies.
+var ErrAcceptorShutdownTimeout = errors.New("pitaya: acceptor shutdown timed out")
+
+// ErrRuntimeShutdownTimeout means App-owned work did not quiesce before the
+// process-level shutdown budget expired. Callers must terminate the process.
+var ErrRuntimeShutdownTimeout = errors.New("pitaya: runtime shutdown timed out")
+
 func (app *App) startRuntimeTasks() error {
+	app.acceptCtx, app.cancelAccept = context.WithCancel(context.Background())
+	app.connectionCtx, app.cancelConnections = context.WithCancel(context.Background())
 	for i := 0; i < app.config.Concurrency.Handler.Dispatch; i++ {
 		threadID := i // 避免闭包值拷贝问题
-		if err := co.Submit(func() { app.handlerService.Dispatch(threadID) }); err != nil {
+		app.dispatcherWG.Add(1)
+		if err := co.Submit(func() {
+			defer app.dispatcherWG.Done()
+			app.handlerService.DispatchContext(app.acceptCtx, threadID)
+		}); err != nil {
+			app.dispatcherWG.Done()
 			return fmt.Errorf("start handler dispatcher %d: %w", threadID, err)
 		}
 	}
+
+	type startedAcceptor struct {
+		acceptor acceptor.Acceptor
+		ready    <-chan error
+	}
+	started := make([]startedAcceptor, 0, len(app.acceptors))
 	for _, acc := range app.acceptors {
 		a := acc
-		// TODO 池化效果待验证
-		if err := co.Submit(func() {
-			for conn := range a.GetConnChan() {
-				conn2 := conn
-				co.Go(func() { app.handlerService.Handle(conn2) })
-			}
-		}); err != nil {
-			return fmt.Errorf("start acceptor connection reader: %w", err)
-		}
 		if app.config.Acceptor.ProxyProtocol {
 			logger.Zap.Info("Enabling PROXY protocol for inbound connections")
 			a.EnableProxyProtocol()
 		} else {
 			logger.Zap.Debug("PROXY protocol is disabled for inbound connections")
 		}
+
+		ready := a.Ready()
+		app.acceptorWG.Add(1)
 		if err := co.Submit(func() {
-			a.ListenAndServe()
+			defer app.acceptorWG.Done()
+			err := a.Serve(app.acceptCtx)
+			if app.acceptCtx.Err() != nil {
+				return
+			}
+			if err != nil {
+				logger.Zap.Error("acceptor stopped unexpectedly", zap.Error(err))
+			} else {
+				logger.Zap.Error("acceptor stopped unexpectedly without an error")
+			}
+			app.signalStop()
 		}); err != nil {
+			app.acceptorWG.Done()
 			return fmt.Errorf("start acceptor: %w", err)
 		}
+		started = append(started, startedAcceptor{acceptor: a, ready: ready})
+	}
+
+	for _, item := range started {
+		a := item.acceptor
 		logger.Sugar.Infof("Waiting for Acceptor %s to start on addr %s", reflect.TypeOf(a), a.GetConfiguredAddress())
 
-		for !a.IsRunning() {
+		startupTimer := time.NewTimer(acceptorStartupTimeout)
+		var readyErr error
+		var readyOK bool
+		select {
+		case readyErr, readyOK = <-item.ready:
+			startupTimer.Stop()
+		case <-startupTimer.C:
+			return fmt.Errorf("start acceptor %T: readiness timed out after %s", a, acceptorStartupTimeout)
+		case <-app.stopCh:
+			startupTimer.Stop()
+			// An acceptor publishes readiness before its Serve call can report an
+			// unexpected exit. Prefer that already-published result so Start can
+			// enter its normal shutdown path instead of turning the exit into a
+			// nondeterministic startup panic.
+			select {
+			case readyErr, readyOK = <-item.ready:
+			default:
+				return fmt.Errorf("start acceptor %T: app stopped before readiness", a)
+			}
+		}
+		if !readyOK {
+			return fmt.Errorf("start acceptor %T: readiness channel closed without a result", a)
+		}
+		if readyErr != nil {
+			return fmt.Errorf("start acceptor %T: %w", a, readyErr)
 		}
 
 		logger.Sugar.Infof("Acceptor %s on addr %s is now accepting connections", reflect.TypeOf(a), a.GetAddr())
 	}
+
+	for _, item := range started {
+		a := item.acceptor
+		app.acceptorWG.Add(1)
+		if err := co.Submit(func() {
+			defer app.acceptorWG.Done()
+			app.readAcceptorConnections(a)
+		}); err != nil {
+			app.acceptorWG.Done()
+			return fmt.Errorf("start acceptor connection reader: %w", err)
+		}
+	}
 	return nil
+}
+
+func (app *App) readAcceptorConnections(a acceptor.Acceptor) {
+	for {
+		select {
+		case conn, ok := <-a.GetConnChan():
+			if !ok {
+				return
+			}
+			tracked := &trackedPlayerConn{PlayerConn: conn}
+			if !app.trackConnection(tracked) {
+				_ = tracked.Close()
+				continue
+			}
+			if err := co.Submit(func() {
+				defer app.handlerWG.Done()
+				defer app.untrackConnection(tracked)
+				app.handlerService.HandleContext(app.connectionCtx, tracked)
+			}); err != nil {
+				app.handlerWG.Done()
+				app.untrackConnection(tracked)
+				_ = tracked.Close()
+				logger.Zap.Error("start connection handler", zap.Error(err))
+			}
+		case <-app.acceptCtx.Done():
+			return
+		}
+	}
+}
+
+func (app *App) trackConnection(conn *trackedPlayerConn) bool {
+	app.connectionsMu.Lock()
+	defer app.connectionsMu.Unlock()
+	if app.connectionsStopped {
+		return false
+	}
+	// Publish the connection and reserve its handler under the same admission
+	// lock used by stopConnectionsAndWait. Once shutdown closes admission, no
+	// WaitGroup.Add can race with its Wait.
+	app.handlerWG.Add(1)
+	app.connections[conn] = struct{}{}
+	return true
+}
+
+func (app *App) untrackConnection(conn *trackedPlayerConn) {
+	app.connectionsMu.Lock()
+	delete(app.connections, conn)
+	app.connectionsMu.Unlock()
+}
+
+func (app *App) signalStop() {
+	app.stopOnce.Do(func() {
+		close(app.stopCh)
+	})
+}
+
+func (app *App) stopAcceptors() error {
+	return app.stopAcceptorsWithin(dispatcherShutdownTimeout)
+}
+
+func (app *App) stopAcceptorsWithin(timeout time.Duration) error {
+	app.stopAcceptorsOnce.Do(func() {
+		deadline := time.Now().Add(timeout)
+		if app.cancelAccept != nil {
+			app.cancelAccept()
+		}
+		for _, a := range app.acceptors {
+			// A third-party Stop implementation may block. Track it with Serve and
+			// connection readers so the shared shutdown deadline still applies.
+			app.acceptorWG.Add(1)
+			go func() {
+				defer app.acceptorWG.Done()
+				a.Stop()
+			}()
+		}
+		// Start both waits before either can consume the shared deadline. This
+		// preserves accurate attribution when only one group is blocked.
+		acceptorsDone := waitGroupDone(&app.acceptorWG)
+		dispatchersDone := waitGroupDone(&app.dispatcherWG)
+		app.acceptorsStopped = waitDoneBefore(acceptorsDone, deadline)
+		app.dispatchersStopped = waitDoneBefore(dispatchersDone, deadline)
+		if !app.acceptorsStopped {
+			logger.Sugar.Errorf("acceptor goroutines did not stop within %s; entering fail-stop shutdown", timeout)
+		}
+		if !app.dispatchersStopped {
+			logger.Sugar.Errorf("handler dispatcher did not stop within %s; entering fail-stop shutdown with a blocked timer callback", timeout)
+		}
+	})
+	var shutdownErrors []error
+	if !app.acceptorsStopped {
+		shutdownErrors = append(shutdownErrors, fmt.Errorf("%w after %s", ErrAcceptorShutdownTimeout, timeout))
+	}
+	if !app.dispatchersStopped {
+		shutdownErrors = append(shutdownErrors, fmt.Errorf("%w after %s", ErrDispatcherShutdownTimeout, timeout))
+	}
+	return errors.Join(shutdownErrors...)
+}
+
+func (app *App) stopConnectionsAndWait() {
+	app.stopConnectionsOnce.Do(func() {
+		app.connectionsMu.Lock()
+		app.connectionsStopped = true
+		connections := make([]*trackedPlayerConn, 0, len(app.connections))
+		for conn := range app.connections {
+			connections = append(connections, conn)
+		}
+		app.connectionsMu.Unlock()
+		if app.cancelConnections != nil {
+			app.cancelConnections()
+		}
+		for _, conn := range connections {
+			_ = conn.Close()
+		}
+		app.handlerWG.Wait()
+	})
+}
+
+func (app *App) cancelBackgroundTasks() {
+	app.stopBackgroundOnce.Do(func() {
+		if app.cancelBackground != nil {
+			app.cancelBackground()
+		}
+	})
+}
+
+func (app *App) drainHandlerTasks() {
+	app.drainTasksOnce.Do(func() {
+		// Module BeforeShutdown hooks have already stopped RPC, service-discovery,
+		// and other framework ingress. Closing admission now makes the final session
+		// sweep safe from framework-owned task creation.
+		app.handlerService.DrainTasks()
+	})
+}
+
+func (app *App) forceCloseSessions() {
+	app.forceSessionsOnce.Do(func() {
+		app.sessionPool.ForceCloseAll()
+	})
+}
+
+func (app *App) quiesceRuntimeBefore(deadline time.Time) error {
+	app.cancelBackgroundTasks()
+	return runShutdownPhaseBefore(deadline, "runtime quiescence", func() {
+		app.stopConnectionsAndWait()
+		app.backgroundWG.Wait()
+		if app.worker != nil {
+			app.worker.Stop()
+		}
+		app.beforeShutdownModules()
+		app.drainHandlerTasks()
+	})
+}
+
+type shutdownPhaseResult struct {
+	panicValue any
+	panicked   bool
+}
+
+func runShutdownPhaseBefore(deadline time.Time, phase string, run func()) error {
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return fmt.Errorf("%w before %s", ErrRuntimeShutdownTimeout, phase)
+	}
+	budget := remaining
+	result := make(chan shutdownPhaseResult, 1)
+	go func() {
+		phaseResult := shutdownPhaseResult{}
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				phaseResult.panicValue = recovered
+				phaseResult.panicked = true
+			}
+			result <- phaseResult
+		}()
+		run()
+	}()
+	timeout := time.NewTimer(remaining)
+	defer timeout.Stop()
+	select {
+	case phaseResult := <-result:
+		if phaseResult.panicked {
+			panic(phaseResult.panicValue)
+		}
+		return nil
+	case <-timeout.C:
+		return fmt.Errorf("%w while waiting for %s after %s", ErrRuntimeShutdownTimeout, phase, budget)
+	}
+}
+
+func waitGroupWithin(wg *sync.WaitGroup, timeout time.Duration) bool {
+	return waitGroupBefore(wg, time.Now().Add(timeout))
+}
+
+func waitGroupBefore(wg *sync.WaitGroup, deadline time.Time) bool {
+	return waitDoneBefore(waitGroupDone(wg), deadline)
+}
+
+func waitGroupDone(wg *sync.WaitGroup) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	return done
+}
+
+func waitDoneBefore(done <-chan struct{}, deadline time.Time) bool {
+	select {
+	case <-done:
+		return true
+	default:
+	}
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return false
+	}
+	timer := time.NewTimer(remaining)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // SetDictionary sets routes map
 func (app *App) SetDictionary(dict map[string]uint16) error {
-	if app.running {
+	if app.configurationLocked.Load() {
 		return constants.ErrChangeDictionaryWhileRunning
 	}
 	return message.SetDictionary(dict)
@@ -850,7 +1284,7 @@ func (app *App) AddRoute(
 	routingFunction router.RoutingFunc,
 ) error {
 	if app.router != nil {
-		if app.running {
+		if app.configurationLocked.Load() {
 			return constants.ErrChangeRouteWhileRunning
 		}
 		app.router.AddRoute(serverType, routingFunction)
@@ -862,10 +1296,22 @@ func (app *App) AddRoute(
 
 // Shutdown send a signal to let 'pitaya' shutdown itself.
 func (app *App) Shutdown() {
+	app.signalStop()
+	// Preserve the legacy event for callers observing GetDieChan without using
+	// it as the App's cancellation primitive.
+	signalLegacyDie(app.dieChan)
+}
+
+func signalLegacyDie(dieChan chan bool) {
+	if dieChan == nil {
+		return
+	}
+	defer func() {
+		_ = recover()
+	}()
 	select {
-	case <-app.dieChan: // prevent closing closed channel
+	case dieChan <- true:
 	default:
-		close(app.dieChan)
 	}
 }
 

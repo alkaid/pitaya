@@ -23,6 +23,7 @@ package cluster
 import (
 	"fmt"
 	"net"
+	"sync"
 
 	"github.com/alkaid/pitaya/v2/constants"
 	"google.golang.org/grpc"
@@ -39,6 +40,7 @@ type GRPCServer struct {
 	metricsReporters []metrics.Reporter
 	grpcSv           *grpc.Server
 	pitayaServer     protos.PitayaServer
+	stopOnce         sync.Once
 }
 
 // NewGRPCServer constructor
@@ -75,14 +77,26 @@ func (gs *GRPCServer) Subscribe(topic string, groups ...string) error {
 // AfterInit runs after initialization
 func (gs *GRPCServer) AfterInit() {}
 
-// BeforeShutdown runs before shutdown
-func (gs *GRPCServer) BeforeShutdown() {}
+// BeforeShutdown stops inbound RPC and waits for admitted calls before App
+// closes handler task admission and performs its final session sweep.
+func (gs *GRPCServer) BeforeShutdown() {
+	gs.stop()
+}
 
 // Shutdown stops grpc rpc server
 func (gs *GRPCServer) Shutdown() error {
-	// graceful: stops the server from accepting new connections and RPCs and
-	// blocks until all the pending RPCs are finished.
-	// source: https://godoc.org/google.golang.org/grpc#Server.GracefulStop
-	gs.grpcSv.GracefulStop()
+	gs.stop()
 	return nil
+}
+
+func (gs *GRPCServer) stop() {
+	gs.stopOnce.Do(func() {
+		if gs.grpcSv == nil {
+			return
+		}
+		// graceful: stops the server from accepting new connections and RPCs and
+		// blocks until all the pending RPCs are finished.
+		// source: https://godoc.org/google.golang.org/grpc#Server.GracefulStop
+		gs.grpcSv.GracefulStop()
+	})
 }

@@ -28,13 +28,18 @@ const (
 	_ int32 = iota
 	// StatusStart status
 	StatusStart
-	// StatusHandshake status
-	StatusHandshake
+	// StatusHandshakeValidated means the client handshake passed validation and
+	// the server is waiting for the client's handshake acknowledgement.
+	StatusHandshakeValidated
 	// StatusWorking status
 	StatusWorking
 	// StatusClosed status
 	StatusClosed
 )
+
+// StatusHandshake is kept as a compatibility alias for
+// StatusHandshakeValidated.
+const StatusHandshake = StatusHandshakeValidated
 
 const (
 	// SessionPushRoute is the route used for updating session

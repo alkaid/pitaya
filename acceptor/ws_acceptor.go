@@ -21,29 +21,46 @@
 package acceptor
 
 import (
+	"context"
 	"crypto/tls"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
 
-	"github.com/gorilla/websocket"
 	"github.com/alkaid/pitaya/v2/conn/codec"
 	"github.com/alkaid/pitaya/v2/conn/packet"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/logger"
+	"github.com/gorilla/websocket"
+)
+
+const (
+	DefaultWSReadHeaderTimeout = 5 * time.Second
+	DefaultWSIdleTimeout       = 60 * time.Second
+	DefaultWSMaxHeaderBytes    = 64 << 10
 )
 
 // WSAcceptor struct
 type WSAcceptor struct {
-	addr     string
-	connChan chan PlayerConn
-	listener net.Listener
-	certFile string
-	keyFile  string
-	running  bool
+	addr      string
+	connChan  chan PlayerConn
+	lifecycle acceptorLifecycle
+
+	configMu    sync.RWMutex
+	certFile    string
+	keyFile     string
+	checkOrigin func(*http.Request) bool
+
+	serverMu sync.Mutex
+	server   *http.Server
 }
 
 // NewWSAcceptor returns a new instance of WSAcceptor
@@ -58,17 +75,17 @@ func NewWSAcceptor(addr string, certs ...string) *WSAcceptor {
 	}
 
 	w := &WSAcceptor{
-		addr:     addr,
-		connChan: make(chan PlayerConn),
-		certFile: certFile,
-		keyFile:  keyFile,
-		running:  false,
+		addr:      addr,
+		connChan:  make(chan PlayerConn),
+		lifecycle: newAcceptorLifecycle(),
+		certFile:  certFile,
+		keyFile:   keyFile,
 	}
 	return w
 }
 
 func (w *WSAcceptor) IsRunning() bool {
-	return w.running
+	return w.lifecycle.isRunning()
 }
 
 func (w *WSAcceptor) GetConfiguredAddress() string {
@@ -77,10 +94,7 @@ func (w *WSAcceptor) GetConfiguredAddress() string {
 
 // GetAddr returns the addr the acceptor will listen on
 func (w *WSAcceptor) GetAddr() string {
-	if w.listener != nil {
-		return w.listener.Addr().String()
-	}
-	return ""
+	return w.lifecycle.boundAddr()
 }
 
 // GetConnChan gets a connection channel
@@ -92,9 +106,18 @@ func (w *WSAcceptor) GetConnChan() chan PlayerConn {
 func (w *WSAcceptor) EnableProxyProtocol() {
 }
 
+// SetCheckOrigin sets the WebSocket Origin policy used for subsequent Serve.
+// A nil policy restores the default same-origin check.
+func (w *WSAcceptor) SetCheckOrigin(checkOrigin func(*http.Request) bool) {
+	w.configMu.Lock()
+	defer w.configMu.Unlock()
+	w.checkOrigin = checkOrigin
+}
+
 type connHandler struct {
 	upgrader *websocket.Upgrader
 	connChan chan PlayerConn
+	done     <-chan struct{}
 }
 
 func (h *connHandler) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
@@ -103,79 +126,170 @@ func (h *connHandler) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 		logger.Zap.Error("Upgrade failure", zap.String("URI", r.RequestURI), zap.Error(err))
 		return
 	}
+	conn.SetReadLimit(codec.HeadLength + codec.MaxPacketSize)
 
 	c, err := NewWSConn(conn, r)
 	if err != nil {
+		_ = conn.Close()
 		logger.Zap.Error("Failed to create new ws connection", zap.Error(err))
 		return
 	}
-	h.connChan <- c
+	select {
+	case h.connChan <- c:
+	case <-r.Context().Done():
+		_ = c.Close()
+	case <-h.done:
+		_ = c.Close()
+	}
 }
 
-func (w *WSAcceptor) hasTLSCertificates() bool {
-	return w.certFile != "" && w.keyFile != ""
+// Ready returns an independent channel which receives and then closes with the
+// one-time bind result. Calls made after startup replay the same result.
+func (w *WSAcceptor) Ready() <-chan error {
+	return w.lifecycle.readyChan()
 }
 
-// ListenAndServe listens and serve in the specified addr
-func (w *WSAcceptor) ListenAndServe() {
-	if w.hasTLSCertificates() {
-		w.ListenAndServeTLS(w.certFile, w.keyFile)
-		return
-	}
-
-	var upgrader = websocket.Upgrader{
-		ReadBufferSize:  constants.IOBufferBytesSize,
-		WriteBufferSize: constants.IOBufferBytesSize,
-		CheckOrigin: func(r *http.Request) bool {
-			return true
-		},
-	}
-
-	listener, err := net.Listen("tcp", w.addr)
-	if err != nil {
-		logger.Zap.Fatal("Failed to listen", zap.Error(err))
-	}
-	w.listener = listener
-	w.running = true
-	w.serve(&upgrader)
+// ListenAndServe is a compatibility wrapper around Serve.
+func (w *WSAcceptor) ListenAndServe() error {
+	return w.Serve(context.Background())
 }
 
 // ListenAndServeTLS listens and serve in the specified addr using tls
-func (w *WSAcceptor) ListenAndServeTLS(cert, key string) {
-	var upgrader = websocket.Upgrader{
-		ReadBufferSize:  constants.IOBufferBytesSize,
-		WriteBufferSize: constants.IOBufferBytesSize,
+func (w *WSAcceptor) ListenAndServeTLS(cert, key string) error {
+	if err := w.lifecycle.begin(); err != nil {
+		return err
 	}
 
-	crt, err := tls.LoadX509KeyPair(cert, key)
-	if err != nil {
-		logger.Zap.Fatal("Failed to load x509", zap.Error(err))
-	}
-
-	tlsCfg := &tls.Config{Certificates: []tls.Certificate{crt}}
-	listener, err := tls.Listen("tcp", w.addr, tlsCfg)
-	if err != nil {
-		logger.Zap.Fatal("Failed to listen", zap.Error(err))
-	}
-	w.listener = listener
-	w.serve(&upgrader)
+	w.configMu.Lock()
+	w.certFile = cert
+	w.keyFile = key
+	w.configMu.Unlock()
+	return w.serveStarted(context.Background())
 }
 
-func (w *WSAcceptor) serve(upgrader *websocket.Upgrader) {
-	defer w.Stop()
+// Serve binds the configured address and serves WebSocket upgrades until ctx
+// is canceled, Stop is called, or the HTTP server returns an error.
+func (w *WSAcceptor) Serve(ctx context.Context) error {
+	if err := w.lifecycle.begin(); err != nil {
+		return err
+	}
+	return w.serveStarted(ctx)
+}
 
-	http.Serve(w.listener, &connHandler{
-		upgrader: upgrader,
-		connChan: w.connChan,
-	})
+func (w *WSAcceptor) serveStarted(ctx context.Context) error {
+	if ctx == nil {
+		w.lifecycle.fail(ErrNilServeContext)
+		return ErrNilServeContext
+	}
+
+	certFile, keyFile, checkOrigin := w.configSnapshot()
+	var tlsConfig *tls.Config
+	if certFile != "" || keyFile != "" {
+		crt, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			err = fmt.Errorf("%w: %v", constants.ErrInvalidCertificates, err)
+			w.lifecycle.fail(err)
+			return err
+		}
+		tlsConfig = &tls.Config{Certificates: []tls.Certificate{crt}}
+	}
+
+	listener, err := (&net.ListenConfig{}).Listen(ctx, "tcp", w.addr)
+	if err != nil {
+		w.lifecycle.fail(err)
+		return err
+	}
+	if tlsConfig != nil {
+		listener = tls.NewListener(listener, tlsConfig)
+	}
+
+	server := &http.Server{
+		Handler: &connHandler{
+			upgrader: newWSUpgrader(checkOrigin),
+			connChan: w.connChan,
+			done:     w.lifecycle.doneChan(),
+		},
+		ReadHeaderTimeout: DefaultWSReadHeaderTimeout,
+		IdleTimeout:       DefaultWSIdleTimeout,
+		MaxHeaderBytes:    DefaultWSMaxHeaderBytes,
+		BaseContext: func(net.Listener) context.Context {
+			return ctx
+		},
+	}
+	w.serverMu.Lock()
+	w.server = server
+	w.serverMu.Unlock()
+
+	if err := w.lifecycle.publish(listener); err != nil {
+		return err
+	}
+
+	watchDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			w.Stop()
+		case <-watchDone:
+		}
+	}()
+
+	err = server.Serve(listener)
+	close(watchDone)
+	stopped := ctx.Err() != nil || !w.IsRunning()
+	w.Stop()
+	if stopped || errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
+		return nil
+	}
+	return fmt.Errorf("serve WebSocket connections: %w", err)
+}
+
+func (w *WSAcceptor) configSnapshot() (string, string, func(*http.Request) bool) {
+	w.configMu.RLock()
+	defer w.configMu.RUnlock()
+	return w.certFile, w.keyFile, w.checkOrigin
+}
+
+func newWSUpgrader(checkOrigin func(*http.Request) bool) *websocket.Upgrader {
+	if checkOrigin == nil {
+		checkOrigin = checkSameOrigin
+	}
+	return &websocket.Upgrader{
+		ReadBufferSize:  constants.IOBufferBytesSize,
+		WriteBufferSize: constants.IOBufferBytesSize,
+		CheckOrigin:     checkOrigin,
+	}
+}
+
+// checkSameOrigin accepts non-browser clients without Origin and otherwise
+// requires both the Origin host and scheme to match the upgrade transport.
+func checkSameOrigin(r *http.Request) bool {
+	origins := r.Header.Values("Origin")
+	if len(origins) == 0 {
+		return true
+	}
+	if len(origins) != 1 {
+		return false
+	}
+	origin, err := url.Parse(origins[0])
+	if err != nil || origin.Host == "" || !strings.EqualFold(origin.Host, r.Host) {
+		return false
+	}
+	expectedScheme := "http"
+	if r.TLS != nil {
+		expectedScheme = "https"
+	}
+	return strings.EqualFold(origin.Scheme, expectedScheme)
 }
 
 // Stop stops the acceptor
 func (w *WSAcceptor) Stop() {
-	w.running = false
-	err := w.listener.Close()
-	if err != nil {
-		logger.Zap.Error("Failed to stop", zap.Error(err))
+	w.lifecycle.stop()
+
+	w.serverMu.Lock()
+	server := w.server
+	w.serverMu.Unlock()
+	if server != nil {
+		_ = server.Close()
 	}
 }
 
@@ -190,6 +304,9 @@ type WSConn struct {
 
 // NewWSConn return an initialized *WSConn
 func NewWSConn(conn *websocket.Conn, r ...*http.Request) (*WSConn, error) {
+	if conn != nil {
+		conn.SetReadLimit(codec.HeadLength + codec.MaxPacketSize)
+	}
 	c := &WSConn{conn: conn}
 	if len(r) > 0 {
 		c.req = r[0]
@@ -207,25 +324,53 @@ func (c *WSConn) InnerReq() *http.Request {
 
 // GetNextMessage reads the next message available in the stream
 func (c *WSConn) GetNextMessage() (b []byte, err error) {
-	_, msgBytes, err := c.conn.ReadMessage()
+	_, reader, err := c.conn.NextReader()
 	if err != nil {
 		return nil, err
 	}
-	if len(msgBytes) < codec.HeadLength {
-		return nil, packet.ErrInvalidPomeloHeader
+
+	header := make([]byte, codec.HeadLength)
+	if _, err := io.ReadFull(reader, header); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, packet.ErrInvalidPomeloHeader
+		}
+		return nil, err
 	}
-	header := msgBytes[:codec.HeadLength]
 	msgSize, _, err := codec.ParseHeader(header)
 	if err != nil {
 		return nil, err
 	}
-	dataLen := len(msgBytes[codec.HeadLength:])
-	if dataLen < msgSize {
-		return nil, constants.ErrReceivedMsgSmallerThanExpected
-	} else if dataLen > msgSize {
+
+	// Allocate only after the declared packet size has passed codec validation.
+	msgBytes := make([]byte, codec.HeadLength+msgSize)
+	copy(msgBytes, header)
+	if _, err := io.ReadFull(reader, msgBytes[codec.HeadLength:]); err != nil {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, constants.ErrReceivedMsgSmallerThanExpected
+		}
+		return nil, err
+	}
+
+	var extra [1]byte
+	n, err := reader.Read(extra[:])
+	if n > 0 {
 		return nil, constants.ErrReceivedMsgBiggerThanExpected
 	}
-	return msgBytes, err
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	if err == nil {
+		// websocket message readers normally return EOF at the message boundary;
+		// handle a legal zero-length read without treating it as completion.
+		n, err = io.ReadFull(reader, extra[:])
+		if n > 0 {
+			return nil, constants.ErrReceivedMsgBiggerThanExpected
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, err
+		}
+	}
+	return msgBytes, nil
 }
 
 // Read reads data from the connection.

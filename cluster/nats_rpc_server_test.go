@@ -27,6 +27,8 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -176,9 +178,17 @@ type funcPtrMatcher struct {
 
 type pitayaServerStub struct {
 	protos.UnimplementedPitayaServer
+	call              func(context.Context, *protos.Request) (*protos.Response, error)
 	sessionBindRemote func(context.Context, *protos.BindMsg) (*protos.Response, error)
 	pushToUser        func(context.Context, *protos.Push) (*protos.Response, error)
 	kickUser          func(context.Context, *protos.KickMsg) (*protos.KickAnswer, error)
+}
+
+func (s *pitayaServerStub) Call(ctx context.Context, req *protos.Request) (*protos.Response, error) {
+	if s.call == nil {
+		return s.UnimplementedPitayaServer.Call(ctx, req)
+	}
+	return s.call(ctx, req)
 }
 
 func (s *pitayaServerStub) SessionBindRemote(ctx context.Context, msg *protos.BindMsg) (*protos.Response, error) {
@@ -455,29 +465,832 @@ func TestNatsRPCServerHandleMessages(t *testing.T) {
 		topic string
 		req   *protos.Request
 	}{
-		{"user1/messages", &protos.Request{Type: protos.RPCType_Sys, FrontendID: "bla", Msg: &protos.Msg{Id: 1, Reply: "ae"}}},
-		{"user2/messages", &protos.Request{Type: protos.RPCType_User, FrontendID: "bla2", Msg: &protos.Msg{Id: 1}}},
+		{"user1/messages", &protos.Request{Type: protos.RPCType_Sys, FrontendID: "bla", Msg: &protos.Msg{Id: 1, Route: "svc.method", Reply: "ae"}}},
+		{"user2/messages", &protos.Request{Type: protos.RPCType_User, FrontendID: "bla2", Msg: &protos.Msg{Id: 1, Route: "svc.method", Reply: "boa"}}},
 	}
 
-	go rpcServer.handleMessages()
+	for i, table := range tables {
+		sub, err := rpcServer.subscribe(table.topic, false)
+		require.NoError(t, err)
+		require.True(t, sub.IsValid())
+		if i == 0 {
+			rpcServer.sub = sub
+		}
+	}
+
+	pumpDone := make(chan struct{})
+	go func() {
+		rpcServer.handleMessages()
+		close(pumpDone)
+	}()
+	defer func() {
+		require.NoError(t, rpcServer.Shutdown())
+		select {
+		case <-pumpDone:
+		case <-time.After(3 * time.Second):
+			t.Error("nats rpc message pump did not stop")
+		}
+	}()
 
 	for _, table := range tables {
 		t.Run(table.topic, func(t *testing.T) {
-			subs, err := rpcServer.subscribe(table.topic, false)
-			assert.NoError(t, err)
-			assert.Equal(t, true, subs.IsValid())
 			b, err := proto.Marshal(table.req)
 			assert.NoError(t, err)
 
 			mockMetricsReporter.EXPECT().ReportGauge(metrics.DroppedMessages, gomock.Any(), float64(0))
 			mockMetricsReporter.EXPECT().ReportGauge(metrics.ChannelCapacity, gomock.Any(), gomock.Any()).Times(3)
 
-			conn.Publish(table.topic, b)
+			require.NoError(t, conn.PublishRequest(table.topic, table.req.Msg.Reply, b))
 			r := helpers.ShouldEventuallyReceive(t, rpcServer.unhandledReqCh).(*protos.Request)
 			assert.Equal(t, table.req.FrontendID, r.FrontendID)
 			assert.Equal(t, table.req.Msg.Id, r.Msg.Id)
 		})
 	}
+}
+
+func TestNatsRPCServerHandleMessagesRejectsMalformedRequestsAndContinues(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, nil, nil)
+	require.NoError(t, err)
+
+	s := helpers.GetTestNatsServer(t)
+	defer s.Shutdown()
+	conn, err := setupNatsConn(fmt.Sprintf("nats://%s", s.Addr()), nil)
+	require.NoError(t, err)
+	rpcServer.conn = conn
+
+	const topic = "malformed/messages"
+	rpcServer.sub, err = rpcServer.subscribe(topic, false)
+	require.NoError(t, err)
+
+	pumpDone := make(chan struct{})
+	go func() {
+		rpcServer.handleMessages()
+		close(pumpDone)
+	}()
+	defer func() {
+		require.NoError(t, rpcServer.Shutdown())
+		select {
+		case <-pumpDone:
+		case <-time.After(3 * time.Second):
+			t.Error("nats rpc message pump did not stop")
+		}
+	}()
+
+	require.NoError(t, conn.Publish(topic, nil))
+	missingMsg, err := proto.Marshal(&protos.Request{Type: protos.RPCType_User})
+	require.NoError(t, err)
+	require.NoError(t, conn.Publish(topic, missingMsg))
+
+	valid := &protos.Request{
+		Type:       protos.RPCType_Sys,
+		FrontendID: "frontend-1",
+		Msg: &protos.Msg{
+			Id:    7,
+			Route: "svc.method",
+			Type:  protos.MsgType_MsgRequest,
+		},
+	}
+	payload, err := proto.Marshal(valid)
+	require.NoError(t, err)
+	require.NoError(t, conn.PublishRequest(topic, "valid.reply", payload))
+
+	received := helpers.ShouldEventuallyReceive(t, rpcServer.unhandledReqCh).(*protos.Request)
+	assert.Equal(t, valid.FrontendID, received.FrontendID)
+	assert.Equal(t, valid.Msg.Route, received.Msg.Route)
+	assert.Equal(t, "valid.reply", received.Msg.Reply)
+	assert.Equal(t, uint64(2), rpcServer.malformedRequests.Load())
+}
+
+func TestNatsRPCServerHandleMessagesSignalsAppDieWhenSubscriptionChannelCloses(t *testing.T) {
+	dieChan := make(chan bool, 1)
+	rpcServer := &NatsRPCServer{
+		appDieChan:     dieChan,
+		stopChan:       make(chan bool),
+		subChan:        make(chan *nats.Msg),
+		bindingsChan:   make(chan *nats.Msg),
+		unhandledReqCh: make(chan *protos.Request),
+	}
+
+	pumpDone := make(chan struct{})
+	go func() {
+		defer close(pumpDone)
+		rpcServer.handleMessages()
+	}()
+	close(rpcServer.subChan)
+
+	select {
+	case <-dieChan:
+	case <-time.After(time.Second):
+		t.Fatal("unexpected message pump exit did not signal app failure")
+	}
+	select {
+	case <-pumpDone:
+	case <-time.After(time.Second):
+		t.Fatal("message pump did not return after its subscription channel closed")
+	}
+}
+
+func TestNatsRPCServerAddInboundSubscriptionDoesNotHoldInboundLock(t *testing.T) {
+	rpcServer := &NatsRPCServer{}
+	subscribeErr := errors.New("subscribe failed")
+	lockWasAvailable := false
+
+	_, err := rpcServer.addInboundSubscription(func() (*nats.Subscription, error) {
+		lockWasAvailable = rpcServer.inboundMu.TryLock()
+		if lockWasAvailable {
+			rpcServer.inboundMu.Unlock()
+		}
+		return nil, subscribeErr
+	})
+
+	require.ErrorIs(t, err, subscribeErr)
+	assert.True(t, lockWasAvailable, "subscribe closure ran while inboundMu was held")
+}
+
+func TestNatsRPCServerShutdownWaitsForInFlightInboundRegistration(t *testing.T) {
+	rpcServer := &NatsRPCServer{stopChan: make(chan bool)}
+	registrationStarted := make(chan struct{})
+	releaseRegistration := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseRegistration) }) }
+	defer release()
+
+	registrationErr := errors.New("subscribe failed")
+	registrationDone := make(chan error, 1)
+	go func() {
+		_, err := rpcServer.addInboundSubscription(func() (*nats.Subscription, error) {
+			close(registrationStarted)
+			<-releaseRegistration
+			return nil, registrationErr
+		})
+		registrationDone <- err
+	}()
+	<-registrationStarted
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- rpcServer.Shutdown()
+	}()
+	require.Eventually(t, func() bool {
+		rpcServer.inboundMu.Lock()
+		defer rpcServer.inboundMu.Unlock()
+		return rpcServer.inboundClosed
+	}, time.Second, time.Millisecond, "shutdown did not close inbound admission")
+
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("Shutdown returned before the in-flight registration completed: %v", err)
+	default:
+	}
+	closureCalled := false
+	_, err := rpcServer.addInboundSubscription(func() (*nats.Subscription, error) {
+		closureCalled = true
+		return nil, nil
+	})
+	require.ErrorIs(t, err, errNatsRPCServerStopping)
+	assert.False(t, closureCalled, "subscription closure ran after admission closed")
+
+	release()
+	require.ErrorIs(t, <-registrationDone, registrationErr)
+	select {
+	case err := <-shutdownDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not finish after the in-flight registration completed")
+	}
+}
+
+func TestNatsRPCServerShutdownDoesNotDependOnSubscriptionClosedHandler(t *testing.T) {
+	natsServer := helpers.GetTestNatsServer(t)
+	defer natsServer.Shutdown()
+
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, nil, nil)
+	require.NoError(t, err)
+	rpcServer.conn, err = setupNatsConn(fmt.Sprintf("nats://%s", natsServer.Addr()), nil)
+	require.NoError(t, err)
+	defer rpcServer.conn.Close()
+
+	sub, err := rpcServer.addInboundSubscription(func() (*nats.Subscription, error) {
+		return rpcServer.conn.Subscribe("shutdown.closed-handler", func(*nats.Msg) {})
+	})
+	require.NoError(t, err)
+	require.NoError(t, rpcServer.conn.Flush())
+	rpcServer.inboundMu.Lock()
+	tracked := rpcServer.inboundSubscriptions[sub]
+	rpcServer.inboundMu.Unlock()
+	require.NotNil(t, tracked)
+
+	userClosedHandlerCalled := make(chan struct{}, 1)
+	sub.SetClosedHandler(func(string) {
+		userClosedHandlerCalled <- struct{}{}
+	})
+	rpcServer.handlerMu.Lock()
+	rpcServer.consumersStarted = true
+	rpcServer.handlerMu.Unlock()
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- rpcServer.Shutdown()
+	}()
+	select {
+	case err := <-shutdownDone:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		tracked.complete()
+		select {
+		case <-shutdownDone:
+		case <-time.After(time.Second):
+		}
+		t.Fatal("Shutdown depended on the replaceable subscription closed handler")
+	}
+	select {
+	case <-userClosedHandlerCalled:
+	case <-time.After(time.Second):
+		t.Fatal("replacement subscription closed handler was not called")
+	}
+}
+
+func TestNatsRPCServerShutdownAfterConnectionCloseReleasesInboundCallback(t *testing.T) {
+	natsServer := helpers.GetTestNatsServer(t)
+	defer natsServer.Shutdown()
+	url := fmt.Sprintf("nats://%s", natsServer.Addr())
+
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	cfg.Buffer.Push = 1
+	rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, nil, nil)
+	require.NoError(t, err)
+	rpcServer.conn, err = setupNatsConn(url, nil)
+	require.NoError(t, err)
+
+	_, err = rpcServer.subscribeToUserMessages("closed-connection-user", rpcServer.server.Type)
+	require.NoError(t, err)
+	require.NoError(t, rpcServer.conn.Flush())
+	publisher, err := setupNatsConn(url, nil)
+	require.NoError(t, err)
+	defer publisher.Close()
+
+	rpcServer.userPushCh <- &protos.Push{Uid: "buffer-filler"}
+	payload, err := proto.Marshal(&protos.Push{Uid: "closed-connection-user"})
+	require.NoError(t, err)
+	require.NoError(t, publisher.Publish(
+		GetUserMessagesTopic("closed-connection-user", rpcServer.server.Type),
+		payload,
+	))
+	require.NoError(t, publisher.Flush())
+	require.Eventually(t, func() bool {
+		rpcServer.inboundMu.Lock()
+		defer rpcServer.inboundMu.Unlock()
+		return rpcServer.inboundCallbacks == 1
+	}, time.Second, time.Millisecond, "inbound callback did not block on the full local buffer")
+
+	// Exercise the graceful branch: an already closed connection cannot emit the
+	// subscription status that branch normally uses as its completion barrier.
+	rpcServer.handlerMu.Lock()
+	rpcServer.consumersStarted = true
+	rpcServer.handlerMu.Unlock()
+	rpcServer.conn.Close()
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- rpcServer.Shutdown()
+	}()
+	select {
+	case shutdownErr := <-shutdownDone:
+		require.NoError(t, shutdownErr)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Shutdown waited for a subscription status after the connection closed")
+	}
+
+	rpcServer.inboundMu.Lock()
+	callbacks := rpcServer.inboundCallbacks
+	callbacksClosed := rpcServer.inboundCallbacksClosed
+	rpcServer.inboundMu.Unlock()
+	assert.Zero(t, callbacks)
+	assert.True(t, callbacksClosed)
+	assert.False(t, rpcServer.beginInboundCallback(), "late callback entered after shutdown")
+}
+
+func TestNatsRPCServerShutdownWaitsForChannelDeliveryToStop(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	dieChan := make(chan bool, 1)
+	rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, dieChan, nil)
+	require.NoError(t, err)
+
+	s := helpers.GetTestNatsServer(t)
+	defer s.Shutdown()
+	rpcServer.conn, err = setupNatsConn(fmt.Sprintf("nats://%s", s.Addr()), nil)
+	require.NoError(t, err)
+	defer rpcServer.conn.Close()
+	publisher, err := setupNatsConn(fmt.Sprintf("nats://%s", s.Addr()), nil)
+	require.NoError(t, err)
+	defer publisher.Close()
+
+	const topic = "shutdown-drain/messages"
+	rpcServer.sub, err = rpcServer.subscribe(topic, false)
+	require.NoError(t, err)
+	require.NoError(t, rpcServer.subscribeToBindingsChannel())
+	require.NoError(t, rpcServer.conn.Flush())
+	rpcServer.SetPitayaServer(&pitayaServerStub{
+		sessionBindRemote: func(context.Context, *protos.BindMsg) (*protos.Response, error) {
+			return &protos.Response{}, nil
+		},
+	})
+	require.NoError(t, rpcServer.startHandler(rpcServer.processSessionBindings))
+
+	payload, err := proto.Marshal(&protos.Request{
+		Type: protos.RPCType_User,
+		Msg: &protos.Msg{
+			Type:  protos.MsgType_MsgNotify,
+			Route: "svc.method",
+		},
+	})
+	require.NoError(t, err)
+	bindPayload, err := proto.Marshal(&protos.BindMsg{Uid: "shutdown-user", Fid: "frontend-1"})
+	require.NoError(t, err)
+
+	pumpDone := make(chan struct{})
+	go func() {
+		rpcServer.handleMessages()
+		close(pumpDone)
+	}()
+
+	for range cfg.Buffer.Messages + 1 {
+		require.NoError(t, publisher.Publish(topic, payload))
+	}
+	require.NoError(t, publisher.Flush())
+	require.Eventually(t, func() bool {
+		return len(rpcServer.subChan) > 0
+	}, 3*time.Second, time.Millisecond)
+
+	keepPublishing := make(chan struct{})
+	publisherDone := make(chan struct{})
+	go func() {
+		defer close(publisherDone)
+		for {
+			select {
+			case <-keepPublishing:
+				return
+			default:
+				_ = publisher.Publish(topic, payload)
+				_ = publisher.Publish(GetBindBroadcastTopic(rpcServer.server.Type), bindPayload)
+			}
+		}
+	}()
+
+	require.NoError(t, rpcServer.Shutdown())
+	select {
+	case <-pumpDone:
+	case <-time.After(5 * time.Second):
+		close(keepPublishing)
+		<-publisherDone
+		t.Fatal("nats rpc message pump did not finish draining")
+	}
+	close(keepPublishing)
+	<-publisherDone
+	assert.True(t, rpcServer.conn.IsClosed())
+	select {
+	case <-dieChan:
+		t.Fatal("normal nats rpc shutdown signaled app failure")
+	default:
+	}
+}
+
+func TestNatsRPCServerShutdownDrainsBufferedTransportMessages(t *testing.T) {
+	natsServer := helpers.GetTestNatsServer(t)
+	defer natsServer.Shutdown()
+
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	cfg.Connect = fmt.Sprintf("nats://%s", natsServer.Addr())
+	cfg.Buffer.Messages = 8
+	cfg.Buffer.Push = 8
+
+	ctrl := gomock.NewController(t)
+	mockSessionPool := sessionmocks.NewMockSessionPool(ctrl)
+	rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, nil, mockSessionPool)
+	require.NoError(t, err)
+	mockSessionPool.EXPECT().OnSessionBind(newFuncPtrMatcher(rpcServer.onSessionBind))
+
+	releaseCallbacks := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() { close(releaseCallbacks) })
+	}
+	var taskMuLocked bool
+	defer func() {
+		release()
+		if taskMuLocked {
+			rpcServer.taskMu.Unlock()
+		}
+		_ = rpcServer.Shutdown()
+	}()
+
+	requestCalls := make(chan string, 2)
+	bindingCalls := make(chan string, 2)
+	pushCalls := make(chan string, 2)
+	kickCalls := make(chan string, 2)
+	bindingStarted := make(chan struct{})
+	pushStarted := make(chan struct{})
+	kickStarted := make(chan struct{})
+	var bindingOnce sync.Once
+	var pushOnce sync.Once
+	var kickOnce sync.Once
+	rpcServer.SetPitayaServer(&pitayaServerStub{
+		call: func(_ context.Context, req *protos.Request) (*protos.Response, error) {
+			requestCalls <- fmt.Sprintf("%d:%s", req.GetMsg().GetId(), req.GetMsg().GetType())
+			return &protos.Response{}, nil
+		},
+		sessionBindRemote: func(_ context.Context, msg *protos.BindMsg) (*protos.Response, error) {
+			bindingOnce.Do(func() {
+				close(bindingStarted)
+				<-releaseCallbacks
+			})
+			bindingCalls <- msg.GetUid()
+			return &protos.Response{}, nil
+		},
+		pushToUser: func(_ context.Context, push *protos.Push) (*protos.Response, error) {
+			pushOnce.Do(func() {
+				close(pushStarted)
+				<-releaseCallbacks
+			})
+			pushCalls <- push.GetUid()
+			return &protos.Response{}, nil
+		},
+		kickUser: func(_ context.Context, kick *protos.KickMsg) (*protos.KickAnswer, error) {
+			kickOnce.Do(func() {
+				close(kickStarted)
+				<-releaseCallbacks
+			})
+			kickCalls <- kick.GetUserId()
+			return &protos.KickAnswer{}, nil
+		},
+	})
+	require.NoError(t, rpcServer.Init())
+
+	marshalBinding := func(uid string) *nats.Msg {
+		data, marshalErr := proto.Marshal(&protos.BindMsg{Uid: uid, Fid: "frontend-1"})
+		require.NoError(t, marshalErr)
+		return &nats.Msg{Data: data}
+	}
+	rpcServer.bindingsChan <- marshalBinding("binding-1")
+	rpcServer.userPushCh <- &protos.Push{Uid: "push-1"}
+	rpcServer.userKickCh <- &protos.KickMsg{UserId: "kick-1"}
+	select {
+	case <-bindingStarted:
+	case <-time.After(time.Second):
+		t.Fatal("binding consumer did not start")
+	}
+	select {
+	case <-pushStarted:
+	case <-time.After(time.Second):
+		t.Fatal("push consumer did not start")
+	}
+	select {
+	case <-kickStarted:
+	case <-time.After(time.Second):
+		t.Fatal("kick consumer did not start")
+	}
+	rpcServer.bindingsChan <- marshalBinding("binding-2")
+	rpcServer.userPushCh <- &protos.Push{Uid: "push-2"}
+	rpcServer.userKickCh <- &protos.KickMsg{UserId: "kick-2"}
+
+	marshalRequest := func(id uint64, msgType protos.MsgType, reply string) *nats.Msg {
+		data, marshalErr := proto.Marshal(&protos.Request{
+			Type:     protos.RPCType_User,
+			Metadata: []byte("{}"),
+			Msg: &protos.Msg{
+				Id:    id,
+				Type:  msgType,
+				Route: "svc.method",
+			},
+		})
+		require.NoError(t, marshalErr)
+		return &nats.Msg{Data: data, Reply: reply}
+	}
+	rpcServer.taskMu.Lock()
+	taskMuLocked = true
+	rpcServer.subChan <- marshalRequest(1, protos.MsgType_MsgRequest, "shutdown.buffered.reply")
+	rpcServer.subChan <- marshalRequest(2, protos.MsgType_MsgNotify, "")
+	require.Eventually(t, func() bool {
+		return len(rpcServer.subChan) == 0
+	}, time.Second, time.Millisecond, "request dispatcher did not reach the task-admission gate")
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- rpcServer.Shutdown()
+	}()
+	select {
+	case <-rpcServer.transportDraining:
+	case <-time.After(3 * time.Second):
+		t.Error("shutdown did not start the private transport drain phase")
+	}
+	assert.False(t, rpcServer.conn.IsClosed(), "connection closed before buffered work reached its consumers")
+
+	release()
+	rpcServer.taskMu.Unlock()
+	taskMuLocked = false
+	select {
+	case shutdownErr := <-shutdownDone:
+		require.NoError(t, shutdownErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown did not finish after buffered work was released")
+	}
+
+	drainStrings := func(ch <-chan string) []string {
+		var values []string
+		for {
+			select {
+			case value := <-ch:
+				values = append(values, value)
+			default:
+				return values
+			}
+		}
+	}
+	assert.ElementsMatch(t, []string{
+		fmt.Sprintf("1:%s", protos.MsgType_MsgRequest),
+		fmt.Sprintf("2:%s", protos.MsgType_MsgNotify),
+	}, drainStrings(requestCalls))
+	assert.ElementsMatch(t, []string{"binding-1", "binding-2"}, drainStrings(bindingCalls))
+	assert.ElementsMatch(t, []string{"push-1", "push-2"}, drainStrings(pushCalls))
+	assert.ElementsMatch(t, []string{"kick-1", "kick-2"}, drainStrings(kickCalls))
+	select {
+	case binding := <-rpcServer.GetBindingsChannel():
+		t.Fatalf("public bindings channel exposed an internal drain value: %v", binding)
+	default:
+	}
+	select {
+	case request, ok := <-rpcServer.GetUnhandledRequestsChannel():
+		assert.False(t, ok, "public request channel exposed an internal drain value: %v", request)
+	default:
+		t.Fatal("public request channel was not closed after its owned consumer drained")
+	}
+	assert.Empty(t, rpcServer.subChan)
+	assert.Empty(t, rpcServer.bindingsChan)
+	assert.Empty(t, rpcServer.userPushCh)
+	assert.Empty(t, rpcServer.userKickCh)
+}
+
+func TestNatsRPCServerShutdownWaitsForInboundCallbackBeforeLocalDrain(t *testing.T) {
+	natsServer := helpers.GetTestNatsServer(t)
+	defer natsServer.Shutdown()
+	url := fmt.Sprintf("nats://%s", natsServer.Addr())
+
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	cfg.Connect = url
+	cfg.Buffer.Push = 1
+	ctrl := gomock.NewController(t)
+	mockSessionPool := sessionmocks.NewMockSessionPool(ctrl)
+	rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, nil, mockSessionPool)
+	require.NoError(t, err)
+	mockSessionPool.EXPECT().OnSessionBind(newFuncPtrMatcher(rpcServer.onSessionBind))
+
+	releaseCallback := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() {
+		releaseOnce.Do(func() { close(releaseCallback) })
+	}
+	defer func() {
+		release()
+		_ = rpcServer.Shutdown()
+	}()
+
+	processed := make(chan string, 3)
+	callbackStarted := make(chan struct{})
+	var callbackOnce sync.Once
+	rpcServer.SetPitayaServer(&pitayaServerStub{
+		pushToUser: func(_ context.Context, push *protos.Push) (*protos.Response, error) {
+			callbackOnce.Do(func() {
+				close(callbackStarted)
+				<-releaseCallback
+			})
+			processed <- push.GetUid()
+			return &protos.Response{}, nil
+		},
+	})
+	require.NoError(t, rpcServer.Init())
+
+	userSub, err := rpcServer.subscribeToUserMessages("callback-user", rpcServer.server.Type)
+	require.NoError(t, err)
+	require.NoError(t, rpcServer.conn.Flush())
+	publisher, err := setupNatsConn(url, nil)
+	require.NoError(t, err)
+	defer publisher.Close()
+
+	rpcServer.userPushCh <- &protos.Push{Uid: "in-progress"}
+	select {
+	case <-callbackStarted:
+	case <-time.After(time.Second):
+		t.Fatal("push consumer did not start")
+	}
+	rpcServer.userPushCh <- &protos.Push{Uid: "buffered"}
+	payload, err := proto.Marshal(&protos.Push{Uid: "nats-callback"})
+	require.NoError(t, err)
+	require.NoError(t, publisher.Publish(GetUserMessagesTopic("callback-user", rpcServer.server.Type), payload))
+	require.NoError(t, publisher.Flush())
+	require.Eventually(t, func() bool {
+		pending, _, pendingErr := userSub.Pending()
+		return pendingErr == nil && pending == 1
+	}, time.Second, time.Millisecond, "NATS callback did not block on the full local channel")
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- rpcServer.Shutdown()
+	}()
+	require.Eventually(t, userSub.IsDraining, time.Second, time.Millisecond)
+	select {
+	case <-rpcServer.transportDraining:
+		t.Fatal("local drain started before the inbound callback completed")
+	default:
+	}
+
+	release()
+	select {
+	case shutdownErr := <-shutdownDone:
+		require.NoError(t, shutdownErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown did not finish after the inbound callback completed")
+	}
+
+	var got []string
+	for {
+		select {
+		case uid := <-processed:
+			got = append(got, uid)
+		default:
+			assert.ElementsMatch(t, []string{"in-progress", "buffered", "nats-callback"}, got)
+			return
+		}
+	}
+}
+
+func TestNatsRPCServerShutdownStopsSessionBindingHandlerWithoutClosingDeliveryChannel(t *testing.T) {
+	rpcServer := &NatsRPCServer{
+		stopChan:     make(chan bool),
+		bindingsChan: make(chan *nats.Msg, 1),
+	}
+	require.NoError(t, rpcServer.startHandler(rpcServer.processSessionBindings))
+	require.NoError(t, rpcServer.Shutdown())
+	require.NotPanics(t, func() {
+		rpcServer.bindingsChan <- &nats.Msg{}
+	})
+}
+
+func TestNatsRPCServerShutdownCancelsSaturatedUserCallbacks(t *testing.T) {
+	s := helpers.GetTestNatsServer(t)
+	defer s.Shutdown()
+	url := fmt.Sprintf("nats://%s", s.Addr())
+
+	tests := []struct {
+		name      string
+		topic     string
+		message   proto.Message
+		subscribe func(*NatsRPCServer) (*nats.Subscription, error)
+		fill      func(*NatsRPCServer)
+	}{
+		{
+			name:    "push",
+			topic:   GetUserMessagesTopic("shutdown-user", "frontend"),
+			message: &protos.Push{Uid: "shutdown-user"},
+			subscribe: func(ns *NatsRPCServer) (*nats.Subscription, error) {
+				return ns.subscribeToUserMessages("shutdown-user", "frontend")
+			},
+			fill: func(ns *NatsRPCServer) {
+				ns.userPushCh <- &protos.Push{Uid: "buffer-filler"}
+			},
+		},
+		{
+			name:    "kick",
+			topic:   GetUserKickTopic("shutdown-user", "frontend"),
+			message: &protos.KickMsg{UserId: "shutdown-user"},
+			subscribe: func(ns *NatsRPCServer) (*nats.Subscription, error) {
+				return ns.subscribeToUserKickChannel("shutdown-user", "frontend")
+			},
+			fill: func(ns *NatsRPCServer) {
+				ns.userKickCh <- &protos.KickMsg{UserId: "buffer-filler"}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+			cfg.Buffer.Messages = 1
+			cfg.Buffer.Push = 1
+			rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, nil, nil)
+			require.NoError(t, err)
+
+			rpcServer.conn, err = setupNatsConn(url, nil, nats.DrainTimeout(25*time.Millisecond))
+			require.NoError(t, err)
+			defer rpcServer.conn.Close()
+			publisher, err := setupNatsConn(url, nil)
+			require.NoError(t, err)
+			defer publisher.Close()
+
+			sub, err := tt.subscribe(rpcServer)
+			require.NoError(t, err)
+			require.NoError(t, rpcServer.conn.Flush())
+			require.NoError(t, rpcServer.startHandler(rpcServer.handleMessages))
+
+			tt.fill(rpcServer)
+			payload, err := proto.Marshal(tt.message)
+			require.NoError(t, err)
+			require.NoError(t, publisher.Publish(tt.topic, payload))
+			require.NoError(t, publisher.Flush())
+			require.Eventually(t, func() bool {
+				pending, _, pendingErr := sub.Pending()
+				return pendingErr == nil && pending == 1
+			}, time.Second, time.Millisecond, "NATS callback did not block on the saturated buffer")
+
+			shutdownDone := make(chan error, 1)
+			go func() {
+				shutdownDone <- rpcServer.Shutdown()
+			}()
+			select {
+			case err := <-shutdownDone:
+				require.NoError(t, err)
+			case <-time.After(time.Second):
+				t.Fatal("Shutdown timed out with a saturated user callback")
+			}
+			require.NotErrorIs(t, rpcServer.conn.LastError(), nats.ErrDrainTimeout)
+		})
+	}
+}
+
+func TestValidateNatsRPCRequestRejectsInvalidStructure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		req   *protos.Request
+		reply string
+	}{
+		{
+			name:  "missing msg",
+			req:   &protos.Request{Type: protos.RPCType_User},
+			reply: "reply",
+		},
+		{
+			name:  "unknown rpc type",
+			req:   &protos.Request{Type: protos.RPCType(99), Msg: &protos.Msg{Route: "svc.method"}},
+			reply: "reply",
+		},
+		{
+			name:  "non inbound message type",
+			req:   &protos.Request{Msg: &protos.Msg{Route: "svc.method", Type: protos.MsgType_MsgResponse}},
+			reply: "reply",
+		},
+		{
+			name:  "empty route",
+			req:   &protos.Request{Msg: &protos.Msg{}},
+			reply: "reply",
+		},
+		{
+			name: "negative session id",
+			req: &protos.Request{
+				Session: &protos.Session{Id: -1},
+				Msg:     &protos.Msg{Route: "svc.method"},
+			},
+			reply: "reply",
+		},
+		{
+			name:  "missing request reply",
+			req:   &protos.Request{Msg: &protos.Msg{Route: "svc.method"}},
+			reply: "",
+		},
+		{
+			name:  "wildcard request reply",
+			req:   &protos.Request{Msg: &protos.Msg{Route: "svc.method"}},
+			reply: "reply.*",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			payload, err := proto.Marshal(tt.req)
+			require.NoError(t, err)
+			_, err = validateNatsRPCRequest(&nats.Msg{Data: payload, Reply: tt.reply})
+			assert.Error(t, err)
+		})
+	}
+}
+
+func TestValidateNatsRPCRequestAcceptsRouteLongerThanClientWireLimit(t *testing.T) {
+	routeName := strings.Repeat("s", 1<<8) + ".method"
+	payload, err := proto.Marshal(&protos.Request{
+		Type: protos.RPCType_User,
+		Msg: &protos.Msg{
+			Type:  protos.MsgType_MsgRequest,
+			Route: routeName,
+		},
+	})
+	require.NoError(t, err)
+
+	req, err := validateNatsRPCRequest(&nats.Msg{Data: payload, Reply: "reply"})
+	require.NoError(t, err)
+	assert.Equal(t, routeName, req.GetMsg().GetRoute())
 }
 
 func TestNatsRPCServerInitShouldFailIfConnFails(t *testing.T) {
@@ -523,8 +1336,280 @@ func TestNatsRPCServerInitPropagatesHandlerSubmissionError(t *testing.T) {
 
 func TestNatsRPCServerShutdownIsIdempotent(t *testing.T) {
 	rpcServer := &NatsRPCServer{stopChan: make(chan bool)}
-	require.NoError(t, rpcServer.Shutdown())
-	require.NoError(t, rpcServer.Shutdown())
+	var wg sync.WaitGroup
+	errs := make(chan error, 32)
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- rpcServer.Shutdown()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+}
+
+func TestNatsRPCServerShutdownWaitsForOwnedHandlers(t *testing.T) {
+	rpcServer := &NatsRPCServer{stopChan: make(chan bool)}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	require.NoError(t, rpcServer.startHandler(func() {
+		close(started)
+		<-release
+	}))
+	<-started
+
+	shutdownResult := make(chan error, 1)
+	go func() {
+		shutdownResult <- rpcServer.Shutdown()
+	}()
+	select {
+	case <-rpcServer.stopChan:
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not publish the stop signal")
+	}
+	select {
+	case <-shutdownResult:
+		t.Fatal("Shutdown returned while an owned handler was running")
+	default:
+	}
+
+	close(release)
+	select {
+	case err := <-shutdownResult:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not return after the owned handler exited")
+	}
+}
+
+func TestNatsRPCServerBeforeShutdownWaitsForTerminalCallback(t *testing.T) {
+	s := helpers.GetTestNatsServer(t)
+	defer s.Shutdown()
+
+	callbackStarted := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(releaseCallback)
+		}
+	}()
+	conn, terminalCallbackDone, err := setupTrackedNatsConn(
+		fmt.Sprintf("nats://%s", s.Addr()),
+		nil,
+		func() {
+			close(callbackStarted)
+			<-releaseCallback
+		},
+	)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, nil, nil)
+	require.NoError(t, err)
+	rpcServer.conn = conn
+	rpcServer.terminalCallbackDone = terminalCallbackDone
+	require.NoError(t, rpcServer.startHandler(rpcServer.handleMessages))
+
+	beforeDone := make(chan struct{})
+	go func() {
+		rpcServer.BeforeShutdown()
+		close(beforeDone)
+	}()
+	select {
+	case <-callbackStarted:
+	case <-time.After(time.Second):
+		t.Fatal("BeforeShutdown did not start the terminal NATS callback")
+	}
+	select {
+	case <-beforeDone:
+		t.Fatal("BeforeShutdown returned while the terminal NATS callback was running")
+	default:
+	}
+
+	close(releaseCallback)
+	released = true
+	select {
+	case <-beforeDone:
+	case <-time.After(time.Second):
+		t.Fatal("BeforeShutdown did not return after the terminal NATS callback exited")
+	}
+	assert.True(t, conn.IsClosed())
+}
+
+func TestNatsRPCServerBeforeShutdownStopsAndWaitsForOwnedHandlers(t *testing.T) {
+	rpcServer := &NatsRPCServer{
+		stopChan:   make(chan bool),
+		userPushCh: make(chan *protos.Push),
+		userKickCh: make(chan *protos.KickMsg),
+	}
+	require.NoError(t, rpcServer.startHandler(rpcServer.processPushes))
+	require.NoError(t, rpcServer.startHandler(rpcServer.processKick))
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	require.NoError(t, rpcServer.startHandler(func() {
+		close(started)
+		<-release
+	}))
+	<-started
+
+	beforeDone := make(chan struct{})
+	go func() {
+		rpcServer.BeforeShutdown()
+		close(beforeDone)
+	}()
+	select {
+	case <-rpcServer.stopChan:
+	case <-time.After(time.Second):
+		t.Fatal("BeforeShutdown did not publish the stop signal")
+	}
+	select {
+	case <-beforeDone:
+		t.Fatal("BeforeShutdown returned while an owned handler was running")
+	default:
+	}
+
+	close(release)
+	select {
+	case <-beforeDone:
+	case <-time.After(time.Second):
+		t.Fatal("BeforeShutdown did not return after owned handlers exited")
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- rpcServer.Shutdown()
+	}()
+	select {
+	case err := <-shutdownDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown was not idempotent after BeforeShutdown")
+	}
+}
+
+func TestNatsRPCServerBeforeShutdownWaitsForAcceptedRequestTasks(t *testing.T) {
+	rpcServer := &NatsRPCServer{stopChan: make(chan bool)}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	require.NoError(t, rpcServer.submitRequestTask(context.Background(), nil, func(context.Context) {
+		close(started)
+		<-release
+	}))
+	<-started
+
+	beforeDone := make(chan struct{})
+	go func() {
+		rpcServer.BeforeShutdown()
+		close(beforeDone)
+	}()
+	select {
+	case <-rpcServer.stopChan:
+	case <-time.After(time.Second):
+		t.Fatal("BeforeShutdown did not publish the stop signal")
+	}
+	select {
+	case <-beforeDone:
+		t.Fatal("BeforeShutdown returned while an accepted request task was running")
+	default:
+	}
+	require.ErrorIs(t, rpcServer.submitRequestTask(context.Background(), nil, func(context.Context) {}), errNatsRPCServerStopping)
+
+	close(release)
+	select {
+	case <-beforeDone:
+	case <-time.After(time.Second):
+		t.Fatal("BeforeShutdown did not return after the accepted request task exited")
+	}
+}
+
+func TestNatsRPCServerShutdownKeepsConnectionOpenUntilAcceptedRequestTasksFinish(t *testing.T) {
+	s := helpers.GetTestNatsServer(t)
+	defer s.Shutdown()
+	conn, err := setupNatsConn(fmt.Sprintf("nats://%s", s.Addr()), nil)
+	require.NoError(t, err)
+	defer conn.Close()
+
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, nil, nil)
+	require.NoError(t, err)
+	rpcServer.conn = conn
+
+	handlerExited := make(chan struct{})
+	require.NoError(t, rpcServer.startHandler(func() {
+		rpcServer.handleMessages()
+		close(handlerExited)
+	}))
+
+	taskStarted := make(chan struct{})
+	releaseTask := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseTask) }) }
+	defer release()
+	publishResult := make(chan error, 1)
+	require.NoError(t, rpcServer.submitRequestTask(context.Background(), nil, func(context.Context) {
+		close(taskStarted)
+		<-releaseTask
+		publishResult <- conn.Publish("shutdown.accepted.response", []byte("ok"))
+	}))
+	<-taskStarted
+
+	shutdownResult := make(chan error, 1)
+	go func() {
+		shutdownResult <- rpcServer.Shutdown()
+	}()
+	select {
+	case <-handlerExited:
+	case <-time.After(time.Second):
+		t.Fatal("message handler did not exit after shutdown started")
+	}
+	assert.False(t, conn.IsClosed(), "accepted request tasks must finish before the connection drains")
+
+	release()
+	require.NoError(t, <-publishResult)
+	select {
+	case err := <-shutdownResult:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not return after the accepted request task finished")
+	}
+	assert.True(t, conn.IsClosed())
+}
+
+func TestNatsRPCServerBeforeShutdownCancelsAcceptedRequestTaskContext(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, nil, nil)
+	require.NoError(t, err)
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	require.NoError(t, rpcServer.submitRequestTask(context.Background(), nil, func(ctx context.Context) {
+		close(started)
+		<-ctx.Done()
+		close(canceled)
+	}))
+	<-started
+
+	beforeDone := make(chan struct{})
+	go func() {
+		rpcServer.BeforeShutdown()
+		close(beforeDone)
+	}()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("BeforeShutdown did not cancel the accepted request task context")
+	}
+	select {
+	case <-beforeDone:
+	case <-time.After(time.Second):
+		t.Fatal("BeforeShutdown did not return after the canceled request task exited")
+	}
 }
 
 func TestNatsRPCServerInit(t *testing.T) {
@@ -551,8 +1636,8 @@ func TestNatsRPCServerInit(t *testing.T) {
 		topic string
 		req   *protos.Request
 	}{
-		{"test1", getChannel(sv.Type, sv.ID), &protos.Request{Type: protos.RPCType_Sys, FrontendID: "bla", Msg: &protos.Msg{Id: 1, Reply: "ae"}}},
-		{"test2", getChannel(sv.Type, sv.ID), &protos.Request{Type: protos.RPCType_User, FrontendID: "bla2", Msg: &protos.Msg{Id: 1, Reply: "boa"}}},
+		{"test1", getChannel(sv.Type, sv.ID), &protos.Request{Type: protos.RPCType_Sys, FrontendID: "bla", Msg: &protos.Msg{Id: 1, Route: "svc.method", Reply: "ae"}}},
+		{"test2", getChannel(sv.Type, sv.ID), &protos.Request{Type: protos.RPCType_User, FrontendID: "bla2", Msg: &protos.Msg{Id: 1, Route: "svc.method", Reply: "boa"}}},
 	}
 	for _, table := range tables {
 		t.Run(table.name, func(t *testing.T) {

@@ -10,6 +10,7 @@ import (
 	"github.com/alkaid/pitaya/v2/metrics"
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewGRPCServer(t *testing.T) {
@@ -35,4 +36,8 @@ func TestGRPCServerInit(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, conn)
 	assert.NotNil(t, gs.grpcSv)
+	require.NoError(t, conn.Close())
+
+	gs.BeforeShutdown()
+	assert.NoError(t, gs.Shutdown(), "Shutdown must be idempotent after the admission barrier")
 }

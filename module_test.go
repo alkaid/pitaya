@@ -44,8 +44,12 @@ func (m *MyMod) Init() error {
 
 func (m *MyMod) Shutdown() error {
 	m.running = false
-	modulesOrder = append(modulesOrder, m.name)
+	modulesOrder = append(modulesOrder, "shutdown:"+m.name)
 	return nil
+}
+
+func (m *MyMod) BeforeShutdown() {
+	modulesOrder = append(modulesOrder, "before:"+m.name)
 }
 
 func TestRegisterModule(t *testing.T) {
@@ -122,5 +126,8 @@ func TestShutdownModules(t *testing.T) {
 	assert.Equal(t, false, app.modulesMap["mod2"].(*MyMod).running)
 	assert.Equal(t, false, app.modulesMap["mod3"].(*MyMod).running)
 	assert.Equal(t, false, app.modulesMap["mod4"].(*MyMod).running)
-	assert.Equal(t, []string{"mod4", "mod1", "mod2", "mod3"}, modulesOrder)
+	assert.Equal(t, []string{
+		"before:mod4", "before:mod1", "before:mod2", "before:mod3",
+		"shutdown:mod4", "shutdown:mod1", "shutdown:mod2", "shutdown:mod3",
+	}, modulesOrder)
 }

@@ -29,28 +29,29 @@ import (
 
 // Builder holds dependency instances for a pitaya App
 type Builder struct {
-	acceptors        []acceptor.Acceptor
-	postBuildHooks   []func(app Pitaya)
-	Config           config.PitayaConfig
-	DieChan          chan bool
-	PacketDecoder    codec.PacketDecoder
-	PacketEncoder    codec.PacketEncoder
-	MessageEncoder   *message.MessagesEncoder
-	Serializer       serialize.Serializer
-	Router           *router.Router
-	RPCClient        cluster.RPCClient
-	RPCServer        cluster.RPCServer
-	MetricsReporters []metrics.Reporter
-	Server           *cluster.Server
-	ServerMode       ServerMode
-	ServiceDiscovery cluster.ServiceDiscovery
-	Groups           groups.GroupService
-	SessionPool      session.SessionPool
-	Worker           *worker.Worker
-	RemoteHooks      *pipeline.RemoteHooks
-	HandlerHooks     *pipeline.HandlerHooks
-	Redis            redis.Cmdable
-	conf             *config.Config
+	acceptors         []acceptor.Acceptor
+	postBuildHooks    []func(app Pitaya)
+	dependencyDieChan chan bool
+	Config            config.PitayaConfig
+	DieChan           chan bool
+	PacketDecoder     codec.PacketDecoder
+	PacketEncoder     codec.PacketEncoder
+	MessageEncoder    *message.MessagesEncoder
+	Serializer        serialize.Serializer
+	Router            *router.Router
+	RPCClient         cluster.RPCClient
+	RPCServer         cluster.RPCServer
+	MetricsReporters  []metrics.Reporter
+	Server            *cluster.Server
+	ServerMode        ServerMode
+	ServiceDiscovery  cluster.ServiceDiscovery
+	Groups            groups.GroupService
+	SessionPool       session.SessionPool
+	Worker            *worker.Worker
+	RemoteHooks       *pipeline.RemoteHooks
+	HandlerHooks      *pipeline.HandlerHooks
+	Redis             redis.Cmdable
+	conf              *config.Config
 }
 
 // PitayaBuilder Builder interface
@@ -102,7 +103,11 @@ func NewBuilder(isFrontend bool,
 	config config.PitayaConfig,
 ) *Builder {
 	server := cluster.NewServer(util.NanoID(12), serverType, isFrontend, serverMetadata)
-	dieChan := make(chan bool)
+	// The lifecycle signal is an event queue, not a broadcast channel. Keeping
+	// one pending event makes dependency failures observable even when they race
+	// with App.Start reaching its shutdown select.
+	dieChan := make(chan bool, 1)
+	dependencyDieChan := make(chan bool, 1)
 
 	metricsReporters := []metrics.Reporter{}
 	if config.Metrics.Prometheus.Enabled {
@@ -134,17 +139,17 @@ func NewBuilder(isFrontend bool,
 	var rpcClient cluster.RPCClient
 	if serverMode == Cluster {
 		var err error
-		serviceDiscovery, err = cluster.NewEtcdServiceDiscovery(config.Cluster.SD.Etcd, server, dieChan)
+		serviceDiscovery, err = cluster.NewEtcdServiceDiscovery(config.Cluster.SD.Etcd, server, dependencyDieChan)
 		if err != nil {
 			logger.Zap.Fatal("error creating default cluster service discovery component", zap.Error(err))
 		}
 
-		rpcServer, err = cluster.NewNatsRPCServer(config.Cluster.RPC.Server.Nats, server, metricsReporters, dieChan, sessionPool)
+		rpcServer, err = cluster.NewNatsRPCServer(config.Cluster.RPC.Server.Nats, server, metricsReporters, dependencyDieChan, sessionPool)
 		if err != nil {
 			logger.Zap.Fatal("error setting default cluster rpc server component", zap.Error(err))
 		}
 
-		rpcClient, err = cluster.NewNatsRPCClient(config.Cluster.RPC.Client.Nats, server, metricsReporters, dieChan)
+		rpcClient, err = cluster.NewNatsRPCClient(config.Cluster.RPC.Client.Nats, server, metricsReporters, dependencyDieChan)
 		if err != nil {
 			logger.Zap.Fatal("error setting default cluster rpc client component", zap.Error(err))
 		}
@@ -166,27 +171,28 @@ func NewBuilder(isFrontend bool,
 	}
 
 	return &Builder{
-		acceptors:        []acceptor.Acceptor{},
-		postBuildHooks:   make([]func(app Pitaya), 0),
-		Config:           config,
-		DieChan:          dieChan,
-		PacketDecoder:    codec.NewPomeloPacketDecoder(),
-		PacketEncoder:    codec.NewPomeloPacketEncoder(),
-		MessageEncoder:   message.NewMessagesEncoder(config.Handler.Messages.Compression),
-		Serializer:       serializer,
-		Router:           router.New(),
-		RPCClient:        rpcClient,
-		RPCServer:        rpcServer,
-		MetricsReporters: metricsReporters,
-		Server:           server,
-		ServerMode:       serverMode,
-		Groups:           gsi,
-		RemoteHooks:      pipeline.NewRemoteHooks(),
-		HandlerHooks:     handlerHooks,
-		ServiceDiscovery: serviceDiscovery,
-		SessionPool:      sessionPool,
-		Worker:           worker,
-		Redis:            redisClient,
+		acceptors:         []acceptor.Acceptor{},
+		postBuildHooks:    make([]func(app Pitaya), 0),
+		dependencyDieChan: dependencyDieChan,
+		Config:            config,
+		DieChan:           dieChan,
+		PacketDecoder:     codec.NewPomeloPacketDecoder(),
+		PacketEncoder:     codec.NewPomeloPacketEncoder(),
+		MessageEncoder:    message.NewMessagesEncoder(config.Handler.Messages.Compression),
+		Serializer:        serializer,
+		Router:            router.New(),
+		RPCClient:         rpcClient,
+		RPCServer:         rpcServer,
+		MetricsReporters:  metricsReporters,
+		Server:            server,
+		ServerMode:        serverMode,
+		Groups:            gsi,
+		RemoteHooks:       pipeline.NewRemoteHooks(),
+		HandlerHooks:      handlerHooks,
+		ServiceDiscovery:  serviceDiscovery,
+		SessionPool:       sessionPool,
+		Worker:            worker,
+		Redis:             redisClient,
 	}
 }
 
@@ -249,7 +255,7 @@ func (builder *Builder) Build() Pitaya {
 		builder.RPCServer.SetPitayaServer(remoteService)
 	}
 
-	agentFactory := agent.NewAgentFactoryWithTrustedProxies(builder.DieChan,
+	agentFactory := agent.NewAgentFactoryWithTrustedProxies(builder.dependencyDieChan,
 		builder.PacketDecoder,
 		builder.PacketEncoder,
 		builder.Serializer,
@@ -275,11 +281,12 @@ func (builder *Builder) Build() Pitaya {
 		handlerPool,
 	)
 
-	app := NewApp(
+	app := newApp(
 		builder.ServerMode,
 		builder.Serializer,
 		builder.acceptors,
 		builder.DieChan,
+		builder.dependencyDieChan,
 		builder.Router,
 		builder.Server,
 		builder.RPCClient,
