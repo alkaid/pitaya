@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/alkaid/pitaya/v2/conn/codec"
@@ -118,6 +119,21 @@ func (l *stagedCloseListener) Close() error {
 }
 
 func (l *stagedCloseListener) Addr() net.Addr { return queuedListenerAddr{} }
+
+type blockedErrorListener struct {
+	acceptStarted chan struct{}
+	releaseAccept chan struct{}
+	acceptErr     error
+}
+
+func (l *blockedErrorListener) Accept() (net.Conn, error) {
+	close(l.acceptStarted)
+	<-l.releaseAccept
+	return nil, l.acceptErr
+}
+
+func (l *blockedErrorListener) Close() error   { return nil }
+func (l *blockedErrorListener) Addr() net.Addr { return queuedListenerAddr{} }
 
 func TestAcceptorStopBeforeServeIsSafeAndIdempotent(t *testing.T) {
 	tests := []struct {
@@ -353,6 +369,42 @@ func TestProxyProtocolCloseDoesNotLeakUnderlyingAcceptError(t *testing.T) {
 			t.Fatal("wrapped Close did not return")
 		}
 	}
+}
+
+func TestProxyProtocolAcceptForwardsUnderlyingListenerError(t *testing.T) {
+	listener := newQueuedListener(0)
+	require.NoError(t, listener.Close())
+	wrapper := &ProxyProtocolListener{
+		Listener:             listener,
+		ProxyProtocolEnabled: true,
+	}
+	t.Cleanup(func() { require.NoError(t, wrapper.Close()) })
+
+	_, err := wrapper.Accept()
+	require.ErrorIs(t, err, net.ErrClosed)
+}
+
+func TestProxyProtocolCloseUnblocksPendingListenerError(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		listener := &blockedErrorListener{
+			acceptStarted: make(chan struct{}),
+			releaseAccept: make(chan struct{}),
+			acceptErr:     errors.New("synthetic listener failure"),
+		}
+		wrapper := &ProxyProtocolListener{
+			Listener:             listener,
+			ProxyProtocolEnabled: true,
+		}
+
+		wrapper.startPump()
+		<-listener.acceptStarted
+		close(listener.releaseAccept)
+		synctest.Wait()
+
+		require.NoError(t, wrapper.Close())
+		_, ok := <-wrapper.results
+		require.False(t, ok)
+	})
 }
 
 func TestTCPProxyHeaderTimeoutRejectsAndContinues(t *testing.T) {

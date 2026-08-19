@@ -30,6 +30,7 @@ import (
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/helpers"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 var tcpAcceptorTables = []struct {
@@ -245,6 +246,19 @@ func TestGetNextMessageEmptyEOF(t *testing.T) {
 
 	_, err := playerConn.GetNextMessage()
 	assert.EqualError(t, err, constants.ErrConnectionClosed.Error())
+}
+
+func TestGetNextMessageHeaderReadError(t *testing.T) {
+	reader, writer := net.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	playerConn := &tcpPlayerConn{Conn: reader, remoteAddr: reader.RemoteAddr()}
+	require.NoError(t, reader.SetReadDeadline(time.Now().Add(-time.Second)))
+
+	_, err := playerConn.GetNextMessage()
+	var netErr net.Error
+	require.ErrorAs(t, err, &netErr)
+	assert.True(t, netErr.Timeout())
 }
 
 func TestGetNextMessageInParts(t *testing.T) {
