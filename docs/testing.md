@@ -154,13 +154,12 @@ The root gate skips only the separately verified `pitaya-cli`, `tools`, and
 `xk6-pitaya` modules. Adding or removing a nested `go.mod` fails the gate until
 the module has an explicit compile/test lane and is registered in the tool.
 
-The current conservative baseline is 4184/7308 statements (57.25%), generated
-from three independently green runs so timing-dependent cluster coverage does
-not become a flaky floor. The Phase 5 targets remain 70% overall and 80% for
-`cluster`, `co`, `service`, and `session`; they are recorded in the policy but
-remain non-blocking until behavior tests raise every package to those targets.
-The gate therefore prevents regressions without claiming that Phase 5 coverage
-is complete.
+The current conservative baseline is 9178/11806 statements (77.74%), generated
+from two independently green stamped runs at the same clean commit using the
+lower package count from either run. Absolute enforcement is enabled: overall
+coverage must remain at least 70%, and `cluster`, `co`, `service`, and `session`
+must each remain at least 80%. The exact baseline ratios remain regression
+floors, while changed executable production lines require 90% diff coverage.
 
 Refresh the baseline only after an intentional coverage-policy review. Supply a
 full commit SHA and one or more independently green profiles; the update command

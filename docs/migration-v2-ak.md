@@ -603,7 +603,7 @@ coverage job 会校验该 commit 是被测 head 的祖先。PR 使用 tested mer
 
 root coverage gate 只识别有独立验证 lane 的 `pitaya-cli`、`tools` 和 `xk6-pitaya`。新增、删除或重命名 nested `go.mod` 时必须先在 verifier 注册并建立独立 lane，否则 fail closed。
 
-当前保守 baseline 是 `4184/7308 = 57.25%`，最近验证为 `4214/7308 = 57.66%`。overall、逐包、package set 和文件清单不能回退；新增或修改的 executable production 行要求 90% diff coverage。刷新 baseline 只接受 clean checkout 上同一 commit 的独立 green stamped profile。
+当前保守 baseline 是 `9178/11806 = 77.74%`，由同一 clean commit 的两份独立 green stamped profile 取逐包较低值生成。绝对门禁已经启用：overall 不得低于 70%；`cluster` 为 `2258/2742 = 82.35%`、`co` 为 `241/282 = 85.46%`、`service` 为 `1214/1469 = 82.64%`、`session` 为 `771/870 = 88.62%`，四个核心包均不得低于 80%。overall、逐包、package set 和文件清单不能回退；新增或修改的 executable production 行要求 90% diff coverage。刷新 baseline 只接受 clean checkout 上同一 commit 的独立 green stamped profile。
 
 ### 模糊测试门禁
 

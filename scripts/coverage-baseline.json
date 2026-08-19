@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "base_sha": "4a2ccf1644ac67ca997123cd0ea5bcd42146d1df",
+  "base_sha": "88bae442733970e47d468d6e5c4d01856eb06748",
   "coverage_platform": {
     "goos": "linux",
     "goarch": "amd64"
@@ -88,65 +88,65 @@
       "session": 80
     },
     "diff_percent": 90,
-    "enforce_absolute": false
+    "enforce_absolute": true
   },
   "baseline": {
     "overall": {
-      "covered": 4184,
-      "total": 7308
+      "covered": 9178,
+      "total": 11806
     },
     "packages": {
       ".": {
-        "covered": 359,
-        "total": 612
+        "covered": 704,
+        "total": 1026
       },
       "acceptor": {
-        "covered": 141,
-        "total": 189
+        "covered": 366,
+        "total": 418
       },
       "acceptorwrapper": {
-        "covered": 35,
-        "total": 40
+        "covered": 100,
+        "total": 123
       },
       "agent": {
-        "covered": 282,
-        "total": 370
+        "covered": 299,
+        "total": 389
       },
       "client": {
-        "covered": 46,
-        "total": 436
+        "covered": 279,
+        "total": 446
       },
       "cluster": {
-        "covered": 692,
-        "total": 1212
+        "covered": 2258,
+        "total": 2742
       },
       "co": {
-        "covered": 227,
-        "total": 273
+        "covered": 241,
+        "total": 282
       },
       "component": {
-        "covered": 99,
+        "covered": 110,
         "total": 126
       },
       "config": {
-        "covered": 45,
-        "total": 129
+        "covered": 326,
+        "total": 426
       },
       "conn/codec": {
         "covered": 46,
         "total": 49
       },
       "conn/message": {
-        "covered": 103,
-        "total": 115
+        "covered": 110,
+        "total": 117
       },
       "conn/packet": {
         "covered": 2,
         "total": 2
       },
       "context": {
-        "covered": 33,
-        "total": 45
+        "covered": 57,
+        "total": 62
       },
       "defaultpipelines": {
         "covered": 8,
@@ -157,43 +157,47 @@
         "total": 119
       },
       "groups": {
-        "covered": 178,
-        "total": 216
+        "covered": 341,
+        "total": 431
+      },
+      "internal/workers": {
+        "covered": 420,
+        "total": 629
       },
       "logger": {
-        "covered": 31,
-        "total": 75
+        "covered": 103,
+        "total": 106
       },
       "metrics": {
-        "covered": 128,
-        "total": 206
+        "covered": 318,
+        "total": 328
       },
       "modules": {
-        "covered": 33,
-        "total": 135
+        "covered": 55,
+        "total": 145
       },
       "pipeline": {
-        "covered": 6,
+        "covered": 30,
         "total": 30
       },
       "remote": {
-        "covered": 112,
-        "total": 291
+        "covered": 199,
+        "total": 295
       },
       "route": {
         "covered": 14,
         "total": 14
       },
       "router": {
-        "covered": 23,
-        "total": 48
+        "covered": 37,
+        "total": 49
       },
       "serialize": {
-        "covered": 0,
+        "covered": 2,
         "total": 4
       },
       "serialize/json": {
-        "covered": 3,
+        "covered": 4,
         "total": 4
       },
       "serialize/protobuf": {
@@ -201,40 +205,40 @@
         "total": 10
       },
       "service": {
-        "covered": 633,
-        "total": 961
+        "covered": 1214,
+        "total": 1469
       },
       "session": {
-        "covered": 567,
-        "total": 792
+        "covered": 771,
+        "total": 870
       },
       "timer": {
-        "covered": 41,
-        "total": 45
+        "covered": 217,
+        "total": 250
       },
       "tracing": {
-        "covered": 36,
+        "covered": 124,
         "total": 138
       },
       "util": {
-        "covered": 39,
-        "total": 126
+        "covered": 115,
+        "total": 140
       },
       "util/compression": {
-        "covered": 11,
-        "total": 13
+        "covered": 23,
+        "total": 26
       },
       "util/net": {
         "covered": 86,
         "total": 357
       },
       "util/viperx": {
-        "covered": 0,
+        "covered": 12,
         "total": 32
       },
       "worker": {
-        "covered": 50,
-        "total": 86
+        "covered": 112,
+        "total": 144
       }
     }
   }
