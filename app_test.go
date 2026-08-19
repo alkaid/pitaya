@@ -454,6 +454,35 @@ func TestInternalDependencyFailureStopsAppWhenLegacyEventIsObserved(t *testing.T
 	}
 }
 
+func TestLegacyDieChannelStopsApp(t *testing.T) {
+	builderConfig := config.NewDefaultPitayaConfig()
+	builder := newAppTestBuilder(false, "legacy-die", Standalone, nil, *builderConfig)
+	app := builder.Build().(*App)
+	started := make(chan struct{})
+	app.OnStarted(func() { close(started) })
+
+	appDone := make(chan interface{}, 1)
+	go func() {
+		defer func() { appDone <- recover() }()
+		app.Start()
+	}()
+	defer app.Shutdown()
+
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("App did not start")
+	}
+	builder.DieChan <- true
+
+	select {
+	case recovered := <-appDone:
+		assert.Nil(t, recovered)
+	case <-time.After(5 * time.Second):
+		t.Fatal("legacy die event did not stop App")
+	}
+}
+
 func TestStopAcceptorsReportsBlockedDispatcher(t *testing.T) {
 	app := &App{dispatchersStopped: true}
 	app.acceptCtx, app.cancelAccept = context.WithCancel(context.Background())

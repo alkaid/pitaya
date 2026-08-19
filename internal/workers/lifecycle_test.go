@@ -2,6 +2,7 @@ package workers
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -89,6 +90,23 @@ func (c *blockingRedisConn) Receive() (any, error) {
 func (c *blockingRedisConn) ReceiveContext(ctx context.Context) (any, error) {
 	<-ctx.Done()
 	return nil, ctx.Err()
+}
+
+func TestTryFetchMessageReturnsAfterPoolDialFailure(t *testing.T) {
+	dialErr := errors.New("synthetic Redis dial failure")
+	dialed := false
+	fetcher := &fetch{
+		ctx: context.Background(),
+		pool: &redis.Pool{
+			Dial: func() (redis.Conn, error) {
+				dialed = true
+				return nil, dialErr
+			},
+		},
+	}
+
+	fetcher.tryFetchMessage()
+	require.True(t, dialed)
 }
 
 type inprogressRedisBackend struct {
