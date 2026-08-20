@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/alkaid/pitaya/v2/cluster"
+	clustermocks "github.com/alkaid/pitaya/v2/cluster/mocks"
 	"github.com/alkaid/pitaya/v2/co"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/protos"
@@ -325,6 +326,31 @@ func TestGetSessionFromCtx(t *testing.T) {
 	assert.Nil(t, sys.getSessionFromCtx(context.Background()))
 	ctx := context.WithValue(context.Background(), constants.SessionCtxKey, sess)
 	assert.Same(t, sess, sys.getSessionFromCtx(ctx))
+}
+
+func TestSysSessionCloseCallbackNotifiesClusterDeterministically(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	server := cluster.NewServer("frontend-1", "frontend", true)
+	discovery := clustermocks.NewMockServiceDiscovery(ctrl)
+	discovery.EXPECT().GetServerTypes().Return(map[string]*cluster.Server{})
+
+	var onClose session.OnSessionCloseFunc
+	pool := mocks.NewMockSessionPool(ctrl)
+	pool.EXPECT().OnSessionBind(gomock.Any())
+	pool.EXPECT().OnSessionClose(gomock.Any()).Do(func(callback session.OnSessionCloseFunc) {
+		onClose = callback
+	})
+	var coordinator session.BackendCoordinator
+	remoteService := service.NewRemoteService(nil, nil, discovery, nil, nil, nil, nil, server, pool, nil, nil, nil)
+	sys := NewSys(&backendCoordinatorPool{SessionPool: pool, coordinator: &coordinator}, server, nil, nil, remoteService)
+	sys.Init()
+	require.NotNil(t, onClose)
+
+	sess := mocks.NewMockSession(ctrl)
+	sess.EXPECT().ID().Return(int64(7)).AnyTimes()
+	sess.EXPECT().UID().Return("user-1").AnyTimes()
+	sess.EXPECT().FlushOnline().Return(nil)
+	onClose(sess, map[string]string{"reason": "test"}, session.CloseReasonNormal)
 }
 
 func TestSysListenerSuccessPaths(t *testing.T) {
