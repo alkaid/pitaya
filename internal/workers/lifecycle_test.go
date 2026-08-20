@@ -326,6 +326,36 @@ func TestFetchRetriesFailedPoolAcquisitionBeforePollingLiveQueue(t *testing.T) {
 	require.Equal(t, "old", receiveFetchedMessage(t, fetcher).Jid())
 }
 
+func TestFetchRecoveryStopsOnCanceledContextBeforeDelivery(t *testing.T) {
+	backend := newInprogressRedisBackend("")
+	backend.inprogress = []string{`{"jid":"old","queue":"rpc","args":{}}`}
+	pool := &redis.Pool{
+		MaxIdle: 1,
+		Dial: func() (redis.Conn, error) {
+			return &inprogressRedisConn{backend: backend}, nil
+		},
+	}
+	t.Cleanup(func() { require.NoError(t, pool.Close()) })
+	ctx, cancel := context.WithCancel(context.Background())
+	fetcher := newRecoveryTestFetch(ctx, pool)
+	result := make(chan bool, 1)
+	go func() {
+		result <- fetcher.processOldMessages()
+	}()
+	select {
+	case <-backend.lrangeSeen:
+	case <-time.After(time.Second):
+		t.Fatal("in-progress scan did not complete before cancellation")
+	}
+	cancel()
+	select {
+	case recovered := <-result:
+		require.False(t, recovered)
+	case <-time.After(time.Second):
+		t.Fatal("recovery did not stop after context cancellation")
+	}
+}
+
 func TestFetchRecoveryRetryIsCancellable(t *testing.T) {
 	newFailingFetcher := func(ctx context.Context) (*fetch, *inprogressRedisBackend) {
 		backend := newInprogressRedisBackend("")

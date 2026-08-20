@@ -74,4 +74,11 @@ func TestBuildRequestStripsSpoofedReliableMetadataAndInjectsTrustedMarker(t *tes
 	require.NoError(t, err)
 	assert.Equal(t, "job-1", pcontext.GetFromPropagateCtx(requestCtx, rpccontext.ReliableJobKey))
 	assert.Equal(t, digest, pcontext.GetFromPropagateCtx(requestCtx, rpccontext.ReliableJobMetadataDigestKey))
+
+	request, err = buildRequest(nil, protos.RPCType_User, "game.player.move", nil, msg, server)
+	require.NoError(t, err)
+	requestCtx, err = pcontext.Decode(request.Metadata)
+	require.NoError(t, err)
+	assert.Equal(t, server.ID, pcontext.GetFromPropagateCtx(requestCtx, constants.PeerIDKey))
+	assert.Equal(t, server.Type, pcontext.GetFromPropagateCtx(requestCtx, constants.PeerServiceKey))
 }

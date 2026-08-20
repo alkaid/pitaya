@@ -1020,6 +1020,10 @@ func TestEtcdServiceDiscoveryReadViewsAndAppDieSignal(t *testing.T) {
 	backend := NewServer("room-1", "room", false, nil)
 	otherFrontend := NewServer("connector-2", "connector", true, nil)
 	sd.watch.byID.Store(backend.ID, backend)
+	frontend, err = sd.GetAnyFrontend()
+	require.Error(t, err)
+	assert.Nil(t, frontend)
+
 	sd.watch.byID.Store(otherFrontend.ID, otherFrontend)
 	frontend, err = sd.GetAnyFrontend()
 	require.NoError(t, err)

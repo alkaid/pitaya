@@ -1286,6 +1286,30 @@ func TestNatsRPCServerConsumersPreferSignaledTransportDrain(t *testing.T) {
 	})
 }
 
+func TestNatsRPCServerExplicitCloseSignalsSelectDeterministicBranches(t *testing.T) {
+	connectionClosed := make(chan struct{})
+	close(connectionClosed)
+	assert.True(t, (&NatsRPCServer{}).connectionHasClosed(connectionClosed))
+
+	stop := make(chan bool)
+	close(stop)
+	rpcServer := &NatsRPCServer{
+		stopChan:          stop,
+		transportDraining: make(chan struct{}),
+		userKickCh:        make(chan *protos.KickMsg),
+	}
+	done := make(chan struct{})
+	go func() {
+		rpcServer.processKick()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("kick consumer did not stop after the explicit stop signal")
+	}
+}
+
 func TestNatsRPCServerShutdownWaitsForInboundCallbackBeforeLocalDrain(t *testing.T) {
 	natsServer := helpers.GetTestNatsServer(t)
 	defer natsServer.Shutdown()

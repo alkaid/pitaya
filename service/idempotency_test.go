@@ -94,6 +94,20 @@ func TestRPCIdempotencyInfoIsVisibleOnlyAtCurrentRPCBoundary(t *testing.T) {
 	assert.False(t, <-handler.nextHopHasInfo, "local command identity must not enter propagated RPC metadata")
 }
 
+func TestReliableRPCMetadataValidationRejectsIncompleteAndTrailingInput(t *testing.T) {
+	require.NoError(t, validateUnkeyedReliableRPCMetadata(nil))
+
+	_, err := normalizedRPCMetadata(nil, "job-1", true, strings.Repeat("a", 64))
+	assert.ErrorIs(t, err, constants.ErrIdempotencyKeyInvalid)
+	assert.ErrorContains(t, err, "metadata is missing")
+
+	_, err = normalizedRPCMetadata([]byte(`{} {}`), "", false, "")
+	assert.ErrorContains(t, err, "trailing JSON value")
+
+	public := errors.New("public idempotency error")
+	assert.Same(t, public, idempotencyStoreError(public, nil))
+}
+
 func TestMemoryIdempotencyStoreCoalescesConcurrentCommands(t *testing.T) {
 	store := NewMemoryIdempotencyStore(MemoryIdempotencyStoreOptions{TTL: time.Minute, MaxEntries: 32})
 	var calls atomic.Int32
