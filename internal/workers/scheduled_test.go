@@ -78,6 +78,20 @@ func (c *atomicMoveRedisConn) DoContext(ctx context.Context, commandName string,
 	}
 }
 
+func TestScheduledPollStopsBeforeRedisRead(t *testing.T) {
+	scheduler := newScheduled(RETRY_KEY)
+	scheduler.stop()
+	pool := &redis.Pool{
+		MaxIdle: 1,
+		Dial: func() (redis.Conn, error) {
+			return &atomicMoveRedisConn{backend: &atomicMoveBackend{}}, nil
+		},
+	}
+	t.Cleanup(func() { require.NoError(t, pool.Close()) })
+
+	require.False(t, scheduler.poll(context.Background(), pool, "ns:"))
+}
+
 func TestScheduledMoveIsAtomicAcrossCancellationAndAmbiguousReturn(t *testing.T) {
 	const original = `{"jid":"scheduled-1","queue":"rpc","args":{}}`
 	tests := []struct {
