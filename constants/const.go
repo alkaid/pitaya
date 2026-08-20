@@ -129,6 +129,12 @@ var IdempotencyFanoutKey = "rpc.idempotency-fanout"
 var OwnerServerIDKey = "rpc.owner-server-id"
 var OwnerEpochKey = "rpc.owner-epoch"
 
+// StatefulOwnerKey and StatefulOwnerEpochKey identify the durable per-routing-
+// key assignment selected by service discovery. They are framework-owned,
+// hop-local admission metadata and are removed before invoking application code.
+var StatefulOwnerKey = "rpc.stateful-owner-key"
+var StatefulOwnerEpochKey = "rpc.stateful-owner-epoch"
+
 // GRPCHostKey is the key for grpc host on server metadata
 var GRPCHostKey = "grpcHost"
 

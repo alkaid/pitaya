@@ -33,6 +33,7 @@ import (
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
 	pcontext "github.com/alkaid/pitaya/v2/context"
+	rpccontext "github.com/alkaid/pitaya/v2/internal/rpccontext"
 	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/metrics"
 	"github.com/alkaid/pitaya/v2/protos"
@@ -282,6 +283,7 @@ func (ns *NatsRPCClient) Call(
 	server *Server,
 ) (*protos.Response, error) {
 	var err error
+	ctx = withTargetRPCAdmission(ctx, session, server)
 	ctx, err = withTargetOwnerFencingMetadata(ctx, server)
 	if err != nil {
 		return nil, errors.WithStack(err)
@@ -403,7 +405,7 @@ func (ns *NatsRPCClient) Fork(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx = pcontext.AddToPropagateCtx(ctx, constants.IdempotencyFanoutKey, "1")
+	ctx = rpccontext.WithRPCFanout(ctx)
 	var err error
 	spanInfo := &tracing.SpanInfo{
 		RpcSystem: "nats",

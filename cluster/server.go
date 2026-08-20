@@ -37,14 +37,15 @@ const ownerEpochInvalidBit = uint64(1) << 63
 
 // Server struct
 type Server struct {
-	ID                string                    `json:"id"`
-	Type              string                    `json:"type"`
-	Metadata          map[string]string         `json:"metadata"`
-	Frontend          bool                      `json:"frontend"`
-	Hostname          string                    `json:"hostname"`
-	SessionStickiness bool                      `json:"stickiness"` // 是否可以绑定session，绑定后将保持session粘连
-	Subscribe         map[string]*SubscribeItem `json:"subscribe"`  // 订阅的topic,key为topic,value为fork,fork指同一服务是否所有实例都能消费
-	ownerEpoch        *atomic.Uint64
+	ID                 string                    `json:"id"`
+	Type               string                    `json:"type"`
+	Metadata           map[string]string         `json:"metadata"`
+	Frontend           bool                      `json:"frontend"`
+	Hostname           string                    `json:"hostname"`
+	SessionStickiness  bool                      `json:"stickiness"` // 是否可以绑定session，绑定后将保持session粘连
+	Subscribe          map[string]*SubscribeItem `json:"subscribe"`  // 订阅的topic,key为topic,value为fork,fork指同一服务是否所有实例都能消费
+	ownerEpoch         *atomic.Uint64
+	statefulOwnerFence *StatefulOwnerFence
 }
 
 // OwnerEpoch returns the service-discovery generation which owns this server
@@ -79,7 +80,7 @@ func (s *Server) withOwnerFencingMetadata(ctx context.Context, epoch uint64) con
 	_, hadOwnerID := propagation[constants.OwnerServerIDKey]
 	_, hadOwnerEpoch := propagation[constants.OwnerEpochKey]
 	if epoch == 0 && !hadOwnerID && !hadOwnerEpoch {
-		return ctx
+		return s.withStatefulOwnerFencingMetadata(ctx)
 	}
 
 	delete(propagation, constants.OwnerServerIDKey)
@@ -91,7 +92,8 @@ func (s *Server) withOwnerFencingMetadata(ctx context.Context, epoch uint64) con
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return context.WithValue(ctx, constants.PropagateCtxKey, propagation)
+	ctx = context.WithValue(ctx, constants.PropagateCtxKey, propagation)
+	return s.withStatefulOwnerFencingMetadata(ctx)
 }
 
 func withTargetOwnerFencingMetadata(ctx context.Context, target *Server) (context.Context, error) {

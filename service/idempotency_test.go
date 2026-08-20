@@ -167,6 +167,107 @@ func TestMemoryIdempotencyStoreRejectsFingerprintConflict(t *testing.T) {
 	assert.False(t, called)
 }
 
+func TestMemoryIdempotencyStoreReleasesAdmissionRejectionsForRetry(t *testing.T) {
+	for name, rejection := range map[string]error{
+		"owner epoch":            constants.ErrStaleOwnerEpoch,
+		"stateful owner":         constants.ErrStaleStatefulOwner,
+		"assignment unavailable": constants.ErrStatefulOwnerAssignmentUnavailable,
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := NewMemoryIdempotencyStore(DefaultIdempotencyStoreOptions())
+			wrapped := errors.Join(errors.New("admission changed while waiting"), rejection)
+			assert.True(t, IsRPCAdmissionRejected(wrapped))
+
+			var calls atomic.Int32
+			response, err := store.Execute(context.Background(), "scope:key", "fingerprint", func(context.Context) (*protos.Response, error) {
+				calls.Add(1)
+				return rpcErrorResponse(wrapped), wrapped
+			})
+			require.ErrorIs(t, err, rejection)
+			require.NotNil(t, response)
+			assert.NotContains(t, store.entries, "scope:key")
+
+			response, err = store.Execute(context.Background(), "scope:key", "fingerprint", func(context.Context) (*protos.Response, error) {
+				calls.Add(1)
+				return &protos.Response{Data: []byte("accepted by the new owner")}, nil
+			})
+			require.NoError(t, err)
+			assert.Equal(t, []byte("accepted by the new owner"), response.Data)
+			assert.Equal(t, int32(2), calls.Load())
+		})
+	}
+}
+
+func TestMemoryIdempotencyStoreWaitersReclaimAfterAdmissionRejection(t *testing.T) {
+	store := NewMemoryIdempotencyStore(DefaultIdempotencyStoreOptions())
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := store.Execute(context.Background(), "scope:key", "fingerprint", func(context.Context) (*protos.Response, error) {
+			close(firstStarted)
+			<-releaseFirst
+			rejection := markRPCAdmissionRejected(errors.New("assignment changed before invocation"))
+			return rpcErrorResponse(rejection), rejection
+		})
+		firstDone <- err
+	}()
+	<-firstStarted
+
+	const waiterCount = 16
+	var ready sync.WaitGroup
+	ready.Add(waiterCount)
+	var waiterCallbacks atomic.Int32
+	waiterResults := make(chan error, waiterCount)
+	for range waiterCount {
+		go func() {
+			ready.Done()
+			response, err := store.Execute(context.Background(), "scope:key", "fingerprint", func(context.Context) (*protos.Response, error) {
+				waiterCallbacks.Add(1)
+				return &protos.Response{Data: []byte("accepted after reclaim")}, nil
+			})
+			if err == nil && string(response.GetData()) != "accepted after reclaim" {
+				err = errors.New("waiter received an unexpected response")
+			}
+			waiterResults <- err
+		}()
+	}
+	ready.Wait()
+	assert.Never(t, func() bool { return waiterCallbacks.Load() != 0 }, 25*time.Millisecond, time.Millisecond)
+	close(releaseFirst)
+	assert.True(t, IsRPCAdmissionRejected(<-firstDone))
+
+	for range waiterCount {
+		assert.NoError(t, <-waiterResults)
+	}
+	assert.Equal(t, int32(1), waiterCallbacks.Load(), "one waiter must reclaim while the rest replay its success")
+}
+
+func TestRPCAdmissionRejectionMarkerPreservesArbitraryResolverErrors(t *testing.T) {
+	for _, cause := range []error{context.DeadlineExceeded, errors.New("custom resolver unavailable")} {
+		marked := markRPCAdmissionRejected(cause)
+		assert.True(t, IsRPCAdmissionRejected(marked))
+		assert.ErrorIs(t, marked, cause)
+	}
+}
+
+func TestConsumeRPCAdmissionMetadataClearsHopLocalTypedInfo(t *testing.T) {
+	ctx := withRPCIdempotencyInfo(context.Background(), "scope:key", "fingerprint")
+	ctx = withRPCStatefulOwnerInfo(ctx, RPCStatefulOwnerInfo{
+		AssignmentKey: strings.Repeat("a", 64),
+		Epoch:         73,
+		ServerID:      "game-1",
+		ServerType:    "game",
+	})
+
+	cleaned, err := consumeRPCAdmissionMetadata(ctx)
+	require.NoError(t, err)
+	_, hasIdempotencyInfo := RPCIdempotencyInfoFromContext(cleaned)
+	_, hasStatefulOwnerInfo := RPCStatefulOwnerInfoFromContext(cleaned)
+	assert.False(t, hasIdempotencyInfo)
+	assert.False(t, hasStatefulOwnerInfo)
+}
+
 func TestMemoryIdempotencyStoreReplaysWithNilContext(t *testing.T) {
 	store := NewMemoryIdempotencyStore(DefaultIdempotencyStoreOptions())
 	_, err := store.Execute(context.Background(), "scope:key", "fingerprint", func(context.Context) (*protos.Response, error) {

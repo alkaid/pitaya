@@ -114,6 +114,7 @@ func (gs *GRPCClient) Call(
 	server *Server,
 ) (*protos.Response, error) {
 	var err error
+	ctx = withTargetRPCAdmission(ctx, session, server)
 	ctx, err = withTargetOwnerFencingMetadata(ctx, server)
 	if err != nil {
 		return nil, err

@@ -551,6 +551,7 @@ func TestRemoteServiceCallSanitizesContextBeforeIdempotencyStore(t *testing.T) {
 		rpccontext.ReliableJobMetadataDigestKey, strings.Repeat("a", 64),
 	)
 	ctx = rpccontext.WithReliableRPCJob(ctx, "job-1", strings.Repeat("a", 64))
+	ctx = rpccontext.WithRPCFanout(ctx)
 	request := withRequestMetadata(t, callCoverageRequest(t, "east"), ctx)
 
 	response, err := service.Call(ctx, request)
@@ -565,12 +566,16 @@ func TestRemoteServiceCallSanitizesContextBeforeIdempotencyStore(t *testing.T) {
 		constants.IdempotencyFanoutKey,
 		rpccontext.ReliableJobKey,
 		rpccontext.ReliableJobMetadataDigestKey,
+		rpccontext.StatefulRouteModeKey,
 	} {
 		assert.NotContains(t, propagated, key)
 	}
 	assert.Equal(t, "east", propagated["tenant"])
 	_, _, typedMarker := rpccontext.ReliableRPCJobFromContext(store.ctx)
 	assert.False(t, typedMarker)
+	_, typedRouteMode := rpccontext.StatefulRouteModeFromContext(store.ctx)
+	assert.False(t, typedRouteMode)
+	assert.False(t, rpccontext.RPCFanoutFromContext(store.ctx))
 	storeDeadline, ok := store.ctx.Deadline()
 	require.True(t, ok)
 	assert.Equal(t, deadline, storeDeadline)
@@ -713,11 +718,11 @@ func TestRemoteServiceCallScopesDurableDeduplicationForRoutedAndFanoutCalls(t *t
 	assert.Equal(t, int32(1), firstCalls.Load())
 	assert.Zero(t, secondCalls.Load(), "owner failover must reuse the server-type-scoped result")
 
-	fanoutCtx := pcontext.AddListToPropagateCtx(
+	fanoutCtx := withFanoutIdempotencyScope(pcontext.AddListToPropagateCtx(
 		context.Background(),
 		constants.IdempotencyKey, "fanout-command",
 		constants.IdempotencyFanoutKey, "1",
-	)
+	))
 	for range 2 {
 		for _, remote := range []*RemoteService{first, second} {
 			response, err := remote.Call(fanoutCtx, request)
@@ -785,6 +790,7 @@ func TestRemoteServiceCallConsumesAdmissionMetadataBeforeNestedCalls(t *testing.
 			constants.OwnerServerIDKey, branchServers[index].ID,
 			constants.OwnerEpochKey, fmt.Sprintf("%d", branchServers[index].OwnerEpoch()),
 		)
+		ctx = withFanoutIdempotencyScope(ctx)
 		response, err := branch.Call(ctx, request)
 		require.NoError(t, err)
 		assert.Equal(t, "nested", decodeCallCoverageResponse(t, response).B)
@@ -1078,20 +1084,24 @@ func TestRemoteServiceNotifySerializesAndTargetsServer(t *testing.T) {
 		ctx := context.Background()
 		discovery.EXPECT().GetServer(target.ID).Return(target, nil)
 		rpcClient.EXPECT().Call(
-			ctx,
+			gomock.Any(),
 			protos.RPCType_User,
 			rt,
 			nil,
 			gomock.Any(),
 			target,
 		).DoAndReturn(func(
-			_ context.Context,
+			callCtx context.Context,
 			_ protos.RPCType,
 			_ *route.Route,
 			_ session.Session,
 			msg *message.Message,
 			_ *cluster.Server,
 		) (*protos.Response, error) {
+			assert.Nil(t, pcontext.GetFromPropagateCtx(callCtx, rpccontext.StatefulRouteModeKey))
+			_, ok := rpccontext.StatefulRouteModeFromContext(callCtx)
+			assert.False(t, ok, "sessionless calls do not need a stateful route contract")
+			assert.False(t, rpccontext.RPCFanoutFromContext(callCtx))
 			assert.Equal(t, message.Notify, msg.Type)
 			assert.Equal(t, rt.Short(), msg.Route)
 			decoded := &test.SomeStruct{}

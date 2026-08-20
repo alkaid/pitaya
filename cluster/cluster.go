@@ -154,23 +154,30 @@ const (
 	Modify
 )
 
-// PrepareOutboundRPCContext removes business-provided ReliableRPC wire
-// metadata and recreates it only from the process-local Worker marker. Custom
-// RPC clients must call this immediately before encoding propagated metadata.
+// PrepareOutboundRPCContext removes business-provided framework wire metadata
+// and recreates it only from process-local authority markers. Custom RPC
+// clients must call this immediately before encoding propagated metadata.
 func PrepareOutboundRPCContext(ctx context.Context) context.Context {
 	jobID, metadataDigest, reliableJob := rpccontext.ReliableRPCJobFromContext(ctx)
+	routeMode, hasRouteMode := rpccontext.StatefulRouteModeFromContext(ctx)
+	fanout := rpccontext.RPCFanoutFromContext(ctx)
 	var propagatedValues map[string]any
 	if ctx != nil {
 		propagatedValues, _ = ctx.Value(constants.PropagateCtxKey).(map[string]any)
 	}
 	_, markerFound := propagatedValues[rpccontext.ReliableJobKey]
 	_, digestFound := propagatedValues[rpccontext.ReliableJobMetadataDigestKey]
-	if !reliableJob && !markerFound && !digestFound {
+	_, routeModeFound := propagatedValues[rpccontext.StatefulRouteModeKey]
+	_, fanoutFound := propagatedValues[constants.IdempotencyFanoutKey]
+	if !reliableJob && !hasRouteMode && !fanout && !markerFound && !digestFound &&
+		!routeModeFound && !fanoutFound {
 		return ctx
 	}
 	propagated := pcontext.ToMap(ctx)
 	delete(propagated, rpccontext.ReliableJobKey)
 	delete(propagated, rpccontext.ReliableJobMetadataDigestKey)
+	delete(propagated, rpccontext.StatefulRouteModeKey)
+	delete(propagated, constants.IdempotencyFanoutKey)
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -182,7 +189,35 @@ func PrepareOutboundRPCContext(ctx context.Context) context.Context {
 			rpccontext.ReliableJobMetadataDigestKey, metadataDigest,
 		)
 	}
+	if fanout {
+		ctx = pcontext.AddListToPropagateCtx(
+			ctx,
+			constants.IdempotencyFanoutKey, "1",
+			rpccontext.StatefulRouteModeKey, string(rpccontext.StatefulRouteModeFanout),
+		)
+	} else if hasRouteMode &&
+		(routeMode == rpccontext.StatefulRouteModeAssigned || routeMode == rpccontext.StatefulRouteModeDirect) {
+		ctx = pcontext.AddToPropagateCtx(ctx, rpccontext.StatefulRouteModeKey, string(routeMode))
+	}
 	return ctx
+}
+
+func withTargetRPCAdmission(
+	ctx context.Context,
+	sess session.Session,
+	target *Server,
+) context.Context {
+	if sess == nil || target == nil || target.Frontend || rpccontext.RPCFanoutFromContext(ctx) {
+		return ctx
+	}
+	if _, hasMode := rpccontext.StatefulRouteModeFromContext(ctx); hasMode {
+		return ctx
+	}
+	mode := rpccontext.StatefulRouteModeDirect
+	if _, assigned := target.StatefulOwnerFenceSnapshot(); assigned {
+		mode = rpccontext.StatefulRouteModeAssigned
+	}
+	return rpccontext.WithStatefulRouteMode(ctx, mode)
 }
 
 func buildRequest(
@@ -231,6 +266,9 @@ func buildRequest(
 
 	// 无论是 RPCType_Sys 还是 RPCType_User 只要传入了session就带数据过去
 	if session != nil {
+		if frontendID := session.GetFrontendID(); frontendID != "" {
+			req.FrontendID = frontendID
+		}
 		req.Session = &protos.Session{
 			Id:       session.GetFrontendSessionID(),
 			Uid:      session.UID(),

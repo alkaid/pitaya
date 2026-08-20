@@ -105,6 +105,17 @@ redis.call("PEXPIRE", KEYS[1], result_ttl)
 return 1
 `
 
+const redisIdempotencyAbortScript = `
+if redis.call("HGET", KEYS[1], "schema") ~= "1"
+	or redis.call("HGET", KEYS[1], "fingerprint") ~= ARGV[1]
+	or redis.call("HGET", KEYS[1], "state") ~= "running"
+	or redis.call("HGET", KEYS[1], "owner") ~= ARGV[2] then
+	return 0
+end
+redis.call("DEL", KEYS[1])
+return 1
+`
+
 // RedisIdempotencyStoreOptions controls the durable RPC command state machine.
 // HeartbeatInterval plus OperationTimeout must remain below LeaseTTL so a slow
 // Redis operation cannot silently renew after the local lease deadline.
@@ -421,6 +432,14 @@ func (s *RedisIdempotencyStore) executeOwned(
 	response, err = fn(executionCtx)
 	cancelHeartbeat()
 	heartbeatErr := <-heartbeatDone
+	if IsRPCAdmissionRejected(err) {
+		abortErr := s.abort(redisKey, fingerprint, owner)
+		cancelExecution(abortErr)
+		if abortErr != nil {
+			return rpcErrorResponse(abortErr), dominantIdempotencyError(abortErr, err, heartbeatErr)
+		}
+		return response, dominantIdempotencyError(err, heartbeatErr)
+	}
 	result, encodeErr := encodeRedisIdempotencyResult(response, err)
 	if encodeErr != nil {
 		failure, failureEncodeErr := encodeRedisIdempotencyResult(nil, errIdempotentRPCOperationFailed)
@@ -551,6 +570,25 @@ func (s *RedisIdempotencyStore) complete(
 		return idempotencyStoreError(constants.ErrIdempotencyCommitUnknown, err)
 	}
 	if completed != 1 {
+		return constants.ErrIdempotencyLeaseLost
+	}
+	return nil
+}
+
+func (s *RedisIdempotencyStore) abort(redisKey, fingerprint, owner string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), s.options.OperationTimeout)
+	defer cancel()
+	aborted, err := s.client.Eval(
+		ctx,
+		redisIdempotencyAbortScript,
+		[]string{redisKey},
+		fingerprint,
+		owner,
+	).Int64()
+	if err != nil {
+		return idempotencyStoreError(ErrIdempotencyStoreUnavailable, err)
+	}
+	if aborted != 1 {
 		return constants.ErrIdempotencyLeaseLost
 	}
 	return nil

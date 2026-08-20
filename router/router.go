@@ -23,9 +23,9 @@ package router
 import (
 	"context"
 	"fmt"
-	"github.com/alkaid/goerrors/errors"
 	"math/rand/v2"
 
+	"github.com/alkaid/goerrors/errors"
 	"go.uber.org/zap"
 
 	"github.com/alkaid/pitaya/v2/session"
@@ -73,6 +73,7 @@ func (r *Router) SetServiceDiscovery(sd cluster.ServiceDiscovery) {
 //	-payload with session: 路由到session绑定的backend
 //	-payload without session: 随机
 func (r *Router) defaultRoute(
+	ctx context.Context,
 	svType string,
 	servers map[string]*cluster.Server,
 	session session.Session,
@@ -86,6 +87,7 @@ func (r *Router) defaultRoute(
 	}
 	server := srvList[rand.IntN(len(srvList))]
 	var err error
+	assignStatefulOwner := false
 	if session != nil {
 		logW := logger.Zap.With(zap.String("uid", session.UID()), zap.String("frontend", session.GetFrontendID()), zap.Int64("frontSessID", session.GetFrontendSessionID()), zap.String("sv", svType))
 		svId := ""
@@ -98,18 +100,17 @@ func (r *Router) defaultRoute(
 		} else {
 			// logW.Debug("normal backend route request by consist hash")
 			// 尝试hash一致性路由
-			if session.UID() != "" {
-				svId, err = r.serviceDiscovery.GetConsistentHashNode(svType, session.UID())
-			} else if session.GetFrontendID() != "" && session.GetFrontendSessionID() > 0 {
-				svId, err = r.serviceDiscovery.GetConsistentHashNode(svType, fmt.Sprintf("%s-%d", session.GetFrontendID(), session.GetFrontendSessionID()))
-			} else {
-				return nil, fmt.Errorf("%w: server type %s", constants.ErrStatefulRouteKeyNotFound, svType)
+			routingKey, keyErr := cluster.StatefulRoutingKey(session)
+			if keyErr != nil {
+				return nil, fmt.Errorf("%w: server type %s", keyErr, svType)
 			}
+			svId, err = r.serviceDiscovery.GetConsistentHashNode(svType, routingKey)
 			// A stateful route must never fall back to a random owner.
 			if err != nil {
 				logW.Error("route by consistent hash failed", zap.Error(err), zap.String("svType", svType))
 				return nil, errors.WithStack(err)
 			}
+			assignStatefulOwner = true
 		}
 		if svId != "" {
 			sv, ok := servers[svId]
@@ -117,7 +118,10 @@ func (r *Router) defaultRoute(
 				logW.Info("router server not found", zap.String("svType", svType), zap.String("svID", svId))
 				err = errors.WithStack(fmt.Errorf("%w uid=%s,svType=%s,svID=%s", constants.ErrServerNotFound, session.UID(), svType, svId))
 			}
-			return sv, err
+			if err != nil || !assignStatefulOwner {
+				return sv, err
+			}
+			return cluster.ResolveStatefulServer(ctx, r.serviceDiscovery, svType, sv, session)
 		}
 		// return nil,constants.ErrNoServersAvailableOfType
 		// 需要路由到绑定session的服务,但是找不到，报错
@@ -160,15 +164,20 @@ func (r *Router) Route(
 	// 	return server, nil
 	// }
 	routeFunc, ok := r.routesMap[svType]
+	var target *cluster.Server
 	if !ok {
 		logger.Log.Debugf("no specific route for svType: %s, using default route", svType)
-		server, err := r.defaultRoute(svType, serversOfType, session)
+		target, err = r.defaultRoute(ctx, svType, serversOfType, session)
 		if err != nil {
 			return nil, err
 		}
-		return server, nil
+	} else {
+		target, err = routeFunc(ctx, route, msg.Data, serversOfType, session)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return routeFunc(ctx, route, msg.Data, serversOfType, session)
+	return target, nil
 }
 
 // AddRoute adds a routing function to a server type

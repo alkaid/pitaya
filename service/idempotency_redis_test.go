@@ -259,6 +259,86 @@ func TestRedisIdempotencyStoreWaitHonorsContext(t *testing.T) {
 	assert.ErrorIs(t, err, context.Canceled)
 }
 
+func TestRedisIdempotencyStoreAbortsStaleAdmissionAfterWaitAndAllowsReclaim(t *testing.T) {
+	var acquireCalls atomic.Int32
+	var abortCalls atomic.Int32
+	var completeCalls atomic.Int32
+	var handoffDuringWait atomic.Bool
+	var firstOwner string
+	var reclaimedOwner string
+	client := &scriptedRedisIdempotencyClient{eval: func(
+		_ context.Context,
+		script string,
+		keys []string,
+		args ...interface{},
+	) *redis.Cmd {
+		assert.Equal(t, []string{defaultRedisIdempotencyKeyPrefix + "scope:key"}, keys)
+		switch script {
+		case redisIdempotencyAcquireScript:
+			call := acquireCalls.Add(1)
+			owner, ok := args[1].(string)
+			require.True(t, ok)
+			switch call {
+			case 1:
+				firstOwner = owner
+				handoffDuringWait.Store(true)
+				return redis.NewCmdResult([]interface{}{"wait", "1"}, nil)
+			case 2:
+				assert.Equal(t, firstOwner, owner, "one Execute call must retain its claimant identity while polling")
+				return redis.NewCmdResult([]interface{}{"acquired"}, nil)
+			case 3:
+				reclaimedOwner = owner
+				return redis.NewCmdResult([]interface{}{"acquired"}, nil)
+			default:
+				t.Fatalf("unexpected acquire attempt %d", call)
+				return redis.NewCmdResult(nil, errors.New("unexpected acquire"))
+			}
+		case redisIdempotencyAbortScript:
+			abortCalls.Add(1)
+			assert.Equal(t, "fingerprint", args[0])
+			assert.Equal(t, firstOwner, args[1])
+			return redis.NewCmdResult(int64(1), nil)
+		case redisIdempotencyCompleteScript:
+			completeCalls.Add(1)
+			assert.Equal(t, "fingerprint", args[0])
+			assert.Equal(t, reclaimedOwner, args[1])
+			return redis.NewCmdResult(int64(1), nil)
+		default:
+			t.Fatalf("unexpected Redis script")
+			return redis.NewCmdResult(nil, errors.New("unexpected script"))
+		}
+	}}
+	store := testRedisIdempotencyStore(client)
+	store.options.PollInterval = time.Millisecond
+
+	var callbackCalls atomic.Int32
+	resolverErr := errors.New("custom resolver unavailable after handoff")
+	response, err := store.Execute(context.Background(), "scope:key", "fingerprint", func(context.Context) (*protos.Response, error) {
+		callbackCalls.Add(1)
+		assert.True(t, handoffDuringWait.Load())
+		rejection := markRPCAdmissionRejected(resolverErr)
+		return rpcErrorResponse(rejection), rejection
+	})
+	require.ErrorIs(t, err, resolverErr)
+	assert.True(t, IsRPCAdmissionRejected(err))
+	require.NotNil(t, response)
+	assert.Equal(t, int32(1), abortCalls.Load())
+	assert.Zero(t, completeCalls.Load(), "a pre-handler admission rejection must not become a cached result")
+
+	response, err = store.Execute(context.Background(), "scope:key", "fingerprint", func(context.Context) (*protos.Response, error) {
+		callbackCalls.Add(1)
+		return &protos.Response{Data: []byte("accepted after reclaim")}, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []byte("accepted after reclaim"), response.Data)
+	assert.NotEmpty(t, reclaimedOwner)
+	assert.NotEqual(t, firstOwner, reclaimedOwner)
+	assert.Equal(t, int32(3), acquireCalls.Load())
+	assert.Equal(t, int32(1), abortCalls.Load())
+	assert.Equal(t, int32(1), completeCalls.Load())
+	assert.Equal(t, int32(2), callbackCalls.Load())
+}
+
 func TestRedisIdempotencyStoreReportsCommitUncertainty(t *testing.T) {
 	for _, test := range []struct {
 		name            string

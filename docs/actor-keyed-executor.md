@@ -6,15 +6,15 @@ Pitaya 在当前 fork 中按 UID 组织任务队列，并让同一 UID 的请求
 
 当前实现提供的是以下保证：
 
-> 在路由拓扑稳定、任务没有触发 running-task escape、请求经过受支持入口，并且相同 key 的提交不是并发发生时，同一 UID 的任务按提交顺序串行执行。
+> 在任务没有触发 running-task escape、请求经过受支持入口，并且相同 key 的提交不是并发发生时，同一 UID 的任务按 backend 实际接纳顺序串行执行。etcd discovery 还会为默认 consistent-hash 选出的 session-bearing point-to-point RPC 解析 exact routing-key assignment，使 hash-ring 视图变化时只有当前 assignment owner 能接纳新请求。
 
-它不提供 exactly-once、跨 UID 事务、多个并发生产者之间的全局顺序，也不保证扩缩容和故障切换期间只有一个 owner。
+它不提供 exactly-once、跨 UID 事务、多个并发生产者之间的全局顺序，也不会强制终止 owner 切换前已经进入 handler 的旧任务。旧任务的迟到外部写入仍要由业务存储按 fencing epoch 拒绝。
 
 ## 设计目标
 
 - 同一 UID 的业务处理在正常路径上不并发，业务组件可以按单写者模型更新用户状态。
 - 不同 UID 之间保持并行，慢用户不会阻塞整个服务。
-- 同一 UID 在稳态下路由到同一个 backend，避免每次请求都访问分布式锁服务。
+- 同一 UID 在稳态下路由到同一个 backend，不在每个 handler 内竞争分布式互斥锁；etcd assignment admission 本身仍位于 RPC 数据路径。
 - 未绑定 UID 的 session 仍按 frontend ID 和 session ID 串行。
 - 队列等待、超时和 worker escape 可以通过日志和指标观察。
 
@@ -23,7 +23,7 @@ Pitaya 在当前 fork 中按 UID 组织任务队列，并让同一 UID 的请求
 - RPC 重试或消息重投造成的重复执行。
 - 同时修改两个或更多 UID 的原子性。
 - 绕过 Pitaya 调度器的数据库写入、后台任务和自建 RPC 入口。
-- backend 扩缩容时的 owner 交接和旧 owner 隔离。
+- backend 扩缩容时的自动 drain，以及已经进入 handler 的旧 owner 业务写隔离。
 - 多个生产者同时提交同一 UID 时的业务时间顺序。
 
 ## 总体架构
@@ -152,11 +152,18 @@ flowchart TD
     HashSession --> HashResult
     HashResult -->|yes| HashServer[Hashed server]
     HashResult -->|no| LookupError[Return lookup error]
+    CustomResult --> Direct[Trusted direct mode]
+    BackendID --> Direct
+    HashServer --> Assignment[Resolve exact durable assignment]
+    Direct --> Selected
+    Assignment --> Selected[Request-scoped fenced server]
 ```
 
 一致性哈希环来自每个进程自己的 etcd service-discovery 视图。正常情况下，相同 server 列表会产生相同映射。节点加入、节点离开、watch 延迟或网络分区可能让不同进程暂时看到不同的环。nil session 的 stateless 路径仍可随机选择节点；需要 session affinity 的 stateful 路径缺少稳定 key 或哈希查询失败时会 fail-closed。
 
-etcd registration lease 的 `CreateRevision` 现在作为 server identity owner epoch，出站 RPC 为每一 hop 携带目标 epoch，接收端在业务 handler 前执行 admission fencing。它可以拒绝发往同一 type/ID 旧 registration 的请求，但不是 per-UID handoff epoch：哈希环变化仍不会等待旧节点清空该 UID 的在途任务，外部业务存储也不会自动拒绝旧 owner 的迟到写入。
+etcd registration key 的 `CreateRevision` 是 server identity owner epoch。默认 consistent-hash 继续用历史输入（原始 UID，或无 UID 时的 `<frontendID>-<sessionID>`）选择 candidate，避免仅因 fencing 升级改变稳态路由；assignment 则改用域分隔 identity：`v1:uid:<byte-length>:<uid>` 或 `v1:session:<frontend-byte-length>:<frontendID>:<sessionID>`。canonical identity 与 server type 通过结构化 SHA-256 得到精确 assignment key，因此相同历史 hash 文本的 UID 和 frontend/session tuple 也不能共享 token。`stateful-owners/v1/` 下的持久 record 保存该 identity、server type、owner ID 和 registration epoch，assignment 的 `ModRevision` 是 handoff fencing epoch。首次访问通过 CAS 认领；只要记录引用的 registration generation 仍有效，即使 frontend 的 hash-ring candidate 改变也继续返回同一 owner。registration 消失或被替换后，下一次路由才能 CAS 到新 owner；受控迁移也可以在 drain 后通过 `StatefulOwnerHandoff` 显式切换。assignment 数量随 routing-key 基数增长，不存在 16-bit 上限，退役 key 需要按业务保留期清理。
+
+出站 RPC 逐 hop 携带 registration token 和 framework-owned route mode。`assigned` mode 还携带 exact assignment token，接收端将 token 绑定本次 canonical UID（或 frontend/session tuple）identity 并在入口执行 linearizable admission check；幂等 store 真正取得 claim 后会再验证一次，framework-extensible `ReceiverProvider`/`BeforeHandler` 回调及 `TaskExecutor` 排队后的实际 interceptor/handler 调用前也分别执行紧邻 guard。新 owner 激活或 registration generation 失效后，旧请求不能在这些边界后新启动用户回调或 handler。`SessionStickiness`、自定义 route、显式 server ID 使用 `direct` mode，fanout 使用 `fanout` mode，均保留调用方明确选择的 target 而不参加 assignment 收敛。该协议不等待旧 owner 清空已接纳任务，也不会自动修改业务数据库；已开始的 callback/handler 必须用 `RPCStatefulOwnerInfoFromContext` 的 token 做条件写才能隔离迟到副作用。
 
 ## 当前一致性边界
 
@@ -166,13 +173,13 @@ etcd registration lease 的 `CreateRevision` 现在作为 server identity owner 
 | 多个 goroutine 并发提交相同 key | 任务串行，提交之间不定义顺序 | 只能依赖互斥，不能依赖先后 |
 | 不同 key | 可并行执行 | 可以 |
 | 客户端本地 handler | 经 `Session.Go` | 可以，限当前 frontend 进程 |
-| NATS RPC 携带 UID session | 经 `GoWithRequest` 和 `user` pool | 可以，限 backend 当前 owner |
+| NATS RPC 携带 UID session，默认 consistent-hash route | exact assignment admission 后经 `GoWithRequest` 和 `user` pool | 可以接纳到唯一当前 owner；仍要求无 escape，且旧在途写由存储 fence |
 | NATS RPC 携带未绑定 session | 经 `session` pool | 可以，key 是 frontend/session 组合 |
 | NATS RPC 不携带 session | 使用无状态 `co.Submit` | 不可以 |
 | gRPC RPC | 直接调用 `PitayaServer.Call` | 不可以 |
-| 自定义 route | 完全由 route 函数选择节点 | 取决于应用实现 |
+| 自定义 route、SessionStickiness 或显式 server ID | 保留所选 target，以可信 `direct` mode 入站 | 不提供 assignment 收敛；路由/绑定所有者必须保证目标语义 |
 | Stateful 路由缺少稳定 key 或一致性哈希查询失败 | 返回明确错误，不随机降级 | 请求未执行；调用方应重试或恢复 routing key |
-| 哈希环变化或 service-discovery 视图分裂 | registration/hop fencing 拒绝同一 server identity 的旧 epoch；不同 server ID 之间仍可能同时处理同一 UID | 不可以 |
+| 哈希环变化或 service-discovery 视图分裂 | live exact assignment 保持 sticky；失败切换或 handoff 后旧 epoch 不能接纳新请求 | 新接纳可以；已进入旧 handler 的任务和外部写仍需 drain/storage fence |
 | 任务超过 `RunningTaskTimeout` 且允许 escape | replacement 继续消费，旧任务仍可能运行 | 不可以 |
 | 进程退出 | 内存队列丢失 | 不提供持久化和 exactly-once |
 | RPC 重试、消息重投 | 带稳定 idempotency key 的 RPC 可在所用 store 范围内去重；无 key 或 store 丢失时仍可能重复 | 仍需业务幂等和持久 store |
@@ -247,7 +254,7 @@ if err != nil {
 same service type + same UID + same topology epoch -> same backend ID
 ```
 
-路由函数不应按请求内容、瞬时负载或随机数重新选择 backend，除非目标 handler 是 stateless、幂等并允许并发。需要迁移热 UID 时，应先停止旧 owner 接收新任务，等待其队列和在途任务完成，再发布新 owner；涉及外部持久状态时还要给写入携带 fencing token。
+路由函数不应按请求内容、瞬时负载或随机数重新选择 backend，除非目标 handler 是 stateless、幂等并允许并发。自定义 route 的结果现在是明确的 `direct` target，不会被默认 assignment 覆盖；因此自定义路由本身必须保证同一 UID 的亲和性，或明确接受多 owner。需要 exact assignment 与受控 handoff 的用户状态服务应使用默认 consistent-hash 路径。迁移 assignment 时，应先停止旧 owner 接收新任务，等待其队列和在途任务完成，再通过 `StatefulOwnerHandoff.HandoffStatefulOwner` CAS 发布新 owner；涉及外部持久状态时还要用 `RPCStatefulOwnerInfo` 的 assignment key/epoch 做条件写。
 
 ### 尽早绑定 UID，并给绑定切换留出边界
 
@@ -371,7 +378,7 @@ cfg.GoPools[co.UserGoPoolName] = config.GoPool{
 | escape budget 耗尽 | 不再启动 replacement，该 ID 保持被旧任务阻塞 | 告警并处置旧任务或进程，不自动扩大预算 |
 | UID 队列达到容量 | blocking submit 可能等待，nonblocking submit 可能拒绝 | 限制单 UID 流量，设置入口背压和超时 |
 | backend 进程退出 | 在途任务和内存队列丢失 | command 幂等，必要时使用持久有序队列 |
-| 节点加入或离开 | UID 可能映射到新节点；registration/hop fencing 不会停止旧节点已进入 handler 的任务或业务存储写入 | per-UID owner drain，并在状态层校验 epoch/version |
+| 节点加入或离开 | live exact assignment 不因扩容自动迁移；registration 失效后下一次路由 CAS 新 epoch，旧 epoch 不再接纳 | 故障切换依赖存储 fencing；计划迁移先 drain 再调用 handoff |
 | 一致性哈希查询失败 | Stateful route fail-closed 并返回原始查询错误 | 监控并按业务策略重试，不要改为随机节点 |
 | gRPC 入站 | 绕过 keyed executor | 不依赖串行，或在 server interceptor/handler 前补统一 dispatch |
 | session 从 SID 切换到 UID | 两个 lane 可能短暂并行 | 绑定协议加屏障，客户端等待绑定响应 |
@@ -381,7 +388,7 @@ cfg.GoPools[co.UserGoPoolName] = config.GoPool{
 
 ## 为什么不在每个请求上加分布式锁
 
-稳定拓扑下，同一 UID 已经被路由到一个 backend，本地 mailbox 可以完成互斥和排队。每请求分布式锁会增加一次或多次网络往返，把锁服务放到所有用户请求的热路径上。
+稳定拓扑下，同一 UID 已经被路由到一个 backend，本地 mailbox 可以完成互斥和排队，不需要 handler 再抢分布式互斥锁。exact assignment 为了证明当前 owner，仍会在默认 stateful RPC 热路径执行 linearizable read/transaction；稳定请求通常是路由端两次、目标入口与最终调用边界各一次 etcd 往返，带 idempotency claim 的请求还会额外验证一次。它解决的是 owner 交接和 fencing，不是零成本锁替代；部署必须按真实 routing-key 基数与 QPS 做 etcd capacity test。
 
 普通分布式锁只提供互斥，不保证等待者按请求到达顺序获得锁。带 TTL 的锁还存在旧 owner 暂停、租约过期、新 owner 获锁后旧 owner 继续写入的问题。需要强一致交接时，应在 owner 变化处使用 lease 和单调递增的 fencing token，并让存储拒绝旧 token，而不是让每个 handler 抢一次锁。
 
@@ -418,16 +425,16 @@ cfg.GoPools[co.UserGoPoolName] = config.GoPool{
 1. 所有入站 transport、后台入口和系统回调统一经过一个 key dispatcher，gRPC 不能直接调用业务服务。
 2. 有 key 的 stateful route 在哈希或绑定查询失败时 fail-closed，不随机降级。当前默认路由已满足这一点。
 3. 明确一致性策略。严格顺序的 pool 禁止 running escape；允许 escape 的业务写入必须校验 fencing token 或状态版本。
-4. backend owner 交接包含 per-UID drain、epoch 和 fencing。当前 server registration 和 RPC hop 已有 epoch；仍需让新 owner 生效后由存储拒绝旧 owner 的迟到写入。
+4. backend owner 交接包含 drain、epoch 和 fencing。当前 etcd exact assignment 已提供 failure-triggered CAS、显式 handoff、逐 hop exact-key admission和幂等等待后的二次校验；应用仍需在计划迁移前 drain，并让业务存储拒绝旧 epoch 的迟到写入。
 5. command 携带 request ID；Worker/RPC 已支持稳定 idempotency key，Cluster Builder 默认使用 Redis store，且 handler 可读取 opaque command identity。Redis completion 与业务存储之间仍有 at-least-once 窗口，需要跨生产者顺序时再携带 sequence，并在业务事务内持久去重和校验版本。
 6. session 从 SID key 切换到 UID key 时执行队列迁移或 drain/activate 屏障。
-7. 根据 UID 基数选择 64 位/string key 或固定 hash shard，避免 CRC32 碰撞和 owner 数无界增长。
+7. 根据 UID 基数规划 string key、assignment 存储和回收策略；不要用截断 hash 控制 owner 数，固定分片只能在明确接受跨 UID 队首阻塞时用于本地执行 lane。
 
 提交 API 已返回明确的 admission `error`：拒绝任务时完成信号为 nil，成功任务的完成信号通过 `defer` 保证 panic 路径也能结束。这是当前契约，不再是未来改造项。
 
 ## 后续 source-complete 验证目标
 
-下列项目是完整一致性声明所需的目标矩阵，不代表当前分支已经全部通过。当前批次的实际测试证据记录在 {doc}`testing` 及对应提交说明中；尤其 gRPC keyed-dispatch parity、per-UID owner handoff/drain、业务存储写入 fencing 和持久 command 恢复仍未实现。跨节点 server registration epoch 与逐 hop RPC admission fencing 已实现。
+下列项目是完整一致性声明所需的目标矩阵，不代表当前分支已经全部通过。当前批次的实际测试证据记录在 {doc}`testing` 及对应提交说明中。etcd exact assignment 的并发 claim、不同 routing key 隔离、sticky owner、registration replacement、显式 handoff、跨 key replay 拒绝、等待后重新 admission 和旧 epoch admission 已有回归；自动 drain、gRPC keyed-dispatch parity、业务存储实际执行写 fencing 和持久 command 恢复仍未实现。
 
 ### 单元测试
 

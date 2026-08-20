@@ -37,7 +37,9 @@ var ErrIdempotencyStoreUnavailable = errors.New("RPC idempotency store is unavai
 // fingerprint must fail with constants.ErrIdempotencyConflict. Execute receives
 // the request's cancellation and deadline after RPC admission metadata has been
 // consumed; implementations must use the explicit key and fingerprint instead
-// of reading reserved values from propagation metadata.
+// of reading reserved values from propagation metadata. If fn returns an error
+// for which IsRPCAdmissionRejected is true, implementations must release the
+// claim without retaining or replaying that pre-execution rejection.
 type IdempotencyStore interface {
 	Execute(
 		ctx context.Context,
@@ -45,6 +47,39 @@ type IdempotencyStore interface {
 		fingerprint string,
 		fn func(context.Context) (*protos.Response, error),
 	) (*protos.Response, error)
+}
+
+type rpcAdmissionRejectedError struct {
+	cause error
+}
+
+func (e *rpcAdmissionRejectedError) Error() string {
+	return e.cause.Error()
+}
+
+func (e *rpcAdmissionRejectedError) Unwrap() error {
+	return e.cause
+}
+
+func markRPCAdmissionRejected(err error) error {
+	if err == nil || IsRPCAdmissionRejected(err) {
+		return err
+	}
+	return &rpcAdmissionRejectedError{cause: err}
+}
+
+// IsRPCAdmissionRejected reports a retryable rejection that occurred before an
+// RPC handler began. Idempotency stores must not cache these outcomes because a
+// fresh owner or recovered discovery backend must be allowed to claim the same
+// logical command.
+func IsRPCAdmissionRejected(err error) bool {
+	var marked *rpcAdmissionRejectedError
+	if errors.As(err, &marked) {
+		return true
+	}
+	return errors.Is(err, constants.ErrStaleOwnerEpoch) ||
+		errors.Is(err, constants.ErrStaleStatefulOwner) ||
+		errors.Is(err, constants.ErrStatefulOwnerAssignmentUnavailable)
 }
 
 type rpcIdempotencyInfoContextKey struct{}
@@ -77,6 +112,16 @@ func withRPCIdempotencyInfo(ctx context.Context, storeKey, fingerprint string) c
 		StoreKey:    storeKey,
 		Fingerprint: fingerprint,
 	})
+}
+
+func withoutRPCIdempotencyInfo(ctx context.Context) context.Context {
+	if ctx == nil {
+		return nil
+	}
+	if _, ok := RPCIdempotencyInfoFromContext(ctx); !ok {
+		return ctx
+	}
+	return context.WithValue(ctx, rpcIdempotencyInfoContextKey{}, nil)
 }
 
 const idempotencyStoreKeyVersion = "v1"
@@ -140,38 +185,45 @@ func (s *MemoryIdempotencyStore) Execute(
 		ctx = context.Background()
 	}
 
-	now := time.Now()
-	s.mu.Lock()
-	s.pruneExpiredLocked(now)
-	if existing := s.entries[key]; existing != nil {
-		if existing.fingerprint != fingerprint {
-			s.mu.Unlock()
-			return nil, constants.ErrIdempotencyConflict
-		}
-		done := existing.done
-		s.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-done:
-		}
+	var entry *memoryIdempotencyEntry
+	for {
+		now := time.Now()
 		s.mu.Lock()
-		response = cloneRPCResponse(existing.response)
-		err = existing.err
-		s.mu.Unlock()
-		return response, err
-	}
-	if len(s.entries) >= s.maxEntries {
-		s.evictOldestCompletedLocked()
-		if len(s.entries) >= s.maxEntries {
+		s.pruneExpiredLocked(now)
+		if existing := s.entries[key]; existing != nil {
+			if existing.fingerprint != fingerprint {
+				s.mu.Unlock()
+				return nil, constants.ErrIdempotencyConflict
+			}
+			done := existing.done
 			s.mu.Unlock()
-			return nil, constants.ErrIdempotencyStoreFull
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-done:
+			}
+			s.mu.Lock()
+			response = cloneRPCResponse(existing.response)
+			err = existing.err
+			s.mu.Unlock()
+			if IsRPCAdmissionRejected(err) {
+				continue
+			}
+			return response, err
 		}
-	}
+		if len(s.entries) >= s.maxEntries {
+			s.evictOldestCompletedLocked()
+			if len(s.entries) >= s.maxEntries {
+				s.mu.Unlock()
+				return nil, constants.ErrIdempotencyStoreFull
+			}
+		}
 
-	entry := &memoryIdempotencyEntry{fingerprint: fingerprint, done: make(chan struct{})}
-	s.entries[key] = entry
-	s.mu.Unlock()
+		entry = &memoryIdempotencyEntry{fingerprint: fingerprint, done: make(chan struct{})}
+		s.entries[key] = entry
+		s.mu.Unlock()
+		break
+	}
 
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -191,6 +243,12 @@ func (s *MemoryIdempotencyStore) Execute(
 	entry.response = cloneRPCResponse(response)
 	entry.err = err
 	entry.completed = true
+	if IsRPCAdmissionRejected(err) {
+		delete(s.entries, key)
+		close(entry.done)
+		s.mu.Unlock()
+		return response, err
+	}
 	entry.expiresAt = time.Now().Add(s.ttl)
 	close(entry.done)
 	s.mu.Unlock()
@@ -270,7 +328,7 @@ func hashIdempotencyFields(fields ...string) string {
 func fanoutIdempotencyScope(ctx context.Context) (bool, error) {
 	value := pcontext.GetFromPropagateCtx(ctx, constants.IdempotencyFanoutKey)
 	if value == nil {
-		return false, nil
+		return rpccontext.RPCFanoutFromContext(ctx), nil
 	}
 	marker, ok := value.(string)
 	if !ok || marker != "1" {
@@ -280,7 +338,7 @@ func fanoutIdempotencyScope(ctx context.Context) (bool, error) {
 }
 
 func withFanoutIdempotencyScope(ctx context.Context) context.Context {
-	return pcontext.AddToPropagateCtx(ctx, constants.IdempotencyFanoutKey, "1")
+	return rpccontext.WithRPCFanout(ctx)
 }
 
 // consumeRPCAdmissionMetadata removes metadata whose authority ends at the
@@ -295,8 +353,11 @@ func consumeRPCAdmissionMetadata(ctx context.Context) (context.Context, error) {
 	for _, metadataKey := range []string{
 		constants.OwnerServerIDKey,
 		constants.OwnerEpochKey,
+		constants.StatefulOwnerKey,
+		constants.StatefulOwnerEpochKey,
 		constants.IdempotencyKey,
 		constants.IdempotencyFanoutKey,
+		rpccontext.StatefulRouteModeKey,
 		rpccontext.ReliableJobKey,
 		rpccontext.ReliableJobMetadataDigestKey,
 	} {
@@ -311,7 +372,10 @@ func consumeRPCAdmissionMetadata(ctx context.Context) (context.Context, error) {
 		}
 		ctx = context.WithValue(ctx, constants.PropagateCtxKey, propagated)
 	}
-	return rpccontext.WithoutReliableRPCJob(ctx), nil
+	ctx = withoutRPCIdempotencyInfo(ctx)
+	ctx = withoutRPCStatefulOwnerInfo(ctx)
+	ctx = rpccontext.WithoutReliableRPCJob(ctx)
+	return rpccontext.WithoutRPCAdmissionAuthority(ctx), nil
 }
 
 func validateOwnerFence(ctx context.Context, server *cluster.Server) error {
@@ -473,6 +537,9 @@ func normalizedRPCMetadata(metadata []byte, key string, reliableJob bool, reliab
 		constants.IdempotencyFanoutKey,
 		constants.OwnerServerIDKey,
 		constants.OwnerEpochKey,
+		constants.StatefulOwnerKey,
+		constants.StatefulOwnerEpochKey,
+		rpccontext.StatefulRouteModeKey,
 		constants.RequestTimeout,
 		constants.RequestIDKey,
 		constants.StartTimeKey,

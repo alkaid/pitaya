@@ -104,6 +104,7 @@ func TestCall(t *testing.T) {
 	})
 
 	uid := "someuid"
+	frontendID := "frontend-forwarded"
 	msg := &message.Message{
 		Type:  0,
 		ID:    0,
@@ -117,6 +118,7 @@ func TestCall(t *testing.T) {
 	r := route.NewRoute("sv", "svc", "meth")
 
 	sess := sessionmocks.NewMockSession(ctrl)
+	sess.EXPECT().GetFrontendID().Return(frontendID).Times(2)
 	sess.EXPECT().GetFrontendSessionID().Return(int64(1)).Times(2)
 	sess.EXPECT().UID().Return(uid).Times(2)
 	sess.EXPECT().GetDataEncoded().Return(nil).Times(2)
@@ -128,6 +130,7 @@ func TestCall(t *testing.T) {
 	assert.NoError(t, err)
 
 	mockPitayaClient.EXPECT().Call(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, in *protos.Request, opts ...grpc.CallOption) (*protos.Response, error) {
+		assert.Equal(t, frontendID, in.FrontendID)
 		assert.Equal(t, expected.FrontendID, in.FrontendID)
 		assert.Equal(t, expected.Type, in.Type)
 		assert.Equal(t, expected.Msg, in.Msg)

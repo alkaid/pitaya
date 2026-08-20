@@ -84,6 +84,7 @@ func (h *HandlerPool) ProcessHandlerMessage(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	admissionCtx := ctx
 	ctx = context.WithValue(ctx, constants.SessionCtxKey, session)
 	ctx = util.CtxWithDefaultLogger(ctx, rt.String(), session.UID())
 	if isReservedHandlerServiceName(rt.Service) {
@@ -100,6 +101,9 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		// l := ctx.Value(constants.LoggerCtxKey).(*zap.Logger)
 		// l.Debug("SID=%d, Data=%s", session.ID(), data)
 		var resp any
+		if err := validateRPCAdmissionAtInvocation(admissionCtx, ctx); err != nil {
+			return nil, err
+		}
 		resp, err = interceptor.InterceptorFun(ctx, *rt, data)
 		if err != nil {
 			return nil, err
@@ -144,6 +148,9 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		return nil, apierrors.BadRequest("", "process handle message error", "").WithCause(err)
 	}
 
+	if admissionErr := validateRPCAdmissionAtInvocation(admissionCtx, ctx); admissionErr != nil {
+		return nil, admissionErr
+	}
 	ctx, arg, err = handlerHooks.BeforeHandler.ExecuteBeforePipeline(ctx, rt, arg)
 	if err != nil {
 		return nil, err
@@ -152,6 +159,9 @@ func (h *HandlerPool) ProcessHandlerMessage(
 	l.Debug("process handle message", zap.Int64("SID", session.ID()), zap.ByteString("Data", data))
 	receiver := handler.Receiver
 	if handler.Options.ReceiverProvider != nil {
+		if admissionErr := validateRPCAdmissionAtInvocation(admissionCtx, ctx); admissionErr != nil {
+			return nil, admissionErr
+		}
 		rec := handler.Options.ReceiverProvider(ctx)
 		if rec == nil {
 			l.Warn("pitaya/handle: route not found,the ReceiverProvider return nil", zap.String("route", rt.Short()))
@@ -167,6 +177,9 @@ func (h *HandlerPool) ProcessHandlerMessage(
 	// Handler 的业务返回值继续写入 resp/err；executionErr 只描述 TaskExecutor 的调度与完成协议。
 	// executeTask 保证闭包完成后才返回，因此后续读取这些共享变量不会与后台 task 竞态。
 	executionErr := executeTask(ctx, handler.Options.TaskExecutor, func(taskCtx context.Context) error {
+		if admissionErr := validateRPCAdmissionAtInvocation(admissionCtx, taskCtx); admissionErr != nil {
+			return admissionErr
+		}
 		// 自定义执行器可以为任务派生 context，反射调用必须使用实际执行时的 taskCtx。
 		args[1] = reflect.ValueOf(taskCtx)
 		resp, err = util.Pcall(handler.Method, args)
@@ -174,6 +187,9 @@ func (h *HandlerPool) ProcessHandlerMessage(
 		return nil
 	})
 	if executionErr != nil {
+		if IsRPCAdmissionRejected(executionErr) {
+			return nil, executionErr
+		}
 		if acknowledgeSkippedTask(msgTypeIface, executionErr, rt, "handler") {
 			if remote {
 				resp = []byte("ack")

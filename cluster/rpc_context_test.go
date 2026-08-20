@@ -50,6 +50,67 @@ func TestPrepareOutboundRPCContextOwnsReliableWireMetadata(t *testing.T) {
 	assert.Nil(t, PrepareOutboundRPCContext(nil))
 }
 
+func TestPrepareOutboundRPCContextOwnsStatefulAdmissionWireMetadata(t *testing.T) {
+	spoofed := pcontext.AddListToPropagateCtx(
+		context.Background(),
+		"tenant", "east",
+		constants.IdempotencyFanoutKey, "1",
+		rpccontext.StatefulRouteModeKey, string(rpccontext.StatefulRouteModeAssigned),
+	)
+	prepared := PrepareOutboundRPCContext(spoofed)
+	assert.Equal(t, "east", pcontext.GetFromPropagateCtx(prepared, "tenant"))
+	assert.Nil(t, pcontext.GetFromPropagateCtx(prepared, constants.IdempotencyFanoutKey))
+	assert.Nil(t, pcontext.GetFromPropagateCtx(prepared, rpccontext.StatefulRouteModeKey))
+
+	nullSpoof := pcontext.AddListToPropagateCtx(
+		context.Background(),
+		constants.IdempotencyFanoutKey, nil,
+		rpccontext.StatefulRouteModeKey, nil,
+	)
+	prepared = PrepareOutboundRPCContext(nullSpoof)
+	_, fanoutFound := pcontext.ToMap(prepared)[constants.IdempotencyFanoutKey]
+	_, routeModeFound := pcontext.ToMap(prepared)[rpccontext.StatefulRouteModeKey]
+	assert.False(t, fanoutFound)
+	assert.False(t, routeModeFound)
+
+	for _, mode := range []rpccontext.StatefulRouteMode{
+		rpccontext.StatefulRouteModeAssigned,
+		rpccontext.StatefulRouteModeDirect,
+	} {
+		t.Run(string(mode), func(t *testing.T) {
+			trusted := rpccontext.WithStatefulRouteMode(spoofed, mode)
+			prepared := PrepareOutboundRPCContext(trusted)
+			assert.Equal(t, string(mode), pcontext.GetFromPropagateCtx(prepared, rpccontext.StatefulRouteModeKey))
+			assert.Nil(t, pcontext.GetFromPropagateCtx(prepared, constants.IdempotencyFanoutKey))
+		})
+	}
+
+	invalidTyped := rpccontext.WithStatefulRouteMode(spoofed, rpccontext.StatefulRouteMode("invalid"))
+	prepared = PrepareOutboundRPCContext(invalidTyped)
+	assert.Nil(t, pcontext.GetFromPropagateCtx(prepared, constants.IdempotencyFanoutKey))
+	assert.Nil(t, pcontext.GetFromPropagateCtx(prepared, rpccontext.StatefulRouteModeKey))
+
+	trustedFanout := rpccontext.WithRPCFanout(
+		rpccontext.WithStatefulRouteMode(spoofed, rpccontext.StatefulRouteModeAssigned),
+	)
+	prepared = PrepareOutboundRPCContext(trustedFanout)
+	assert.Equal(t, "1", pcontext.GetFromPropagateCtx(prepared, constants.IdempotencyFanoutKey))
+	assert.Equal(
+		t,
+		string(rpccontext.StatefulRouteModeFanout),
+		pcontext.GetFromPropagateCtx(prepared, rpccontext.StatefulRouteModeKey),
+	)
+
+	fromNil := PrepareOutboundRPCContext(
+		rpccontext.WithStatefulRouteMode(nil, rpccontext.StatefulRouteModeDirect),
+	)
+	assert.Equal(
+		t,
+		string(rpccontext.StatefulRouteModeDirect),
+		pcontext.GetFromPropagateCtx(fromNil, rpccontext.StatefulRouteModeKey),
+	)
+}
+
 func TestBuildRequestStripsSpoofedReliableMetadataAndInjectsTrustedMarker(t *testing.T) {
 	server := NewServer("worker-1", "worker", false)
 	msg := &message.Message{Type: message.Request, Data: []byte("payload")}

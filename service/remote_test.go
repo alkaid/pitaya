@@ -38,6 +38,7 @@ import (
 	"github.com/alkaid/pitaya/v2/conn/message"
 	messagemocks "github.com/alkaid/pitaya/v2/conn/message/mocks"
 	"github.com/alkaid/pitaya/v2/constants"
+	"github.com/alkaid/pitaya/v2/internal/rpccontext"
 	"github.com/alkaid/pitaya/v2/pipeline"
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/protos/test"
@@ -55,6 +56,13 @@ import (
 )
 
 const ctxModifiedResponse = "response"
+
+func statefulRouteModeContextMatcher(mode rpccontext.StatefulRouteMode) gomock.Matcher {
+	return gomock.Cond(func(ctx context.Context) bool {
+		got, ok := rpccontext.StatefulRouteModeFromContext(ctx)
+		return ok && got == mode
+	})
+}
 
 func (m *MyComp) Remote1(ctx context.Context, ss *test.SomeStruct) (*test.SomeStruct, error) {
 	return &test.SomeStruct{B: "ack"}, nil
@@ -370,7 +378,14 @@ func TestRemoteServiceRemoteCall(t *testing.T) {
 			msg := &message.Message{}
 			ctx := context.Background()
 			if table.server != nil {
-				mockRPCClient.EXPECT().Call(ctx, protos.RPCType_Sys, rt, mockSession, msg, sv).Return(table.res, table.rpcErr)
+				mockRPCClient.EXPECT().Call(
+					statefulRouteModeContextMatcher(rpccontext.StatefulRouteModeDirect),
+					protos.RPCType_Sys,
+					rt,
+					mockSession,
+					msg,
+					sv,
+				).Return(table.res, table.rpcErr)
 			}
 			res, err := svc.remoteCall(ctx, table.server, protos.RPCType_Sys, rt, mockSession, msg)
 			if table.errContains == "" {
@@ -726,7 +741,14 @@ func TestRemoteServiceRemoteProcess(t *testing.T) {
 			mockAgent.EXPECT().GetSession().Return(mockSession).AnyTimes()
 			mockSession.EXPECT().UID().Return("uid").AnyTimes()
 
-			mockRPCClient.EXPECT().Call(ctx, protos.RPCType_Sys, rt, gomock.Any(), expectedMsg, gomock.Any()).Return(&protos.Response{Data: []byte("ok")}, table.remoteCallErr)
+			mockRPCClient.EXPECT().Call(
+				statefulRouteModeContextMatcher(rpccontext.StatefulRouteModeDirect),
+				protos.RPCType_Sys,
+				rt,
+				gomock.Any(),
+				expectedMsg,
+				gomock.Any(),
+			).Return(&protos.Response{Data: []byte("ok")}, table.remoteCallErr)
 
 			if table.remoteCallErr != nil {
 				mockAgent.EXPECT().AnswerWithError(ctx, expectedMsg.ID, gomock.Any())

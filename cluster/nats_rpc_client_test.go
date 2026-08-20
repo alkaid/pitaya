@@ -626,17 +626,19 @@ func TestNatsRPCClientBuildRequest(t *testing.T) {
 	messageID := uint(123)
 	sessionID := int64(1)
 	uid := "uid"
+	frontendID := "frontend-forwarded"
 	data2 := []byte("data2")
 	tables := []struct {
-		name           string
-		frontendServer bool
-		rpcType        protos.RPCType
-		route          *route.Route
-		msg            *message.Message
-		expected       *protos.Request
+		name              string
+		frontendServer    bool
+		sessionFrontendID string
+		rpcType           protos.RPCType
+		route             *route.Route
+		msg               *message.Message
+		expected          *protos.Request
 	}{
 		{
-			"test-frontend-request", true, protos.RPCType_Sys, rt,
+			"test-frontend-request", true, "", protos.RPCType_Sys, rt,
 			&message.Message{Type: message.Request, ID: messageID, Data: data},
 			&protos.Request{
 				Type: protos.RPCType_Sys,
@@ -655,7 +657,7 @@ func TestNatsRPCClientBuildRequest(t *testing.T) {
 			},
 		},
 		{
-			"test-rpc-sys-request", false, protos.RPCType_Sys, rt,
+			"test-rpc-sys-request", false, "", protos.RPCType_Sys, rt,
 			&message.Message{Type: message.Request, ID: messageID, Data: data},
 			&protos.Request{
 				Type: protos.RPCType_Sys,
@@ -674,7 +676,7 @@ func TestNatsRPCClientBuildRequest(t *testing.T) {
 			},
 		},
 		{
-			"test-rpc-user-request", false, protos.RPCType_User, rt,
+			"test-rpc-user-request", false, frontendID, protos.RPCType_User, rt,
 			&message.Message{Type: message.Request, ID: messageID, Data: data},
 			&protos.Request{
 				Type: protos.RPCType_User,
@@ -688,11 +690,11 @@ func TestNatsRPCClientBuildRequest(t *testing.T) {
 					Data:  data,
 					Type:  protos.MsgType_MsgRequest,
 				},
-				FrontendID: "",
+				FrontendID: frontendID,
 			},
 		},
 		{
-			"test-notify", false, protos.RPCType_Sys, rt,
+			"test-notify", false, "", protos.RPCType_Sys, rt,
 			&message.Message{Type: message.Notify, ID: messageID, Data: data},
 			&protos.Request{
 				Type: protos.RPCType_Sys,
@@ -716,6 +718,7 @@ func TestNatsRPCClientBuildRequest(t *testing.T) {
 			ctrl := gomock.NewController(t)
 
 			ss := sessionmocks.NewMockSession(ctrl)
+			ss.EXPECT().GetFrontendID().Return(table.sessionFrontendID)
 			ss.EXPECT().GetFrontendSessionID().Return(sessionID)
 			ss.EXPECT().UID().Return(uid)
 			ss.EXPECT().GetDataEncoded().Return(data2)
@@ -870,6 +873,7 @@ func TestNatsRPCClientCall(t *testing.T) {
 			require.NoError(t, conn.Flush())
 
 			ss := sessionmocks.NewMockSession(ctrl)
+			ss.EXPECT().GetFrontendID().Return("frontend-forwarded").Times(1)
 			ss.EXPECT().GetFrontendSessionID().Return(sessionID).Times(1)
 			ss.EXPECT().UID().Return(uid).Times(1)
 			ss.EXPECT().GetDataEncoded().Return(data2).Times(1)
