@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "base_sha": "ef6c23c007f11662eb690ce8405a04a54409c036",
+  "base_sha": "6b141f9813cf2da28e0c0d311c37f58435d9ec6a",
   "coverage_platform": {
     "goos": "linux",
     "goarch": "amd64"
@@ -92,7 +92,7 @@
   },
   "baseline": {
     "overall": {
-      "covered": 9348,
+      "covered": 9352,
       "total": 11952
     },
     "packages": {
@@ -101,7 +101,7 @@
         "total": 1026
       },
       "acceptor": {
-        "covered": 368,
+        "covered": 370,
         "total": 420
       },
       "acceptorwrapper": {
@@ -109,7 +109,7 @@
         "total": 123
       },
       "agent": {
-        "covered": 311,
+        "covered": 310,
         "total": 391
       },
       "client": {
@@ -117,7 +117,7 @@
         "total": 446
       },
       "cluster": {
-        "covered": 2284,
+        "covered": 2287,
         "total": 2771
       },
       "co": {
@@ -165,7 +165,7 @@
         "total": 14
       },
       "internal/workers": {
-        "covered": 444,
+        "covered": 445,
         "total": 646
       },
       "logger": {
@@ -217,7 +217,7 @@
         "total": 870
       },
       "timer": {
-        "covered": 218,
+        "covered": 217,
         "total": 250
       },
       "tracing": {
