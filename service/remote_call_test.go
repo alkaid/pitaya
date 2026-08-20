@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/alkaid/pitaya/v2/cluster"
 	clustermocks "github.com/alkaid/pitaya/v2/cluster/mocks"
@@ -15,6 +16,7 @@ import (
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
 	pcontext "github.com/alkaid/pitaya/v2/context"
+	rpccontext "github.com/alkaid/pitaya/v2/internal/rpccontext"
 	"github.com/alkaid/pitaya/v2/pipeline"
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/protos/test"
@@ -42,6 +44,23 @@ type IndependentNestedCommandsRemote struct {
 	component.Base
 	downstream *RemoteService
 	keys       chan string
+}
+
+type ReliableAdmissionRemote struct {
+	component.Base
+	leaked chan bool
+}
+
+func (r *ReliableAdmissionRemote) Inspect(ctx context.Context, input *test.SomeStruct) (*test.SomeStruct, error) {
+	_, _, typedMarker := rpccontext.ReliableRPCJobFromContext(ctx)
+	prepared := cluster.PrepareOutboundRPCContext(ctx)
+	leaked := typedMarker ||
+		pcontext.GetFromPropagateCtx(ctx, rpccontext.ReliableJobKey) != nil ||
+		pcontext.GetFromPropagateCtx(ctx, rpccontext.ReliableJobMetadataDigestKey) != nil ||
+		pcontext.GetFromPropagateCtx(prepared, rpccontext.ReliableJobKey) != nil ||
+		pcontext.GetFromPropagateCtx(prepared, rpccontext.ReliableJobMetadataDigestKey) != nil
+	r.leaked <- leaked
+	return input, nil
 }
 
 func (r *CascadingCallRemote) Forward(ctx context.Context, input *test.SomeStruct) (*test.SomeStruct, error) {
@@ -104,6 +123,7 @@ func (r *CallCoverageRemote) SessionUID(ctx context.Context) (*test.SomeStruct, 
 
 type recordingIdempotencyStore struct {
 	calls       int
+	ctx         context.Context
 	key         string
 	fingerprint string
 	invoke      bool
@@ -118,6 +138,7 @@ func (s *recordingIdempotencyStore) Execute(
 	fn func(context.Context) (*protos.Response, error),
 ) (*protos.Response, error) {
 	s.calls++
+	s.ctx = ctx
 	s.key = key
 	s.fingerprint = fingerprint
 	if s.invoke {
@@ -166,6 +187,28 @@ func decodeCallCoverageResponse(t *testing.T, response *protos.Response) *test.S
 	return result
 }
 
+func reliableAdmissionContext(key, digest string, typed bool) context.Context {
+	ctx := pcontext.AddListToPropagateCtx(
+		context.Background(),
+		constants.IdempotencyKey, key,
+		rpccontext.ReliableJobKey, key,
+		rpccontext.ReliableJobMetadataDigestKey, digest,
+	)
+	if typed {
+		ctx = rpccontext.WithReliableRPCJob(ctx, key, digest)
+	}
+	return ctx
+}
+
+func withRequestMetadata(t *testing.T, request *protos.Request, ctx context.Context) *protos.Request {
+	t.Helper()
+	cloned := proto.Clone(request).(*protos.Request)
+	var err error
+	cloned.Metadata, err = pcontext.Encode(ctx)
+	require.NoError(t, err)
+	return cloned
+}
+
 func TestRemoteServiceCallProcessesAndDeduplicatesUserRequests(t *testing.T) {
 	var calls atomic.Int32
 	service := newRemoteCallService(cluster.NewServer("game-1", "game", false))
@@ -203,6 +246,371 @@ func TestRemoteServiceCallProcessesAndDeduplicatesUserRequests(t *testing.T) {
 	require.NoError(t, err)
 	_, err = service.Call(reservedPrefixCtx, callCoverageRequest(t, "prefix-conflict"))
 	assert.ErrorIs(t, err, constants.ErrIdempotencyConflict)
+}
+
+func TestRemoteServiceCallSeparatesOrdinaryAndReliableCommandsWithSameKey(t *testing.T) {
+	for _, reliableFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reliable_first=%t", reliableFirst), func(t *testing.T) {
+			var calls atomic.Int32
+			service := newRemoteCallService(cluster.NewServer("game-1", "game", false))
+			require.NoError(t, service.Register(&CallCoverageRemote{calls: &calls}, nil))
+			request := callCoverageRequest(t, "north")
+			const key = "shared-command"
+			ordinary := pcontext.AddToPropagateCtx(context.Background(), constants.IdempotencyKey, key)
+			reliable := reliableAdmissionContext(key, strings.Repeat("a", 64), false)
+
+			firstCtx, secondCtx := ordinary, reliable
+			firstRequest, secondRequest := request, withRequestMetadata(t, request, reliable)
+			if reliableFirst {
+				firstCtx, secondCtx = secondCtx, firstCtx
+				firstRequest, secondRequest = secondRequest, firstRequest
+			}
+			_, err := service.Call(firstCtx, firstRequest)
+			require.NoError(t, err)
+			_, err = service.Call(secondCtx, secondRequest)
+			assert.ErrorIs(t, err, constants.ErrIdempotencyConflict)
+			assert.Equal(t, int32(1), calls.Load())
+		})
+	}
+}
+
+func TestRemoteServiceCallKeepsOrdinaryCallerInFingerprint(t *testing.T) {
+	var calls atomic.Int32
+	service := newRemoteCallService(cluster.NewServer("game-1", "game", false))
+	require.NoError(t, service.Register(&CallCoverageRemote{calls: &calls}, nil))
+	request := callCoverageRequest(t, "north")
+	const key = "ordinary-command"
+	ctx := pcontext.AddToPropagateCtx(context.Background(), constants.IdempotencyKey, key)
+
+	first := proto.Clone(request).(*protos.Request)
+	first.FrontendID = "frontend-1"
+	first.Metadata, _ = pcontext.Encode(pcontext.AddListToPropagateCtx(
+		context.Background(),
+		constants.PeerIDKey, "caller-1",
+		constants.PeerServiceKey, "worker-a",
+	))
+	_, err := service.Call(ctx, first)
+	require.NoError(t, err)
+
+	second := proto.Clone(first).(*protos.Request)
+	second.FrontendID = "frontend-2"
+	second.Metadata, _ = pcontext.Encode(pcontext.AddListToPropagateCtx(
+		context.Background(),
+		constants.PeerIDKey, "caller-2",
+		constants.PeerServiceKey, "worker-b",
+	))
+	_, err = service.Call(ctx, second)
+	assert.ErrorIs(t, err, constants.ErrIdempotencyConflict)
+	assert.Equal(t, int32(1), calls.Load())
+}
+
+func TestRemoteServiceCallReplaysReliableCommandAcrossExecutors(t *testing.T) {
+	var calls atomic.Int32
+	service := newRemoteCallService(cluster.NewServer("game-1", "game", false))
+	require.NoError(t, service.Register(&CallCoverageRemote{calls: &calls}, nil))
+	request := callCoverageRequest(t, "north")
+	const key = "job-1"
+	digest := strings.Repeat("a", 64)
+
+	for index, executor := range []string{"worker-1", "worker-2"} {
+		ctx := reliableAdmissionContext(key, digest, false)
+		ctx = pcontext.AddListToPropagateCtx(
+			ctx,
+			constants.PeerIDKey, executor,
+			constants.PeerServiceKey, "worker",
+		)
+		attempt := withRequestMetadata(t, request, ctx)
+		attempt.FrontendID = fmt.Sprintf("frontend-%d", index+1)
+		response, err := service.Call(ctx, attempt)
+		require.NoError(t, err)
+		assert.Equal(t, "north", decodeCallCoverageResponse(t, response).B)
+	}
+	assert.Equal(t, int32(1), calls.Load())
+}
+
+func TestRemoteServiceCallReplaysReliableCommandAcrossOwnerInstances(t *testing.T) {
+	store := NewMemoryIdempotencyStore(DefaultIdempotencyStoreOptions())
+	var firstCalls atomic.Int32
+	var secondCalls atomic.Int32
+	first := newRemoteCallService(
+		cluster.NewServer("game-1", "game", false),
+		WithIdempotencyStore(store),
+	)
+	second := newRemoteCallService(
+		cluster.NewServer("game-2", "game", false),
+		WithIdempotencyStore(store),
+	)
+	require.NoError(t, first.Register(&CallCoverageRemote{calls: &firstCalls}, nil))
+	require.NoError(t, second.Register(&CallCoverageRemote{calls: &secondCalls}, nil))
+	request := callCoverageRequest(t, "north")
+	const key = "job-owner-handoff"
+	digest := strings.Repeat("a", 64)
+
+	for index, remote := range []*RemoteService{first, second} {
+		ctx := reliableAdmissionContext(key, digest, false)
+		ctx = pcontext.AddListToPropagateCtx(
+			ctx,
+			constants.PeerIDKey, fmt.Sprintf("worker-%d", index+1),
+			constants.PeerServiceKey, "worker",
+		)
+		attempt := withRequestMetadata(t, request, ctx)
+		attempt.FrontendID = fmt.Sprintf("frontend-%d", index+1)
+		response, err := remote.Call(ctx, attempt)
+		require.NoError(t, err)
+		assert.Equal(t, "north", decodeCallCoverageResponse(t, response).B)
+	}
+	assert.Equal(t, int32(1), firstCalls.Load())
+	assert.Zero(t, secondCalls.Load())
+}
+
+func TestRemoteServiceCallValidatesReliableMetadataAgreement(t *testing.T) {
+	var calls atomic.Int32
+	store := &recordingIdempotencyStore{invoke: true}
+	service := newRemoteCallService(
+		cluster.NewServer("game-1", "game", false),
+		WithIdempotencyStore(store),
+	)
+	require.NoError(t, service.Register(&CallCoverageRemote{calls: &calls}, nil))
+	request := callCoverageRequest(t, "north")
+	const key = "job-1"
+
+	tests := map[string]struct {
+		ctx        context.Context
+		requestCtx context.Context
+	}{
+		"missing digest": {
+			ctx: pcontext.AddListToPropagateCtx(
+				context.Background(),
+				constants.IdempotencyKey, key,
+				rpccontext.ReliableJobKey, key,
+			),
+		},
+		"digest too short": {
+			ctx: reliableAdmissionContext(key, "abcd", false),
+		},
+		"digest has 63 characters": {
+			ctx: reliableAdmissionContext(key, strings.Repeat("a", 63), false),
+		},
+		"digest has 65 characters": {
+			ctx: reliableAdmissionContext(key, strings.Repeat("a", 65), false),
+		},
+		"digest is not canonical lowercase": {
+			ctx: reliableAdmissionContext(key, strings.Repeat("A", 64), false),
+		},
+		"marker differs from key": {
+			ctx: pcontext.AddListToPropagateCtx(
+				context.Background(),
+				constants.IdempotencyKey, key,
+				rpccontext.ReliableJobKey, "other-job",
+				rpccontext.ReliableJobMetadataDigestKey, strings.Repeat("a", 64),
+			),
+		},
+		"request marker missing": {
+			ctx:        reliableAdmissionContext(key, strings.Repeat("a", 64), false),
+			requestCtx: pcontext.AddToPropagateCtx(context.Background(), constants.IdempotencyKey, key),
+		},
+		"request digest differs": {
+			ctx:        reliableAdmissionContext(key, strings.Repeat("a", 64), false),
+			requestCtx: reliableAdmissionContext(key, strings.Repeat("b", 64), false),
+		},
+		"request marker has no matching context marker": {
+			ctx:        pcontext.AddToPropagateCtx(context.Background(), constants.IdempotencyKey, key),
+			requestCtx: reliableAdmissionContext(key, strings.Repeat("a", 64), false),
+		},
+		"marker has no idempotency key": {
+			ctx: pcontext.AddListToPropagateCtx(
+				context.Background(),
+				rpccontext.ReliableJobKey, key,
+				rpccontext.ReliableJobMetadataDigestKey, strings.Repeat("a", 64),
+			),
+		},
+		"marker has wrong type": {
+			ctx: pcontext.AddListToPropagateCtx(
+				context.Background(),
+				constants.IdempotencyKey, key,
+				rpccontext.ReliableJobKey, 42,
+				rpccontext.ReliableJobMetadataDigestKey, strings.Repeat("a", 64),
+			),
+		},
+		"marker is empty": {
+			ctx: pcontext.AddListToPropagateCtx(
+				context.Background(),
+				constants.IdempotencyKey, key,
+				rpccontext.ReliableJobKey, "",
+				rpccontext.ReliableJobMetadataDigestKey, strings.Repeat("a", 64),
+			),
+		},
+		"digest has wrong type": {
+			ctx: pcontext.AddListToPropagateCtx(
+				context.Background(),
+				constants.IdempotencyKey, key,
+				rpccontext.ReliableJobKey, key,
+				rpccontext.ReliableJobMetadataDigestKey, 42,
+			),
+		},
+		"digest exists without marker": {
+			ctx: pcontext.AddListToPropagateCtx(
+				context.Background(),
+				constants.IdempotencyKey, key,
+				rpccontext.ReliableJobMetadataDigestKey, strings.Repeat("a", 64),
+			),
+		},
+		"digest is not hexadecimal": {
+			ctx: reliableAdmissionContext(key, strings.Repeat("z", 64), false),
+		},
+		"request wire key differs": {
+			ctx:        reliableAdmissionContext(key, strings.Repeat("a", 64), false),
+			requestCtx: reliableAdmissionContext("other-job", strings.Repeat("a", 64), false),
+		},
+	}
+
+	for name, testCase := range tests {
+		t.Run(name, func(t *testing.T) {
+			requestCtx := testCase.requestCtx
+			if requestCtx == nil {
+				requestCtx = testCase.ctx
+			}
+			response, err := service.Call(testCase.ctx, withRequestMetadata(t, request, requestCtx))
+			assert.ErrorIs(t, err, constants.ErrIdempotencyKeyInvalid)
+			require.NotNil(t, response)
+			require.NotNil(t, response.Status)
+		})
+	}
+	reliable := reliableAdmissionContext(key, strings.Repeat("a", 64), false)
+	response, err := service.Call(reliable, nil)
+	assert.ErrorIs(t, err, constants.ErrIdempotencyKeyInvalid)
+	require.NotNil(t, response)
+	require.NotNil(t, response.Status)
+	assert.Zero(t, calls.Load())
+	assert.Zero(t, store.calls)
+}
+
+func TestRemoteServiceCallRejectsRequestReliableMarkerWithoutContextKey(t *testing.T) {
+	for _, escapedMarker := range []bool{false, true} {
+		t.Run(fmt.Sprintf("escaped_marker=%t", escapedMarker), func(t *testing.T) {
+			var calls atomic.Int32
+			store := &recordingIdempotencyStore{invoke: true}
+			service := newRemoteCallService(
+				cluster.NewServer("game-1", "game", false),
+				WithIdempotencyStore(store),
+			)
+			require.NoError(t, service.Register(&CallCoverageRemote{calls: &calls}, nil))
+			requestCtx := reliableAdmissionContext("job-1", strings.Repeat("a", 64), false)
+			request := withRequestMetadata(t, callCoverageRequest(t, "north"), requestCtx)
+			if escapedMarker {
+				request.Metadata = []byte(fmt.Sprintf(
+					`{"rpc.idempotency-key":"job-1","rpc.reliable\u002djob":"job-1","rpc.reliable-metadata-sha256":"%s"}`,
+					strings.Repeat("a", 64),
+				))
+			}
+			response, err := service.Call(context.Background(), request)
+			assert.ErrorIs(t, err, constants.ErrIdempotencyKeyInvalid)
+			require.NotNil(t, response)
+			require.NotNil(t, response.Status)
+			assert.Zero(t, calls.Load())
+			assert.Zero(t, store.calls)
+		})
+	}
+}
+
+func TestRemoteServiceCallConsumesReliableMarkersBeforeHandlerAndNestedRPC(t *testing.T) {
+	service := newRemoteCallService(cluster.NewServer("game-1", "game", false))
+	handler := &ReliableAdmissionRemote{leaked: make(chan bool, 1)}
+	require.NoError(t, service.Register(handler, nil))
+	data, err := proto.Marshal(&test.SomeStruct{B: "accepted"})
+	require.NoError(t, err)
+	request := &protos.Request{
+		Type: protos.RPCType_User,
+		Msg:  &protos.Msg{Route: "ReliableAdmissionRemote.Inspect", Data: data},
+	}
+	ctx := reliableAdmissionContext("job-1", strings.Repeat("a", 64), true)
+	response, err := service.Call(ctx, withRequestMetadata(t, request, ctx))
+	require.NoError(t, err)
+	assert.Equal(t, "accepted", decodeCallCoverageResponse(t, response).B)
+	assert.False(t, <-handler.leaked)
+}
+
+func TestRemoteServiceCallSanitizesContextBeforeIdempotencyStore(t *testing.T) {
+	target := cluster.NewServer("game-1", "game", false)
+	target.SetOwnerEpoch(73)
+	store := &recordingIdempotencyStore{invoke: true}
+	service := newRemoteCallService(target, WithIdempotencyStore(store))
+	require.NoError(t, service.Register(&CallCoverageRemote{}, nil))
+
+	deadline := time.Now().Add(time.Minute)
+	base, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	ctx := pcontext.AddListToPropagateCtx(
+		base,
+		"tenant", "east",
+		constants.OwnerServerIDKey, target.ID,
+		constants.OwnerEpochKey, "73",
+		constants.IdempotencyKey, "job-1",
+		constants.IdempotencyFanoutKey, "1",
+		rpccontext.ReliableJobKey, "job-1",
+		rpccontext.ReliableJobMetadataDigestKey, strings.Repeat("a", 64),
+	)
+	ctx = rpccontext.WithReliableRPCJob(ctx, "job-1", strings.Repeat("a", 64))
+	request := withRequestMetadata(t, callCoverageRequest(t, "east"), ctx)
+
+	response, err := service.Call(ctx, request)
+	require.NoError(t, err)
+	assert.Equal(t, "east", decodeCallCoverageResponse(t, response).B)
+	require.NotNil(t, store.ctx)
+	propagated := pcontext.ToMap(store.ctx)
+	for _, key := range []string{
+		constants.OwnerServerIDKey,
+		constants.OwnerEpochKey,
+		constants.IdempotencyKey,
+		constants.IdempotencyFanoutKey,
+		rpccontext.ReliableJobKey,
+		rpccontext.ReliableJobMetadataDigestKey,
+	} {
+		assert.NotContains(t, propagated, key)
+	}
+	assert.Equal(t, "east", propagated["tenant"])
+	_, _, typedMarker := rpccontext.ReliableRPCJobFromContext(store.ctx)
+	assert.False(t, typedMarker)
+	storeDeadline, ok := store.ctx.Deadline()
+	require.True(t, ok)
+	assert.Equal(t, deadline, storeDeadline)
+	cancel()
+	assert.ErrorIs(t, store.ctx.Err(), context.Canceled)
+}
+
+func TestRemoteCallPreparesReliableMetadataForCustomRPCClient(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	client := clustermocks.NewMockRPCClient(ctrl)
+	target := cluster.NewServer("game-2", "game", false)
+	service := newRemoteCallService(cluster.NewServer("worker-1", "worker", false))
+	service.rpcClient = client
+	digest := strings.Repeat("a", 64)
+	ctx := rpccontext.WithReliableRPCJob(
+		pcontext.AddListToPropagateCtx(
+			context.Background(),
+			constants.IdempotencyKey, "job-1",
+			rpccontext.ReliableJobKey, "spoofed-job",
+			rpccontext.ReliableJobMetadataDigestKey, strings.Repeat("f", 64),
+		),
+		"job-1",
+		digest,
+	)
+	client.EXPECT().Call(gomock.Any(), protos.RPCType_User, gomock.Any(), nil, gomock.Any(), target).
+		DoAndReturn(func(callCtx context.Context, _ protos.RPCType, _ *route.Route, _ session.Session, _ *message.Message, _ *cluster.Server) (*protos.Response, error) {
+			assert.Equal(t, "job-1", pcontext.GetFromPropagateCtx(callCtx, rpccontext.ReliableJobKey))
+			assert.Equal(t, digest, pcontext.GetFromPropagateCtx(callCtx, rpccontext.ReliableJobMetadataDigestKey))
+			return &protos.Response{}, nil
+		})
+
+	_, err := service.remoteCall(
+		ctx,
+		target,
+		protos.RPCType_User,
+		route.NewRoute("game", "player", "move"),
+		nil,
+		&message.Message{Type: message.Request},
+	)
+	require.NoError(t, err)
 }
 
 func TestRemoteServiceCallReportsRoutingAndRPCTypeErrors(t *testing.T) {
@@ -260,7 +668,7 @@ func TestRemoteServiceCallUsesInjectedIdempotencyStore(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, expectedStoreKey, store.key)
 	assert.LessOrEqual(t, len(store.key), MaxIdempotencyKeyBytes)
-	fingerprint, err := rpcRequestFingerprint(request)
+	fingerprint, err := rpcRequestFingerprint(request, key, false, "")
 	require.NoError(t, err)
 	assert.Equal(t, fingerprint, store.fingerprint)
 

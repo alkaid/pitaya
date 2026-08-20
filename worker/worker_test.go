@@ -14,6 +14,7 @@ import (
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/constants"
 	pcontext "github.com/alkaid/pitaya/v2/context"
+	"github.com/alkaid/pitaya/v2/internal/rpccontext"
 	workers "github.com/alkaid/pitaya/v2/internal/workers"
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/worker/mocks"
@@ -47,10 +48,16 @@ type legacyWorkerStarter interface {
 var _ legacyWorkerStarter = (*Worker)(nil)
 
 type capturingRPCJob struct {
-	ctx context.Context
+	ctx               context.Context
+	metadataValue     any
+	mutateMetadataMap bool
 }
 
-func (j *capturingRPCJob) ServerDiscovery(string, map[string]interface{}) (string, error) {
+func (j *capturingRPCJob) ServerDiscovery(_ string, metadata map[string]interface{}) (string, error) {
+	j.metadataValue = metadata["sequence"]
+	if j.mutateMetadataMap {
+		metadata["sequence"] = float64(0)
+	}
 	return "server-1", nil
 }
 
@@ -314,4 +321,66 @@ func TestParsedRPCJobPropagatesStableJobIDAsIdempotencyKey(t *testing.T) {
 	job := &capturingRPCJob{}
 	assert.NotPanics(t, func() { (&Worker{}).parsedRPCJob(job)(msg) })
 	assert.Equal(t, "job-stable-123", pcontext.GetFromPropagateCtx(job.ctx, constants.IdempotencyKey))
+	id, digest, ok := rpccontext.ReliableRPCJobFromContext(job.ctx)
+	assert.True(t, ok)
+	assert.Equal(t, "job-stable-123", id)
+	expectedDigest, err := rpcJobMetadataDigest([]byte(`{
+		"route": "server.svc.method",
+		"arg": {"uid": "user-1"},
+		"metadata": {}
+	}`))
+	require.NoError(t, err)
+	assert.Equal(t, expectedDigest, digest)
+}
+
+func TestRPCJobMetadataDigestUsesOriginalJSONNumbers(t *testing.T) {
+	firstArgs := []byte(`{"metadata":{"sequence":9007199254740992,"tenant":"east"}}`)
+	secondArgs := []byte(`{"metadata":{"tenant":"east","sequence":9007199254740993}}`)
+	first, err := rpcJobMetadataDigest(firstArgs)
+	require.NoError(t, err)
+	second, err := rpcJobMetadataDigest(secondArgs)
+	require.NoError(t, err)
+	assert.NotEqual(t, first, second)
+
+	reordered, err := rpcJobMetadataDigest([]byte(`{"metadata":{"tenant":"east","sequence":9007199254740992}}`))
+	require.NoError(t, err)
+	assert.Equal(t, first, reordered)
+
+	missing, err := rpcJobMetadataDigest([]byte(`{"route":"server.svc.method"}`))
+	require.NoError(t, err)
+	nullValue, err := rpcJobMetadataDigest([]byte(`{"metadata":null}`))
+	require.NoError(t, err)
+	emptyObject, err := rpcJobMetadataDigest([]byte(`{"metadata":{}}`))
+	require.NoError(t, err)
+	assert.Equal(t, missing, nullValue)
+	assert.NotEqual(t, missing, emptyObject)
+
+	_, err = rpcJobMetadataDigest([]byte(`{"metadata":[]}`))
+	assert.ErrorContains(t, err, "object or null")
+}
+
+func TestParsedRPCJobKeepsLegacyMetadataTypesAndPreDiscoveryDigest(t *testing.T) {
+	const raw = `{
+		"jid": "job-large-number",
+		"args": {
+			"route": "server.svc.method",
+			"arg": {"uid": "user-1"},
+			"metadata": {"sequence": 9007199254740993}
+		}
+	}`
+	msg, err := workers.NewMsg(raw)
+	require.NoError(t, err)
+	job := &capturingRPCJob{mutateMetadataMap: true}
+	assert.NotPanics(t, func() { (&Worker{}).parsedRPCJob(job)(msg) })
+	assert.IsType(t, float64(0), job.metadataValue)
+
+	_, digest, ok := rpccontext.ReliableRPCJobFromContext(job.ctx)
+	require.True(t, ok)
+	expected, err := rpcJobMetadataDigest([]byte(`{
+		"route": "server.svc.method",
+		"arg": {"uid": "user-1"},
+		"metadata": {"sequence": 9007199254740993}
+	}`))
+	require.NoError(t, err)
+	assert.Equal(t, expected, digest, "ServerDiscovery mutation must not change the queued command digest")
 }

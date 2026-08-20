@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,6 +16,7 @@ import (
 	"github.com/alkaid/pitaya/v2/constants"
 	pcontext "github.com/alkaid/pitaya/v2/context"
 	"github.com/alkaid/pitaya/v2/helpers"
+	rpccontext "github.com/alkaid/pitaya/v2/internal/rpccontext"
 	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/metrics"
 	"github.com/alkaid/pitaya/v2/protos"
@@ -180,6 +182,8 @@ func TestGRPCServerCallDecodesPropagatedRequestContext(t *testing.T) {
 		constants.OwnerServerIDKey, "game-1",
 		constants.OwnerEpochKey, "42",
 		constants.IdempotencyKey, "worker-jid-1",
+		rpccontext.ReliableJobKey, "worker-jid-1",
+		rpccontext.ReliableJobMetadataDigestKey, strings.Repeat("a", 64),
 	)
 	metadata, err := pcontext.Encode(propagated)
 	require.NoError(t, err)
@@ -193,6 +197,8 @@ func TestGRPCServerCallDecodesPropagatedRequestContext(t *testing.T) {
 		assert.Equal(t, "game-1", pcontext.GetFromPropagateCtx(received, constants.OwnerServerIDKey))
 		assert.Equal(t, "42", pcontext.GetFromPropagateCtx(received, constants.OwnerEpochKey))
 		assert.Equal(t, "worker-jid-1", pcontext.GetFromPropagateCtx(received, constants.IdempotencyKey))
+		assert.Equal(t, "worker-jid-1", pcontext.GetFromPropagateCtx(received, rpccontext.ReliableJobKey))
+		assert.Equal(t, strings.Repeat("a", 64), pcontext.GetFromPropagateCtx(received, rpccontext.ReliableJobMetadataDigestKey))
 	case <-callCtx.Done():
 		t.Fatal("timed out waiting for gRPC Call context")
 	}

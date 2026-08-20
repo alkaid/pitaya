@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "base_sha": "88bae442733970e47d468d6e5c4d01856eb06748",
+  "base_sha": "ef6c23c007f11662eb690ce8405a04a54409c036",
   "coverage_platform": {
     "goos": "linux",
     "goarch": "amd64"
@@ -92,8 +92,8 @@
   },
   "baseline": {
     "overall": {
-      "covered": 9178,
-      "total": 11806
+      "covered": 9348,
+      "total": 11952
     },
     "packages": {
       ".": {
@@ -101,24 +101,24 @@
         "total": 1026
       },
       "acceptor": {
-        "covered": 366,
-        "total": 418
+        "covered": 368,
+        "total": 420
       },
       "acceptorwrapper": {
         "covered": 100,
         "total": 123
       },
       "agent": {
-        "covered": 299,
-        "total": 389
+        "covered": 311,
+        "total": 391
       },
       "client": {
         "covered": 279,
         "total": 446
       },
       "cluster": {
-        "covered": 2258,
-        "total": 2742
+        "covered": 2284,
+        "total": 2771
       },
       "co": {
         "covered": 241,
@@ -160,9 +160,13 @@
         "covered": 341,
         "total": 431
       },
+      "internal/rpccontext": {
+        "covered": 13,
+        "total": 14
+      },
       "internal/workers": {
-        "covered": 420,
-        "total": 629
+        "covered": 444,
+        "total": 646
       },
       "logger": {
         "covered": 103,
@@ -205,15 +209,15 @@
         "total": 10
       },
       "service": {
-        "covered": 1214,
-        "total": 1469
+        "covered": 1274,
+        "total": 1520
       },
       "session": {
         "covered": 771,
         "total": 870
       },
       "timer": {
-        "covered": 217,
+        "covered": 218,
         "total": 250
       },
       "tracing": {
@@ -221,8 +225,8 @@
         "total": 138
       },
       "util": {
-        "covered": 115,
-        "total": 140
+        "covered": 122,
+        "total": 138
       },
       "util/compression": {
         "covered": 23,
@@ -237,8 +241,8 @@
         "total": 32
       },
       "worker": {
-        "covered": 112,
-        "total": 144
+        "covered": 137,
+        "total": 177
       }
     }
   }

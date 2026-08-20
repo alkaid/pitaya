@@ -29,6 +29,7 @@ import (
 	"github.com/alkaid/pitaya/v2/constants"
 	pcontext "github.com/alkaid/pitaya/v2/context"
 	"github.com/alkaid/pitaya/v2/interfaces"
+	rpccontext "github.com/alkaid/pitaya/v2/internal/rpccontext"
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/route"
 	"github.com/alkaid/pitaya/v2/session"
@@ -57,7 +58,8 @@ type RPCClient interface {
 	// Deprecated:Use Fork instead
 	BroadcastSessionBind(uid string) error
 	// Call validates the concrete target's ownership and replaces hop-level
-	// fencing metadata before sending the request.
+	// fencing metadata before sending the request. Custom implementations must
+	// call PrepareOutboundRPCContext before encoding propagated metadata.
 	Call(ctx context.Context, rpcType protos.RPCType, route *route.Route, session session.Session, msg *message.Message, server *Server) (*protos.Response, error)
 	// Fork broadcasts to instances of the same server type.
 	//
@@ -152,6 +154,37 @@ const (
 	Modify
 )
 
+// PrepareOutboundRPCContext removes business-provided ReliableRPC wire
+// metadata and recreates it only from the process-local Worker marker. Custom
+// RPC clients must call this immediately before encoding propagated metadata.
+func PrepareOutboundRPCContext(ctx context.Context) context.Context {
+	jobID, metadataDigest, reliableJob := rpccontext.ReliableRPCJobFromContext(ctx)
+	var propagatedValues map[string]any
+	if ctx != nil {
+		propagatedValues, _ = ctx.Value(constants.PropagateCtxKey).(map[string]any)
+	}
+	_, markerFound := propagatedValues[rpccontext.ReliableJobKey]
+	_, digestFound := propagatedValues[rpccontext.ReliableJobMetadataDigestKey]
+	if !reliableJob && !markerFound && !digestFound {
+		return ctx
+	}
+	propagated := pcontext.ToMap(ctx)
+	delete(propagated, rpccontext.ReliableJobKey)
+	delete(propagated, rpccontext.ReliableJobMetadataDigestKey)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx = context.WithValue(ctx, constants.PropagateCtxKey, propagated)
+	if reliableJob {
+		ctx = pcontext.AddListToPropagateCtx(
+			ctx,
+			rpccontext.ReliableJobKey, jobID,
+			rpccontext.ReliableJobMetadataDigestKey, metadataDigest,
+		)
+	}
+	return ctx
+}
+
 func buildRequest(
 	ctx context.Context,
 	rpcType protos.RPCType,
@@ -167,6 +200,10 @@ func buildRequest(
 			Route: route,
 			Data:  msg.Data,
 		},
+	}
+	ctx = PrepareOutboundRPCContext(ctx)
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	ctx = pcontext.AddListToPropagateCtx(ctx, constants.PeerIDKey, thisServer.ID, constants.PeerServiceKey, thisServer.Type)
 	req.Metadata, err = pcontext.Encode(ctx)

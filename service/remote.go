@@ -45,6 +45,7 @@ import (
 	"github.com/alkaid/pitaya/v2/constants"
 	pcontext "github.com/alkaid/pitaya/v2/context"
 	"github.com/alkaid/pitaya/v2/docgenerator"
+	rpccontext "github.com/alkaid/pitaya/v2/internal/rpccontext"
 	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/pipeline"
 	"github.com/alkaid/pitaya/v2/protos"
@@ -333,12 +334,18 @@ func (r *RemoteService) Call(ctx context.Context, req *protos.Request) (*protos.
 	if err != nil {
 		return rpcErrorResponse(err), err
 	}
+	reliableDigest, reliableJob, err := reliableRPCJobMetadata(pcontext.ToMap(ctx), key)
+	if err != nil {
+		return rpcErrorResponse(err), err
+	}
 	fingerprint := ""
 	if key != "" {
-		fingerprint, err = rpcRequestFingerprint(req)
+		fingerprint, err = rpcRequestFingerprint(req, key, reliableJob, reliableDigest)
 		if err != nil {
 			return rpcErrorResponse(err), err
 		}
+	} else if err := validateUnkeyedReliableRPCMetadata(req); err != nil {
+		return rpcErrorResponse(err), err
 	}
 	handlerCtx, err := consumeRPCAdmissionMetadata(ctx)
 	if err != nil {
@@ -352,7 +359,8 @@ func (r *RemoteService) Call(ctx context.Context, req *protos.Request) (*protos.
 		return rpcErrorResponse(err), err
 	}
 	handlerPropagation := pcontext.ToMap(handlerCtx)
-	response, callErr := r.idempotencyStore.Execute(ctx, scope, fingerprint, func(callCtx context.Context) (*protos.Response, error) {
+	response, callErr := r.idempotencyStore.Execute(handlerCtx, scope, fingerprint, func(callCtx context.Context) (*protos.Response, error) {
+		callCtx = rpccontext.WithoutReliableRPCJob(callCtx)
 		callCtx = context.WithValue(callCtx, constants.PropagateCtxKey, handlerPropagation)
 		callCtx = withRPCIdempotencyInfo(callCtx, scope, fingerprint)
 		return r.callOnce(callCtx, req)
@@ -1417,6 +1425,7 @@ func (r *RemoteService) remoteCall(
 		}
 	}
 	ctx = target.WithOwnerFencingMetadata(ctx)
+	ctx = cluster.PrepareOutboundRPCContext(ctx)
 
 	res, err := r.rpcClient.Call(ctx, rpcType, route, session, msg, target)
 	if err != nil {

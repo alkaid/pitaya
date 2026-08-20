@@ -125,8 +125,9 @@ executor 应原样传播受控 task 的返回值，不要重新解释 handler �
 - 单一、明确的 `apierrors.Error` 保留应用状态。
 - 其他拒绝、panic、joined skip 和 executor 契约违约统一返回稳定的 500。
 
-TaskExecutor 或 task panic 的返回 error 只保留稳定 sentinel，不再拼接 panic
-值；依赖匹配 panic 文本的代码必须改用 `errors.Is`。这些状态描述接纳结果，
+TaskExecutor、task 或反射调用的 handler/remote panic 都只返回稳定 sentinel，
+不再拼接 panic 值或 method 名。反射调用使用 `util.ErrRPCHandlerPanic`；
+依赖匹配 panic 文本的代码必须改用 `errors.Is`。这些状态描述接纳结果，
 不覆盖 task 已运行后的 handler 业务错误。
 
 ### 后端回调所有权
@@ -163,6 +164,8 @@ Worker 队列 runtime 已内置基于 `go-workers v1.2.1` 的兼容实现，不�
 该 runtime 使用进程级全局状态，同一进程只能由一个 Worker 或 App worker runtime 持有。不要在一个进程内启动多个彼此独立的 Worker 或 App；需要隔离多套 worker 时，应拆成独立进程。
 
 默认 Redis 连接的 connect、read 和 write timeout 固定为 5 秒，runtime context 取消也会中断 fetch 和 scheduler I/O。job 成功返回后，manager 才为该 job 启动独立的 5 秒确认窗口并执行 `LREM`；确认按 worker 并发，不会按任务数串行累加关闭时间。`Worker.Stop` 会等这些确认全部结束。Redis 在确认窗口内不可用时，job 保留在 in-progress list，下一次启动会按 at-least-once 语义重放。job panic 并启用 retry 时，只有 retry `ZADD` 成功或策略明确不再重试才会确认原 job；retry 入队失败时，原 job 同样留在 in-progress list。业务处理必须幂等。
+
+Worker 启动恢复只扫描 `<queue>:<current-hostname>:inprogress`。替换实例如果使用不同 hostname，不会自动接管旧 hostname 下的 in-progress job；旧 list 会保留在 Redis 中但不会被新实例消费。需要崩溃恢复的部署必须为 Worker 使用稳定 hostname（例如 StatefulSet 的稳定 pod identity），或在更换 hostname 前排空队列并确认旧 in-progress list 为空。随机 pod 名称的 Deployment 不能被视为已经具备跨实例 orphan recovery；本批未提供安全的多实例孤儿认领协议。
 
 retry payload 的 `error_message` 现在只保存 recovered panic 的 Go 类型，不再调用或持久化 panic 值的 `Error`/`String` 文本。依赖该字段提取业务错误详情的消费者必须改用显式 job error/result 字段；panic 详情不属于稳定 wire contract。
 
@@ -457,6 +460,8 @@ remote fanout 的并发所有权已收拢到单个 executor，默认上限为 `c
 
 直接调用导出的 `RPCClient.Call` 时，内置 NATS 和 gRPC client 现在会自行验证目标 ownership，并覆盖当前 hop 的 owner metadata。目标 ownership 已失效时会在发送前返回 `constants.ErrStaleOwnerEpoch`；有效的非零 epoch 会替换继承自上一 hop 的值，有效的 epoch `0` 会清除旧值以保留未启用 fencing 的兼容路径。自定义 transport 的 `Call` 实现也必须遵守同一契约，不能依赖上层调用方预先装饰 context。
 
+自定义 `RPCClient.Call` 在编码 propagate metadata 前还必须调用 `cluster.PrepareOutboundRPCContext(ctx)`。该函数会删除业务 context 中伪造的 `rpc.reliable-job` 和 `rpc.reliable-metadata-sha256`，并且只在 context 带有 Worker 私有 typed marker 时重建这两个 wire 字段。框架持有的 RemoteService、cluster session 和 remote agent 调用点已经执行该步骤，内置 NATS/gRPC client 的 request builder 也会重复执行以覆盖直接调用；自定义实现若绕过该函数，ReliableRPC marker 不会被正确序列化，业务注入值也不会被剥离。目标 transport 必须从同一份 `Request.Metadata` 构造传给 `PitayaServer.Call` 的 context；两者的 marker 或 digest 不一致会 fail closed。wire marker 不是密码学认证，直接构造 NATS/gRPC 请求的集群 peer 仍属于受信任边界，生产环境必须依赖 broker ACL、网络隔离或传输认证限制该能力。
+
 底层 `RPCClient.Publish` 和 `RPCClient.Fork` 均已弃用。只有本地 owner epoch 为有效的 `0` 时，NATS 实现才保留原有 type-wide publish 行为；owner fencing 活跃、epoch 非零或 ownership 已失效时，它们会在修改消息或发布前分别同步返回 `constants.ErrRPCPublishRequiresTargetResolution` 或 `constants.ErrRPCForkRequiresTargetResolution`。需要 fencing 的调用方必须改用 `App.Publish`/`RemoteService.Publish` 或 `App.Fork`/`RemoteService.Fork`，由框架解析每个具体目标并附带对应 token。
 
 ### 指标标签、Reporter 和 Logger reload
@@ -473,9 +478,17 @@ Logger 热重载不再替换已发布的 `*zap.Logger`/`*zap.SugaredLogger` faca
 
 etcd 服务发现使用 server registration key 的 `CreateRevision` 作为 owner epoch。新进程不能在旧 registration lease 仍有效时用相同 type/ID 覆盖它；初始化会返回 identity-owned 错误。只有旧 lease 失效、key 删除后才能接管，并获得新的 epoch。选择 etcd discovery 后，共享 server 会在 discovery 构造完成时立即进入 invalid 状态；因此即使 RPC module 先初始化，registration 提交前的无 token 请求也会 fail-closed。keepalive 丢失同样会立即使本地 epoch 失效，恢复 lease 和 registration 前 RPC admission 保持 fail-closed。出站 RPC 在目标 epoch 非零时传播 `constants.OwnerServerIDKey`（`rpc.owner-server-id`）和 `constants.OwnerEpochKey`（`rpc.owner-epoch`）；接收端本地 epoch 非零时，缺失、非法、ID 不匹配或 epoch 不相等都会返回 `constants.ErrStaleOwnerEpoch`。`RemoteService` 路由调用、backend `Session.SendRequestToFrontend` 使用的 remote agent，以及 cluster session 的定向 `SendRequest` 都会按具体目标替换这两个字段；目标 epoch 为 `0` 时会清除上一 hop 的字段。自定义 discovery 传给 `Server.SetOwnerEpoch` 的 generation 必须小于 `2^63`；最高位由框架保留为 invalid 标记，越界值会 fail-closed 而不会截断为 unfenced epoch。自定义 RPC transport 必须完整保留 propagate context 到目标入口，否则启用 etcd fencing 的请求会被拒绝。owner metadata 只属于当前 hop，入口验证后会在业务 handler 前移除；handler 发起下游 RPC 时由新目标重新写入，epoch=0 的目标不会继承上一跳 fence。非 etcd/无法提供 epoch 的 discovery 保持 epoch `0`，不声明 fencing 保证。
 
-Worker 现在用稳定的 Redis JID 写入 `constants.IdempotencyKey`（`rpc.idempotency-key`）。`RemoteService.Call` 对相同 key 和请求指纹合并并发执行、缓存响应和 error；同 key 不同请求或不同业务 metadata 返回 `constants.ErrIdempotencyConflict`。请求已经到达 handler 后产生的 transient error 也会在 result TTL 内复用，不会靠 Worker retry 再次执行副作用。
+Worker 现在用稳定的 Redis JID 写入 `constants.IdempotencyKey`（`rpc.idempotency-key`）。Worker 同时在进程内附加不可由外部应用构造的 typed marker；出站边界据此写入 `rpc.reliable-job=<JID>` 和 `rpc.reliable-metadata-sha256=<digest>`。digest 对入队时的原始 ReliableRPC routing metadata 做保留 JSON number 精度的规范化 SHA-256，并在调用 `ServerDiscovery` 前生成，因此 callback 对 metadata map 的修改不会改变命令身份。`ServerDiscovery` 继续通过普通 `json.Unmarshal` 接收历史 `float64` 数值，不会因内部摘要改成 `json.Number`。
+
+`RemoteService.Call` 对相同 key 和请求指纹合并并发执行、缓存响应和 error；同 key 不同请求、不同 ReliableRPC routing metadata 或普通/Reliable 模式混用返回 `constants.ErrIdempotencyConflict`。请求已经到达 handler 后产生的 transient error 也会在 result TTL 内复用，不会靠 Worker retry 再次执行副作用。
+
+只有通过上述 marker 验证的 ReliableRPC 指纹才忽略每次重试所在执行器的 `FrontendID`、`peer.id` 和 `peer.service`，因此同一 Redis job 被共享 namespace 中的另一 worker 实例接管时仍能 replay 已完成结果。普通 keyed RPC 会保留这三个调用方身份字段；相同 key 从另一 frontend/peer 到达时会冲突，而不会复用其他调用方的缓存响应。ReliableRPC 需要让业务来源参与冲突判定时，必须在入队 metadata 中传入显式、稳定的业务字段。
+
+该指纹格式与旧版本不兼容：新版本把 ReliableRPC marker 和 routing-metadata digest 纳入指纹，普通 keyed RPC 也恢复 caller identity。滚动升级前应停止新增和重试所有携带 `rpc.idempotency-key` 的请求；对 ReliableRPC 还要排空 Worker 的 queued、scheduled/retry 和 in-progress job。确认不再产生旧格式完成记录后，至少等待 idempotency result TTL（默认 15 分钟）让最后一条旧记录过期，再统一启动新版本。无法执行该窗口的混合版本部署或残留旧记录必须接受同一 key 在 TTL 内返回 `constants.ErrIdempotencyConflict` 的 fail-closed 行为，不能通过换 key、换 prefix 或换 store version 无条件重放业务副作用。
 
 Cluster Builder 默认启用新的 `RedisIdempotencyStore`，复用 `pitaya.storage.redis` 的连接、TLS 和 ACL 配置。默认 key prefix 为 `pitaya:rpc:idempotency:`，完成结果保留 15 分钟，running lease 为 30 秒，每 10 秒续租，等待者每 25 毫秒检查一次，每次 Redis 操作最多 3 秒。全部参与同一 RPC scope 的进程必须连接同一 Redis 并使用同一 prefix。生产 ACL 除 key 范围外必须允许 `EVAL`，以及脚本调用的 `EXISTS`、`HGET`、`HSET`、`HDEL`、`PTTL` 和 `PEXPIRE`。新增配置位于 `pitaya.cluster.rpc.idempotency.*`；所有 duration 必须为正，且 `heartbeatinterval + operationtimeout < leasettl`。
+
+Redis claim 基础设施错误现在对 RPC peer 返回稳定的 `service.ErrIdempotencyStoreUnavailable`；commit 不确定和 lease 丢失分别返回既有的 `constants.ErrIdempotencyCommitUnknown` 与 `constants.ErrIdempotencyLeaseLost`。底层 Redis 地址、TLS、ACL 和连接错误只保留为内部 cause，不再进入 wire `Status.Message`。依赖匹配底层错误文本的调用方必须改用 `errors.Is`。
 
 运行 owner 由随机 token 和 TTL 标识；续租、完成写入和旧 owner fencing 都通过单 key Lua CAS 完成。进程在 handler 完成前退出时，lease 到期后另一个进程会接管。续租失败或 lease 到期只会 cooperative cancel 旧 handler 的 context；无法强制终止忽略 cancellation 或正在执行不可取消 I/O 的 callback，因此新 owner 可能在旧 callback 仍运行时开始。旧 owner 的 completion CAS 不能覆盖新结果，但该 CAS 只 fence Redis 完成记录，不能撤销或阻止旧 callback 的业务写入。已完成结果可跨进程 replay，同 key 不同 fingerprint 仍 fail-closed。调用返回 `constants.ErrIdempotencyLeaseLost` 时，当前执行者已不能证明自己仍拥有 key；返回 `constants.ErrIdempotencyCommitUnknown` 时，业务函数已经返回，但完成脚本的结果未知；Redis 中出现不完整或未知 schema 时返回 `constants.ErrIdempotencyStoreCorrupt`。这些失败都返回明确的非成功 RPC status，不会把原成功 payload 交给调用方。调用方应使用同一个 key 查询/retry 或执行业务侧 reconciliation，不能把 commit-unknown 当作“业务一定未执行”。
 
@@ -485,7 +498,7 @@ Cluster Builder 默认启用新的 `RedisIdempotencyStore`，复用 `pitaya.stor
 
 idempotency key 必须是非空字符串且不超过 256 bytes；框架传给 store 的 key 是固定长度、带版本的 opaque hash，普通路由按 server type 作用域去重，fanout 则按目标 server ID 独立去重。自定义 store 不得解析或自行重组该 key。fanout 传输会新增内部 metadata `rpc.idempotency-fanout`；自定义 RPC transport 必须完整保留到目标入口。
 
-owner fencing、idempotency key 和 fanout marker 都是当前 RPC hop 的 admission metadata：目标完成验证和 store scope 计算后，会在进入业务 handler 前删除 `rpc.owner-server-id`、`rpc.owner-epoch`、`rpc.idempotency-key` 和 `rpc.idempotency-fanout`。handler 发起嵌套 RPC 时不会自动继承父命令的去重身份；每个需要去重的嵌套业务命令都必须显式附加独立、稳定的 idempotency key。否则嵌套调用按普通无 key 请求执行。新的 fanout 会由框架重新添加 marker。对没有 idempotency key 的普通 RPC，执行语义保持不变。新增 exported Builder 字段也意味着外部 unkeyed `Builder` literal 必须改成 keyed literal。
+owner fencing、idempotency key、fanout marker、ReliableRPC marker 和 metadata digest 都是当前 RPC hop 的 admission metadata：目标完成逐值验证和 store scope 计算后，会删除 `rpc.owner-server-id`、`rpc.owner-epoch`、`rpc.idempotency-key`、`rpc.idempotency-fanout`、`rpc.reliable-job` 和 `rpc.reliable-metadata-sha256`，并消费进程内 typed marker。`IdempotencyStore.Execute` 和业务 handler 都收到这份清理后的 context；自定义 store 不能再从 propagate context 读取这些保留字段，应使用显式的 `key`、`fingerprint` 参数，deadline 和 cancellation 仍会保留。handler 发起嵌套 RPC 时不会自动继承父命令的去重身份；每个需要去重的嵌套业务命令都必须显式附加独立、稳定的 idempotency key。否则嵌套调用按普通无 key 请求执行。新的 fanout 会由框架重新添加 marker。无 idempotency key 却出现 ReliableRPC wire marker、marker/JID 不一致、摘要格式非法，或 request metadata 与目标 context 不一致时都会返回 `constants.ErrIdempotencyKeyInvalid`，不会进入 store 或 handler。对不携带这些保留字段的普通无 key RPC，执行语义保持不变；入口只增加保留字段预检。新增 exported Builder 字段也意味着外部 unkeyed `Builder` literal 必须改成 keyed literal。
 
 ### 群组分页广播 API
 

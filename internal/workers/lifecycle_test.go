@@ -113,7 +113,10 @@ type inprogressRedisBackend struct {
 	mu           sync.Mutex
 	queued       string
 	inprogress   []string
+	lrangeCalls  int
+	lrangeErrors int
 	brpopCalls   int
+	lrangeSeen   chan struct{}
 	acknowledged chan struct{}
 	secondPoll   chan struct{}
 	ackOnce      sync.Once
@@ -123,6 +126,7 @@ type inprogressRedisBackend struct {
 func newInprogressRedisBackend(message string) *inprogressRedisBackend {
 	return &inprogressRedisBackend{
 		queued:       message,
+		lrangeSeen:   make(chan struct{}, 16),
 		acknowledged: make(chan struct{}),
 		secondPoll:   make(chan struct{}),
 	}
@@ -132,6 +136,12 @@ func (b *inprogressRedisBackend) inprogressCount() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return len(b.inprogress)
+}
+
+func (b *inprogressRedisBackend) commandCounts() (lrange, brpop int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.lrangeCalls, b.brpopCalls
 }
 
 type inprogressRedisConn struct {
@@ -166,11 +176,20 @@ func (c *inprogressRedisConn) do(_ context.Context, commandName string, args ...
 	switch strings.ToLower(commandName) {
 	case "lrange":
 		b.mu.Lock()
+		b.lrangeCalls++
+		shouldFail := b.lrangeCalls <= b.lrangeErrors
 		messages := make([]any, len(b.inprogress))
 		for i, message := range b.inprogress {
 			messages[i] = message
 		}
 		b.mu.Unlock()
+		select {
+		case b.lrangeSeen <- struct{}{}:
+		default:
+		}
+		if shouldFail {
+			return nil, errors.New("synthetic LRANGE failure")
+		}
 		return messages, nil
 	case "brpoplpush":
 		b.mu.Lock()
@@ -207,6 +226,156 @@ func (c *inprogressRedisConn) do(_ context.Context, commandName string, args ...
 	default:
 		return nil, nil
 	}
+}
+
+func newRecoveryTestFetch(ctx context.Context, pool *redis.Pool) *fetch {
+	return &fetch{
+		queue:        "queue:rpc",
+		ready:        make(chan bool),
+		finishedwork: make(chan bool),
+		messages:     make(chan *Msg),
+		stop:         make(chan struct{}),
+		done:         make(chan struct{}),
+		ctx:          ctx,
+		pool:         pool,
+		processID:    "recovery-test",
+	}
+}
+
+func receiveFetchedMessage(t *testing.T, fetcher *fetch) *Msg {
+	t.Helper()
+	select {
+	case fetcher.ready <- true:
+	case <-time.After(time.Second):
+		t.Fatal("fetcher did not accept a readiness signal")
+	}
+	select {
+	case message := <-fetcher.messages:
+		return message
+	case <-time.After(time.Second):
+		t.Fatal("fetcher did not deliver a message")
+		return nil
+	}
+}
+
+func TestFetchRetriesFailedInProgressScanBeforePollingLiveQueue(t *testing.T) {
+	const (
+		oldMessage  = `{"jid":"old","queue":"rpc","args":{}}`
+		liveMessage = `{"jid":"live","queue":"rpc","args":{}}`
+	)
+	backend := newInprogressRedisBackend(liveMessage)
+	backend.inprogress = []string{oldMessage}
+	backend.lrangeErrors = 1
+	pool := &redis.Pool{
+		MaxIdle: 1,
+		Dial: func() (redis.Conn, error) {
+			return &inprogressRedisConn{backend: backend}, nil
+		},
+	}
+	fetcher := newRecoveryTestFetch(context.Background(), pool)
+	go fetcher.Fetch()
+	t.Cleanup(fetcher.Close)
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		select {
+		case <-backend.lrangeSeen:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("in-progress scan attempt %d did not occur", attempt)
+		}
+	}
+	_, brpopCalls := backend.commandCounts()
+	require.Zero(t, brpopCalls, "live queue was polled before recovery succeeded")
+
+	old := receiveFetchedMessage(t, fetcher)
+	require.Equal(t, "old", old.Jid())
+	require.NoError(t, fetcher.Acknowledge(context.Background(), old))
+
+	live := receiveFetchedMessage(t, fetcher)
+	require.Equal(t, "live", live.Jid())
+	require.NoError(t, fetcher.Acknowledge(context.Background(), live))
+	require.Zero(t, backend.inprogressCount(), "recovered job remained stranded")
+}
+
+func TestFetchRetriesFailedPoolAcquisitionBeforePollingLiveQueue(t *testing.T) {
+	const oldMessage = `{"jid":"old","queue":"rpc","args":{}}`
+	backend := newInprogressRedisBackend("")
+	backend.inprogress = []string{oldMessage}
+	dialErr := errors.New("synthetic Redis dial failure")
+	var dialCalls atomic.Int32
+	pool := &redis.Pool{
+		MaxIdle: 1,
+		DialContext: func(context.Context) (redis.Conn, error) {
+			if dialCalls.Add(1) == 1 {
+				return nil, dialErr
+			}
+			return &inprogressRedisConn{backend: backend}, nil
+		},
+	}
+	fetcher := newRecoveryTestFetch(context.Background(), pool)
+	go fetcher.Fetch()
+	t.Cleanup(fetcher.Close)
+
+	select {
+	case <-backend.lrangeSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("in-progress scan did not retry after pool acquisition failure")
+	}
+	require.GreaterOrEqual(t, dialCalls.Load(), int32(2))
+	_, brpopCalls := backend.commandCounts()
+	require.Zero(t, brpopCalls, "live queue was polled before recovery succeeded")
+	require.Equal(t, "old", receiveFetchedMessage(t, fetcher).Jid())
+}
+
+func TestFetchRecoveryRetryIsCancellable(t *testing.T) {
+	newFailingFetcher := func(ctx context.Context) (*fetch, *inprogressRedisBackend) {
+		backend := newInprogressRedisBackend("")
+		backend.lrangeErrors = 1_000
+		pool := &redis.Pool{
+			MaxIdle: 1,
+			Dial: func() (redis.Conn, error) {
+				return &inprogressRedisConn{backend: backend}, nil
+			},
+		}
+		return newRecoveryTestFetch(ctx, pool), backend
+	}
+
+	t.Run("close", func(t *testing.T) {
+		fetcher, backend := newFailingFetcher(context.Background())
+		go fetcher.Fetch()
+		select {
+		case <-backend.lrangeSeen:
+		case <-time.After(time.Second):
+			t.Fatal("in-progress scan did not start")
+		}
+		done := make(chan struct{})
+		go func() {
+			fetcher.Close()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(200 * time.Millisecond):
+			t.Fatal("Close did not interrupt the recovery retry")
+		}
+	})
+
+	t.Run("context", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		fetcher, backend := newFailingFetcher(ctx)
+		go fetcher.Fetch()
+		t.Cleanup(fetcher.Close)
+		select {
+		case <-backend.lrangeSeen:
+		case <-time.After(time.Second):
+			t.Fatal("in-progress scan did not start")
+		}
+		cancel()
+		select {
+		case <-fetcher.done:
+		case <-time.After(200 * time.Millisecond):
+			t.Fatal("context cancellation did not interrupt the recovery retry")
+		}
+	})
 }
 
 type ackBlackholeBackend struct {

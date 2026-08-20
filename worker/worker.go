@@ -21,13 +21,19 @@
 package worker
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"unicode/utf8"
 
 	"github.com/gomodule/redigo/redis"
 	"go.uber.org/zap"
@@ -36,6 +42,7 @@ import (
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/constants"
 	pcontext "github.com/alkaid/pitaya/v2/context"
+	"github.com/alkaid/pitaya/v2/internal/rpccontext"
 	workers "github.com/alkaid/pitaya/v2/internal/workers"
 	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/logger/interfaces"
@@ -230,6 +237,11 @@ func (w *Worker) parsedRPCJob(rpcJob RPCJob) func(*workers.Msg) {
 			logger.Zap.Error("failed to get job arg", zap.Error(err))
 			panic(err)
 		}
+		metadataDigest, err := rpcJobMetadataDigest(bts)
+		if err != nil {
+			logger.Zap.Error("failed to fingerprint RPC job metadata", zap.Error(err))
+			panic(err)
+		}
 
 		logger.Log.Debug("getting route arg and reply")
 		arg, reply, err := rpcJob.GetArgReply(rpcRoute.Route)
@@ -256,7 +268,9 @@ func (w *Worker) parsedRPCJob(rpcJob RPCJob) func(*workers.Msg) {
 			panic(err)
 		}
 
-		ctx := pcontext.AddToPropagateCtx(w.context(), constants.IdempotencyKey, jobArg.Jid())
+		jobID := jobArg.Jid()
+		ctx := pcontext.AddToPropagateCtx(w.context(), constants.IdempotencyKey, jobID)
+		ctx = rpccontext.WithReliableRPCJob(ctx, jobID, metadataDigest)
 
 		logger.Log.Debugf("executing rpc func to %s", rpcInfo.Route)
 		err = rpcJob.RPC(ctx, serverID, rpcInfo.Route, reply, arg)
@@ -267,6 +281,43 @@ func (w *Worker) parsedRPCJob(rpcJob RPCJob) func(*workers.Msg) {
 
 		logger.Log.Debug("finished executing rpc job")
 	}
+}
+
+func rpcJobMetadataDigest(args []byte) (string, error) {
+	var job struct {
+		Metadata json.RawMessage `json:"metadata"`
+	}
+	if err := json.Unmarshal(args, &job); err != nil {
+		return "", err
+	}
+	metadata := job.Metadata
+	if len(metadata) == 0 {
+		metadata = json.RawMessage("null")
+	}
+	if !utf8.Valid(metadata) {
+		return "", errors.New("RPC job metadata is not valid UTF-8")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(metadata))
+	decoder.UseNumber()
+	var values any
+	if err := decoder.Decode(&values); err != nil {
+		return "", err
+	}
+	if values != nil {
+		if _, ok := values.(map[string]any); !ok {
+			return "", fmt.Errorf("RPC job metadata must be an object or null, got %T", values)
+		}
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return "", errors.New("RPC job metadata has a trailing JSON value")
+	}
+	canonical, err := json.Marshal(values)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func (w *Worker) enqueueOptions(
@@ -287,13 +338,19 @@ func (w *Worker) enqueueOptions(
 func (w *Worker) unmarshalRouteMetadata(
 	jobArg *workers.Msg,
 ) ([]byte, *rpcRoute, error) {
-	bts, err := jobArg.Args().MarshalJSON()
-	if err != nil {
+	var envelope struct {
+		Args json.RawMessage `json:"args"`
+	}
+	if err := json.Unmarshal([]byte(jobArg.OriginalJson()), &envelope); err != nil {
 		return nil, nil, err
 	}
+	if len(envelope.Args) == 0 {
+		return nil, nil, errors.New("RPC job args are missing")
+	}
+	bts := append([]byte(nil), envelope.Args...)
 
 	rpcRoute := new(rpcRoute)
-	err = json.Unmarshal(bts, rpcRoute)
+	err := json.Unmarshal(bts, rpcRoute)
 	if err != nil {
 		return nil, nil, err
 	}

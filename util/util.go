@@ -22,6 +22,7 @@ package util
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"hash/crc32"
 	"os"
@@ -48,6 +49,10 @@ import (
 	"github.com/alkaid/pitaya/v2/serialize/protobuf"
 	gonanoid "github.com/matoous/go-nanoid"
 )
+
+// ErrRPCHandlerPanic is safe to return across an RPC boundary after a handler
+// panic. The recovered value and method name remain server-side only.
+var ErrRPCHandlerPanic = stderrors.New("RPC handler internal error")
 
 func getLoggerFromArgs(args []reflect.Value) *zap.Logger {
 	for _, a := range args {
@@ -121,11 +126,7 @@ func Pcall(method reflect.Method, args []reflect.Value) (rets interface{}, err e
 				zap.String("stack", stackTraceAsRawStringLiteral),
 			)
 
-			if s, ok := rec.(string); ok {
-				err = errors.New(s)
-			} else {
-				err = fmt.Errorf("rpc call internal error - %s", method.Name)
-			}
+			err = ErrRPCHandlerPanic
 		}
 	}()
 

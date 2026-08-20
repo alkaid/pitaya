@@ -658,6 +658,13 @@ func (ns *NatsRPCServer) processMessages(threadID int) {
 func (ns *NatsRPCServer) processSessionBindings() {
 	draining := false
 	for {
+		if !draining {
+			select {
+			case <-ns.transportDraining:
+				draining = true
+			default:
+			}
+		}
 		var bind *nats.Msg
 		var ok bool
 		if draining {
@@ -692,6 +699,13 @@ func (ns *NatsRPCServer) processSessionBindings() {
 func (ns *NatsRPCServer) processPushes() {
 	draining := false
 	for {
+		if !draining {
+			select {
+			case <-ns.transportDraining:
+				draining = true
+			default:
+			}
+		}
 		var push *protos.Push
 		var ok bool
 		if draining {
@@ -723,6 +737,13 @@ func (ns *NatsRPCServer) processPushes() {
 func (ns *NatsRPCServer) processKick() {
 	draining := false
 	for {
+		if !draining {
+			select {
+			case <-ns.transportDraining:
+				draining = true
+			default:
+			}
+		}
 		var kick *protos.KickMsg
 		var ok bool
 		if draining {

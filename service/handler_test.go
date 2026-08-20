@@ -25,6 +25,7 @@ import (
 	encjson "encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"reflect"
 	"sync"
 	"testing"
@@ -39,6 +40,7 @@ import (
 	"github.com/alkaid/pitaya/v2/conn/packet"
 	"github.com/alkaid/pitaya/v2/constants"
 	pcontext "github.com/alkaid/pitaya/v2/context"
+	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/metrics"
 	metricsmocks "github.com/alkaid/pitaya/v2/metrics/mocks"
 	connmock "github.com/alkaid/pitaya/v2/mocks"
@@ -52,6 +54,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 var (
@@ -754,4 +759,33 @@ func TestHandlerServiceHandle(t *testing.T) {
 	handlerPool := NewHandlerPool()
 	svc := NewHandlerService(packetDecoder, mockSerializer, 1, 1, nil, nil, mockAgentFactory, nil, pipeline.NewHandlerHooks(), handlerPool)
 	svc.Handle(mockConn)
+}
+
+func TestHandlerServiceHandleTreatsNetClosedAsExpected(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	previousZap := logger.Zap
+	core, observed := observer.New(zapcore.DebugLevel)
+	logger.Zap = zap.New(core)
+	t.Cleanup(func() { logger.Zap = previousZap })
+
+	mockConn := connmock.NewMockPlayerConn(ctrl)
+	mockAgent := agentmocks.NewMockAgent(ctrl)
+	mockAgentFactory := agentmocks.NewMockAgentFactory(ctrl)
+	mockSession := mocks.NewMockSession(ctrl)
+
+	mockAgentFactory.EXPECT().CreateAgent(mockConn).Return(mockAgent)
+	mockAgent.EXPECT().Handle()
+	mockAgent.EXPECT().String().Return("")
+	mockAgent.EXPECT().GetSession().Return(mockSession).Times(3)
+	mockSession.EXPECT().Close(nil)
+	mockSession.EXPECT().ID().Return(int64(1))
+	mockSession.EXPECT().UID().Return("uid")
+	mockConn.EXPECT().GetNextMessage().Return(nil, net.ErrClosed)
+
+	svc := NewHandlerService(nil, nil, 1, 1, nil, nil, mockAgentFactory, nil, pipeline.NewHandlerHooks(), NewHandlerPool())
+	svc.Handle(mockConn)
+
+	entries := observed.FilterMessage("Connection no longer available while reading next available message").All()
+	require.Len(t, entries, 1)
+	assert.Equal(t, zap.DebugLevel, entries[0].Level)
 }

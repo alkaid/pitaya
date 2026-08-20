@@ -1,11 +1,14 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"sync"
 	"time"
@@ -13,6 +16,7 @@ import (
 	"github.com/alkaid/pitaya/v2/cluster"
 	"github.com/alkaid/pitaya/v2/constants"
 	pcontext "github.com/alkaid/pitaya/v2/context"
+	rpccontext "github.com/alkaid/pitaya/v2/internal/rpccontext"
 	"github.com/alkaid/pitaya/v2/protos"
 	"google.golang.org/protobuf/proto"
 )
@@ -21,12 +25,19 @@ const MaxIdempotencyKeyBytes = 256
 
 var errIdempotentRPCOperationFailed = errors.New("idempotent RPC operation failed")
 
+// ErrIdempotencyStoreUnavailable is safe to return across an RPC boundary when
+// the durable idempotency store cannot complete an admission operation.
+var ErrIdempotencyStoreUnavailable = errors.New("RPC idempotency store is unavailable")
+
 // IdempotencyStore owns command coalescing and completed-result retention.
 // Implementations must not start another fn while the current ownership record
 // remains valid. Lease-based stores may execute fn again after ownership expires;
 // callback cancellation is cooperative, so business effects still need a
 // transaction-level unique key or fencing check. Reusing a key with another
-// fingerprint must fail with constants.ErrIdempotencyConflict.
+// fingerprint must fail with constants.ErrIdempotencyConflict. Execute receives
+// the request's cancellation and deadline after RPC admission metadata has been
+// consumed; implementations must use the explicit key and fingerprint instead
+// of reading reserved values from propagation metadata.
 type IdempotencyStore interface {
 	Execute(
 		ctx context.Context,
@@ -286,19 +297,21 @@ func consumeRPCAdmissionMetadata(ctx context.Context) (context.Context, error) {
 		constants.OwnerEpochKey,
 		constants.IdempotencyKey,
 		constants.IdempotencyFanoutKey,
+		rpccontext.ReliableJobKey,
+		rpccontext.ReliableJobMetadataDigestKey,
 	} {
 		if _, ok := propagated[metadataKey]; ok {
 			delete(propagated, metadataKey)
 			changed = true
 		}
 	}
-	if !changed {
-		return ctx, nil
+	if changed {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		ctx = context.WithValue(ctx, constants.PropagateCtxKey, propagated)
 	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	return context.WithValue(ctx, constants.PropagateCtxKey, propagated), nil
+	return rpccontext.WithoutReliableRPCJob(ctx), nil
 }
 
 func validateOwnerFence(ctx context.Context, server *cluster.Server) error {
@@ -352,15 +365,49 @@ func serverType(server *cluster.Server) string {
 	return server.Type
 }
 
-func rpcRequestFingerprint(request *protos.Request) (string, error) {
+func reliableRPCJobMetadata(values map[string]any, key string) (string, bool, error) {
+	markerValue, markerFound := values[rpccontext.ReliableJobKey]
+	digestValue, digestFound := values[rpccontext.ReliableJobMetadataDigestKey]
+	if !markerFound && !digestFound {
+		return "", false, nil
+	}
+	marker, markerOK := markerValue.(string)
+	digest, digestOK := digestValue.(string)
+	wireKey, wireKeyOK := values[constants.IdempotencyKey].(string)
+	if !markerFound || !digestFound || !markerOK || !digestOK ||
+		key == "" || marker != key || !wireKeyOK || wireKey != key || len(digest) != sha256.Size*2 {
+		return "", false, fmt.Errorf(
+			"%w: invalid reliable RPC job metadata",
+			constants.ErrIdempotencyKeyInvalid,
+		)
+	}
+	decodedDigest, digestErr := hex.DecodeString(digest)
+	if digestErr != nil || len(decodedDigest) != sha256.Size || hex.EncodeToString(decodedDigest) != digest {
+		return "", false, fmt.Errorf(
+			"%w: invalid reliable RPC job metadata",
+			constants.ErrIdempotencyKeyInvalid,
+		)
+	}
+	return digest, true, nil
+}
+
+func rpcRequestFingerprint(request *protos.Request, key string, reliableJob bool, reliableDigest string) (string, error) {
 	if request == nil {
+		if reliableJob {
+			return "", fmt.Errorf("%w: reliable RPC request is nil", constants.ErrIdempotencyKeyInvalid)
+		}
 		sum := sha256.Sum256(nil)
 		return hex.EncodeToString(sum[:]), nil
 	}
 	command := proto.Clone(request).(*protos.Request)
-	metadata, err := normalizedRPCMetadata(command.Metadata)
+	metadata, err := normalizedRPCMetadata(command.Metadata, key, reliableJob, reliableDigest)
 	if err != nil {
 		return "", err
+	}
+	if reliableJob {
+		// A marked ReliableRPC retry may run on another worker. These fields name
+		// that executor, while the matching JID identifies the logical command.
+		command.FrontendID = ""
 	}
 	command.Metadata = metadata
 	if command.Msg != nil {
@@ -374,15 +421,53 @@ func rpcRequestFingerprint(request *protos.Request) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func normalizedRPCMetadata(metadata []byte) ([]byte, error) {
+func validateUnkeyedReliableRPCMetadata(request *protos.Request) error {
+	if request == nil {
+		return nil
+	}
+	metadata := request.GetMetadata()
+	// Normal encoders emit literal reserved keys. A Unicode escape requires a
+	// structured decode because JSON object keys may legally be escaped.
+	if !bytes.Contains(metadata, []byte(`"`+rpccontext.ReliableJobKey+`"`)) &&
+		!bytes.Contains(metadata, []byte(`"`+rpccontext.ReliableJobMetadataDigestKey+`"`)) &&
+		!bytes.Contains(metadata, []byte(`\u`)) {
+		return nil
+	}
+	_, err := normalizedRPCMetadata(metadata, "", false, "")
+	return err
+}
+
+func normalizedRPCMetadata(metadata []byte, key string, reliableJob bool, reliableDigest string) ([]byte, error) {
 	if len(metadata) == 0 {
+		if reliableJob {
+			return nil, fmt.Errorf(
+				"%w: reliable RPC metadata is missing from the request",
+				constants.ErrIdempotencyKeyInvalid,
+			)
+		}
 		return nil, nil
 	}
-	ctx, err := pcontext.Decode(metadata)
+	decoder := json.NewDecoder(bytes.NewReader(metadata))
+	decoder.UseNumber()
+	values := map[string]any{}
+	err := decoder.Decode(&values)
 	if err != nil {
 		return nil, fmt.Errorf("fingerprint RPC metadata: %w", err)
 	}
-	values := pcontext.ToMap(ctx)
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, fmt.Errorf("fingerprint RPC metadata: trailing JSON value")
+	}
+	requestDigest, requestReliableJob, err := reliableRPCJobMetadata(values, key)
+	if err != nil {
+		return nil, err
+	}
+	if requestReliableJob != reliableJob || requestDigest != reliableDigest {
+		return nil, fmt.Errorf(
+			"%w: request and admission reliable RPC metadata differ",
+			constants.ErrIdempotencyKeyInvalid,
+		)
+	}
 	for _, key := range []string{
 		constants.IdempotencyKey,
 		constants.IdempotencyFanoutKey,
@@ -394,11 +479,14 @@ func normalizedRPCMetadata(metadata []byte) ([]byte, error) {
 		constants.RouteKey,
 		constants.MetricTagsKey,
 		constants.SpanPropagateCtxKey,
-		constants.PeerIDKey,
 	} {
 		delete(values, key)
 	}
-	normalized, err := pcontext.Encode(pcontext.FromMap(values))
+	if reliableJob {
+		delete(values, constants.PeerIDKey)
+		delete(values, constants.PeerServiceKey)
+	}
+	normalized, err := json.Marshal(values)
 	if err != nil {
 		return nil, fmt.Errorf("fingerprint RPC metadata: %w", err)
 	}

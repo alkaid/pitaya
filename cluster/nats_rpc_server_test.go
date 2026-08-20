@@ -38,7 +38,9 @@ import (
 	"github.com/alkaid/pitaya/v2/co"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/constants"
+	pcontext "github.com/alkaid/pitaya/v2/context"
 	"github.com/alkaid/pitaya/v2/helpers"
+	rpccontext "github.com/alkaid/pitaya/v2/internal/rpccontext"
 	"github.com/alkaid/pitaya/v2/metrics"
 	metricsmocks "github.com/alkaid/pitaya/v2/metrics/mocks"
 	"github.com/alkaid/pitaya/v2/protos"
@@ -135,6 +137,66 @@ func TestNatsRPCServerMarshalResponseNormalizesNil(t *testing.T) {
 	require.NoError(t, proto.Unmarshal(payload, response))
 	require.NotNil(t, response.Status)
 	assert.Equal(t, int32(500), response.Status.Code)
+}
+
+func TestNatsRPCServerPreservesReliableMetadataInCallContext(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, nil, nil)
+	require.NoError(t, err)
+	natsServer := helpers.GetTestNatsServer(t)
+	t.Cleanup(natsServer.Shutdown)
+	conn, err := setupNatsConn(fmt.Sprintf("nats://%s", natsServer.Addr()), nil)
+	require.NoError(t, err)
+	t.Cleanup(conn.Close)
+	rpcServer.conn = conn
+
+	contexts := make(chan context.Context, 1)
+	rpcServer.SetPitayaServer(&pitayaServerStub{call: func(ctx context.Context, _ *protos.Request) (*protos.Response, error) {
+		contexts <- ctx
+		return &protos.Response{}, nil
+	}})
+	reply := nats.NewInbox()
+	sub, err := conn.SubscribeSync(reply)
+	require.NoError(t, err)
+	require.NoError(t, conn.Flush())
+	processDone := make(chan struct{})
+	go func() {
+		defer close(processDone)
+		rpcServer.processMessages(0)
+	}()
+	t.Cleanup(func() {
+		close(rpcServer.GetUnhandledRequestsChannel())
+		<-processDone
+	})
+
+	const jobID = "worker-jid-1"
+	digest := strings.Repeat("a", 64)
+	metadata, err := pcontext.Encode(pcontext.AddListToPropagateCtx(
+		context.Background(),
+		constants.IdempotencyKey, jobID,
+		rpccontext.ReliableJobKey, jobID,
+		rpccontext.ReliableJobMetadataDigestKey, digest,
+	))
+	require.NoError(t, err)
+	rpcServer.GetUnhandledRequestsChannel() <- &protos.Request{
+		Metadata: metadata,
+		Msg: &protos.Msg{
+			Type:  protos.MsgType_MsgRequest,
+			Route: "svc.method",
+			Reply: reply,
+		},
+	}
+	_, err = sub.NextMsg(time.Second)
+	require.NoError(t, err)
+
+	select {
+	case received := <-contexts:
+		assert.Equal(t, jobID, pcontext.GetFromPropagateCtx(received, constants.IdempotencyKey))
+		assert.Equal(t, jobID, pcontext.GetFromPropagateCtx(received, rpccontext.ReliableJobKey))
+		assert.Equal(t, digest, pcontext.GetFromPropagateCtx(received, rpccontext.ReliableJobMetadataDigestKey))
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for NATS RPC context")
+	}
 }
 
 func TestNatsRPCServerRepliesAfterCallPanicAndContinues(t *testing.T) {
@@ -1155,6 +1217,73 @@ func TestNatsRPCServerShutdownDrainsBufferedTransportMessages(t *testing.T) {
 	assert.Empty(t, rpcServer.bindingsChan)
 	assert.Empty(t, rpcServer.userPushCh)
 	assert.Empty(t, rpcServer.userKickCh)
+}
+
+func TestNatsRPCServerConsumersPreferSignaledTransportDrain(t *testing.T) {
+	draining := make(chan struct{})
+	close(draining)
+
+	t.Run("binding", func(t *testing.T) {
+		payload, err := proto.Marshal(&protos.BindMsg{Uid: "drained-binding"})
+		require.NoError(t, err)
+		called := make(chan string, 1)
+		rpcServer := &NatsRPCServer{
+			stopChan:          make(chan bool),
+			transportDraining: draining,
+			bindingsChan:      make(chan *nats.Msg, 1),
+		}
+		rpcServer.SetPitayaServer(&pitayaServerStub{
+			sessionBindRemote: func(_ context.Context, msg *protos.BindMsg) (*protos.Response, error) {
+				called <- msg.GetUid()
+				return &protos.Response{}, nil
+			},
+		})
+		rpcServer.bindingsChan <- &nats.Msg{Data: payload}
+
+		rpcServer.processSessionBindings()
+
+		assert.Equal(t, "drained-binding", helpers.ShouldEventuallyReceive(t, called))
+	})
+
+	t.Run("push", func(t *testing.T) {
+		called := make(chan string, 1)
+		rpcServer := &NatsRPCServer{
+			stopChan:          make(chan bool),
+			transportDraining: draining,
+			userPushCh:        make(chan *protos.Push, 1),
+		}
+		rpcServer.SetPitayaServer(&pitayaServerStub{
+			pushToUser: func(_ context.Context, push *protos.Push) (*protos.Response, error) {
+				called <- push.GetUid()
+				return &protos.Response{}, nil
+			},
+		})
+		rpcServer.userPushCh <- &protos.Push{Uid: "drained-push"}
+
+		rpcServer.processPushes()
+
+		assert.Equal(t, "drained-push", helpers.ShouldEventuallyReceive(t, called))
+	})
+
+	t.Run("kick", func(t *testing.T) {
+		called := make(chan string, 1)
+		rpcServer := &NatsRPCServer{
+			stopChan:          make(chan bool),
+			transportDraining: draining,
+			userKickCh:        make(chan *protos.KickMsg, 1),
+		}
+		rpcServer.SetPitayaServer(&pitayaServerStub{
+			kickUser: func(_ context.Context, kick *protos.KickMsg) (*protos.KickAnswer, error) {
+				called <- kick.GetUserId()
+				return &protos.KickAnswer{}, nil
+			},
+		})
+		rpcServer.userKickCh <- &protos.KickMsg{UserId: "drained-kick"}
+
+		rpcServer.processKick()
+
+		assert.Equal(t, "drained-kick", helpers.ShouldEventuallyReceive(t, called))
+	})
 }
 
 func TestNatsRPCServerShutdownWaitsForInboundCallbackBeforeLocalDrain(t *testing.T) {

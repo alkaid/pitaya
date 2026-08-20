@@ -47,6 +47,7 @@ import (
 	"github.com/alkaid/pitaya/v2/mocks"
 	serializemocks "github.com/alkaid/pitaya/v2/serialize/mocks"
 	"github.com/alkaid/pitaya/v2/session"
+	sessionmocks "github.com/alkaid/pitaya/v2/session/mocks"
 	netutil "github.com/alkaid/pitaya/v2/util/net"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -63,6 +64,13 @@ type sessionCloseObservation struct {
 	online     bool
 	registered bool
 }
+
+type agentCacheTTLStub struct {
+	session.CacheInterface
+	ttl time.Duration
+}
+
+func (c *agentCacheTTLStub) CacheTTL() time.Duration { return c.ttl }
 
 func heartbeatAndHandshakeMocks(mockEncoder *codecmocks.MockPacketEncoder) []byte {
 	heartbeatPacket := []byte("heartbeat")
@@ -100,6 +108,25 @@ func waitForChannelClose(t *testing.T, ch <-chan struct{}, timeout time.Duration
 	case <-time.After(timeout):
 		t.Fatal("timed out waiting for channel to close")
 	}
+}
+
+func TestAgentClusterCacheKeepAliveStopsOnAgentDeath(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	mockSession := sessionmocks.NewMockSession(ctrl)
+	mockSession.EXPECT().GetClusterStorage().Return(&agentCacheTTLStub{ttl: time.Hour})
+	died := make(chan struct{})
+	close(died)
+	agent := &agentImpl{
+		Session:              mockSession,
+		chDie:                died,
+		chStopKeepCacheAlive: make(chan struct{}),
+	}
+	done := make(chan struct{})
+	go func() {
+		agent.keepClusterCacheAlive()
+		close(done)
+	}()
+	waitForChannelClose(t, done, time.Second)
 }
 
 func TestNewAgent(t *testing.T) {

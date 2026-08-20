@@ -264,7 +264,10 @@ func (s *RedisIdempotencyStore) claim(
 		durationMillis(s.options.LeaseTTL),
 	).Slice()
 	if err != nil {
-		return redisIdempotencyClaim{}, fmt.Errorf("claim Redis idempotency key: %w", err)
+		if ctx.Err() != nil {
+			return redisIdempotencyClaim{}, ctx.Err()
+		}
+		return redisIdempotencyClaim{}, idempotencyStoreError(ErrIdempotencyStoreUnavailable, err)
 	}
 	if len(values) == 0 {
 		return redisIdempotencyClaim{}, constants.ErrIdempotencyStoreCorrupt
@@ -489,7 +492,7 @@ func (s *RedisIdempotencyStore) renewLease(
 			}
 			return nil
 		case <-deadlineTimer.C:
-			err := fmt.Errorf("%w: %v", constants.ErrIdempotencyLeaseLost, lastErr)
+			err := idempotencyStoreError(constants.ErrIdempotencyLeaseLost, lastErr)
 			cancelExecution(err)
 			return err
 		case <-ticker.C:
@@ -545,12 +548,19 @@ func (s *RedisIdempotencyStore) complete(
 		result.hadError,
 	).Int64()
 	if err != nil {
-		return fmt.Errorf("%w: %v", constants.ErrIdempotencyCommitUnknown, err)
+		return idempotencyStoreError(constants.ErrIdempotencyCommitUnknown, err)
 	}
 	if completed != 1 {
 		return constants.ErrIdempotencyLeaseLost
 	}
 	return nil
+}
+
+func idempotencyStoreError(public, cause error) error {
+	if cause == nil {
+		return public
+	}
+	return apierrors.FromError(public).WithCause(errors.Join(public, cause))
 }
 
 func redisIdempotencyString(value any) (string, error) {

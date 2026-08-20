@@ -34,6 +34,8 @@ type fetch struct {
 	processID    string
 }
 
+const recoveryRetryDelay = time.Second
+
 func NewFetch(queue string, messages chan *Msg, ready chan bool) Fetcher {
 	return &fetch{
 		queue:        queue,
@@ -52,11 +54,23 @@ func (f *fetch) Queue() string {
 }
 
 func (f *fetch) processOldMessages() bool {
-	messages := f.inprogressMessages()
+	var messages []string
+	for {
+		var err error
+		messages, err = f.inprogressMessages()
+		if err == nil {
+			break
+		}
+		if !f.waitForRecoveryRetry() {
+			return false
+		}
+	}
 
 	for _, message := range messages {
 		select {
 		case <-f.stop:
+			return false
+		case <-f.ctx.Done():
 			return false
 		case <-f.Ready():
 		}
@@ -80,9 +94,25 @@ func (f *fetch) Fetch() {
 		select {
 		case <-f.stop:
 			return
+		case <-f.ctx.Done():
+			return
 		case <-f.Ready():
 			f.tryFetchMessage()
 		}
+	}
+}
+
+func (f *fetch) waitForRecoveryRetry() bool {
+	timer := time.NewTimer(recoveryRetryDelay)
+	defer timer.Stop()
+
+	select {
+	case <-f.stop:
+		return false
+	case <-f.ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -168,22 +198,25 @@ func (f *fetch) Closed() bool {
 	}
 }
 
-func (f *fetch) inprogressMessages() []string {
+func (f *fetch) inprogressMessages() ([]string, error) {
 	conn, err := f.pool.GetContext(f.ctx)
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
 			Logger.Errorln("failed to get Redis connection", err)
 		}
-		return nil
+		return nil, err
 	}
 	defer conn.Close()
 
 	messages, err := redis.Strings(redis.DoContext(conn, f.ctx, "lrange", f.inprogressQueue(), 0, -1))
-	if err != nil && !errors.Is(err, context.Canceled) {
-		Logger.Errorln("failed to fetch messages in progress", err)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			Logger.Errorln("failed to fetch messages in progress", err)
+		}
+		return nil, err
 	}
 
-	return messages
+	return messages, nil
 }
 
 func (f *fetch) inprogressQueue() string {

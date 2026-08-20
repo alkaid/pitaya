@@ -46,6 +46,7 @@ import (
 	serializemocks "github.com/alkaid/pitaya/v2/serialize/mocks"
 	"github.com/alkaid/pitaya/v2/session"
 	sessionmocks "github.com/alkaid/pitaya/v2/session/mocks"
+	"github.com/alkaid/pitaya/v2/util"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -73,6 +74,10 @@ func (m *MyComp) RemoteRes(ctx context.Context, b *test.SomeStruct) (*test.SomeS
 
 func (m *MyComp) RemoteErr(ctx context.Context) (*test.SomeStruct, error) {
 	return nil, apierrors.FromError(errors.New("remote err"))
+}
+
+func (m *MyComp) RemotePanic(context.Context) (*test.SomeStruct, error) {
+	panic("secret remote panic detail")
 }
 
 type unregisteredStruct struct{}
@@ -394,6 +399,12 @@ func TestRemoteServiceHandleRPCUser(t *testing.T) {
 	rtErr := route.NewRoute("", uuid.New().String(), uuid.New().String())
 	compErr := &component.Remote{Receiver: reflect.ValueOf(tObj), Method: m, HasArgs: m.Type.NumIn() > 2}
 
+	m, ok = reflect.TypeOf(tObj).MethodByName("RemotePanic")
+	assert.True(t, ok)
+	assert.NotNil(t, m)
+	rtPanic := route.NewRoute("", uuid.New().String(), uuid.New().String())
+	compPanic := &component.Remote{Receiver: reflect.ValueOf(tObj), Method: m, HasArgs: m.Type.NumIn() > 2}
+
 	m, ok = reflect.TypeOf(tObj).MethodByName("Remote2")
 	assert.True(t, ok)
 	assert.NotNil(t, m)
@@ -413,12 +424,14 @@ func TestRemoteServiceHandleRPCUser(t *testing.T) {
 		req          *protos.Request
 		rt           *route.Route
 		errSubstring string
+		forbidden    string
 	}{
-		{"remote_not_found", &protos.Request{Msg: &protos.Msg{}}, route.NewRoute("bla", "bla", "bla"), "route not found"},
-		{"failed_unmarshal", &protos.Request{Msg: &protos.Msg{Data: []byte("dd")}}, rt, "reflect: Call using zero Value argument"},
-		{"failed_pcall", &protos.Request{Msg: &protos.Msg{}}, rtErr, "remote err"},
-		{"success_nil_response", &protos.Request{Msg: &protos.Msg{}}, rtStr, ""},
-		{"success_response", &protos.Request{Msg: &protos.Msg{Data: b}}, rtRes, ""},
+		{"remote_not_found", &protos.Request{Msg: &protos.Msg{}}, route.NewRoute("bla", "bla", "bla"), "route not found", ""},
+		{"failed_unmarshal", &protos.Request{Msg: &protos.Msg{Data: []byte("dd")}}, rt, util.ErrRPCHandlerPanic.Error(), ""},
+		{"failed_pcall", &protos.Request{Msg: &protos.Msg{}}, rtErr, "remote err", ""},
+		{"panic_is_sanitized", &protos.Request{Msg: &protos.Msg{}}, rtPanic, util.ErrRPCHandlerPanic.Error(), "secret remote panic detail"},
+		{"success_nil_response", &protos.Request{Msg: &protos.Msg{}}, rtStr, "", ""},
+		{"success_response", &protos.Request{Msg: &protos.Msg{Data: b}}, rtRes, "", ""},
 	}
 
 	for _, table := range tables {
@@ -437,6 +450,7 @@ func TestRemoteServiceHandleRPCUser(t *testing.T) {
 
 			svc.remotes[rt.Short()] = comp
 			svc.remotes[rtErr.Short()] = compErr
+			svc.remotes[rtPanic.Short()] = compPanic
 			svc.remotes[rtStr.Short()] = compStr
 			svc.remotes[rtRes.Short()] = compRes
 
@@ -445,6 +459,9 @@ func TestRemoteServiceHandleRPCUser(t *testing.T) {
 			assert.NoError(t, err)
 			if table.errSubstring != "" {
 				assert.Contains(t, res.Status.Message, table.errSubstring)
+				if table.forbidden != "" {
+					assert.NotContains(t, res.Status.Message, table.forbidden)
+				}
 			} else if table.req.Msg.Data != nil {
 				assert.NotNil(t, res.Data)
 			}
@@ -504,7 +521,7 @@ func TestRemoteServiceHandleRPCUserWithHooks(t *testing.T) {
 		modifiedOutputError error
 	}{
 		{"remote_not_found", &protos.Request{Msg: &protos.Msg{}}, route.NewRoute("bla", "bla", "bla"), nil, "route not found", false, false, nil, nil, nil, nil, nil},
-		{"failed_unmarshal", &protos.Request{Msg: &protos.Msg{Data: []byte("dd")}}, rt, nil, "reflect: Call using zero Value argument", true, true, nil, nil, nil, nil, nil},
+		{"failed_unmarshal", &protos.Request{Msg: &protos.Msg{Data: []byte("dd")}}, rt, nil, util.ErrRPCHandlerPanic.Error(), true, true, nil, nil, nil, nil, nil},
 		{"failed_pcall", &protos.Request{Msg: &protos.Msg{}}, rtErr, nil, "remote err", true, true, nil, nil, nil, nil, nil},
 		{"failed_before_hook", &protos.Request{Msg: &protos.Msg{}}, rtErr, nil, "before hook err", true, false, nil, nil, fmt.Errorf("before hook err"), nil, nil},
 		{"failed_pcall_modified_err", &protos.Request{Msg: &protos.Msg{}}, rtErr, nil, "remote err modified output", true, true, nil, nil, nil, nil, fmt.Errorf("remote err modified output")},

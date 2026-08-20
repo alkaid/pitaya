@@ -154,7 +154,7 @@ The root gate skips only the separately verified `pitaya-cli`, `tools`, and
 `xk6-pitaya` modules. Adding or removing a nested `go.mod` fails the gate until
 the module has an explicit compile/test lane and is registered in the tool.
 
-The current conservative baseline is 9178/11806 statements (77.74%), generated
+The current conservative baseline is 9348/11952 statements (78.21%), generated
 from two independently green stamped runs at the same clean commit using the
 lower package count from either run. Absolute enforcement is enabled: overall
 coverage must remain at least 70%, and `cluster`, `co`, `service`, and `session`

@@ -14,6 +14,7 @@ import (
 	"github.com/alkaid/pitaya/v2/component"
 	"github.com/alkaid/pitaya/v2/constants"
 	pcontext "github.com/alkaid/pitaya/v2/context"
+	rpccontext "github.com/alkaid/pitaya/v2/internal/rpccontext"
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/protos/test"
 	"github.com/stretchr/testify/assert"
@@ -79,7 +80,7 @@ func TestRPCIdempotencyInfoIsVisibleOnlyAtCurrentRPCBoundary(t *testing.T) {
 	)
 	wantStoreKey, err := idempotencyStoreKey(ctx, server, key)
 	require.NoError(t, err)
-	wantFingerprint, err := rpcRequestFingerprint(request)
+	wantFingerprint, err := rpcRequestFingerprint(request, key, false, "")
 	require.NoError(t, err)
 
 	response, err := remote.Call(ctx, request)
@@ -248,7 +249,7 @@ func TestValidateOwnerFence(t *testing.T) {
 	assert.ErrorIs(t, validateOwnerFence(zero, server), constants.ErrStaleOwnerEpoch)
 }
 
-func TestRPCRequestFingerprintIgnoresRetryEnvelopeButDetectsCommandChanges(t *testing.T) {
+func TestRPCRequestFingerprintKeepsOrdinaryCallerIdentity(t *testing.T) {
 	metadata, err := pcontext.Encode(pcontext.AddListToPropagateCtx(
 		context.Background(),
 		constants.IdempotencyKey, "command-1",
@@ -257,7 +258,7 @@ func TestRPCRequestFingerprintIgnoresRetryEnvelopeButDetectsCommandChanges(t *te
 		constants.RequestTimeout, "5s",
 		constants.RequestIDKey, "request-1",
 		constants.PeerIDKey, "worker-1",
-		constants.PeerServiceKey, "worker",
+		constants.PeerServiceKey, "worker-a",
 		"tenant", "east",
 	))
 	require.NoError(t, err)
@@ -268,7 +269,7 @@ func TestRPCRequestFingerprintIgnoresRetryEnvelopeButDetectsCommandChanges(t *te
 		FrontendID: "frontend-1",
 		Metadata:   metadata,
 	}
-	first, err := rpcRequestFingerprint(request)
+	first, err := rpcRequestFingerprint(request, "command-1", false, "")
 	require.NoError(t, err)
 	request.Msg.Reply = "reply-2"
 	request.Metadata, err = pcontext.Encode(pcontext.AddListToPropagateCtx(
@@ -278,42 +279,147 @@ func TestRPCRequestFingerprintIgnoresRetryEnvelopeButDetectsCommandChanges(t *te
 		constants.OwnerEpochKey, "8",
 		constants.RequestTimeout, "10s",
 		constants.RequestIDKey, "request-2",
-		constants.PeerIDKey, "worker-2",
-		constants.PeerServiceKey, "worker",
+		constants.PeerIDKey, "worker-1",
+		constants.PeerServiceKey, "worker-a",
 		"tenant", "east",
 	))
 	require.NoError(t, err)
-	retry, err := rpcRequestFingerprint(request)
+	retry, err := rpcRequestFingerprint(request, "command-1", false, "")
 	require.NoError(t, err)
 	assert.Equal(t, first, retry)
+
+	for name, mutate := range map[string]func(*protos.Request){
+		"frontend ID": func(candidate *protos.Request) {
+			candidate.FrontendID = "frontend-2"
+		},
+		"peer ID": func(candidate *protos.Request) {
+			candidate.Metadata, err = pcontext.Encode(pcontext.AddListToPropagateCtx(
+				context.Background(),
+				constants.IdempotencyKey, "command-1",
+				constants.PeerIDKey, "worker-2",
+				constants.PeerServiceKey, "worker-a",
+				"tenant", "east",
+			))
+			require.NoError(t, err)
+		},
+		"peer service": func(candidate *protos.Request) {
+			candidate.Metadata, err = pcontext.Encode(pcontext.AddListToPropagateCtx(
+				context.Background(),
+				constants.IdempotencyKey, "command-1",
+				constants.PeerIDKey, "worker-1",
+				constants.PeerServiceKey, "worker-b",
+				"tenant", "east",
+			))
+			require.NoError(t, err)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			candidate := proto.Clone(request).(*protos.Request)
+			mutate(candidate)
+			fingerprint, err := rpcRequestFingerprint(candidate, "command-1", false, "")
+			require.NoError(t, err)
+			assert.NotEqual(t, first, fingerprint)
+		})
+	}
+
+	request.FrontendID = "frontend-2"
 	request.Metadata, err = pcontext.Encode(pcontext.AddListToPropagateCtx(
 		context.Background(),
+		constants.IdempotencyKey, "command-1",
+		constants.PeerIDKey, "worker-2",
+		constants.PeerServiceKey, "worker-b",
+		"tenant", "east",
+	))
+	require.NoError(t, err)
+	changed, err := rpcRequestFingerprint(request, "command-1", false, "")
+	require.NoError(t, err)
+	assert.NotEqual(t, first, changed)
+
+	request.FrontendID = "frontend-1"
+	request.Metadata, err = pcontext.Encode(pcontext.AddListToPropagateCtx(
+		context.Background(),
+		constants.IdempotencyKey, "command-1",
+		constants.PeerIDKey, "worker-1",
 		constants.PeerServiceKey, "worker",
 		"tenant", "west",
 	))
 	require.NoError(t, err)
-	changed, err := rpcRequestFingerprint(request)
+	changed, err = rpcRequestFingerprint(request, "command-1", false, "")
 	require.NoError(t, err)
 	assert.NotEqual(t, first, changed)
 	request.Metadata = metadata
 	request.Msg.Data = []byte("south")
-	changed, err = rpcRequestFingerprint(request)
+	changed, err = rpcRequestFingerprint(request, "command-1", false, "")
 	require.NoError(t, err)
 	assert.NotEqual(t, first, changed)
 	request.Msg.Data = []byte("north")
-	request.FrontendID = "frontend-2"
-	changed, err = rpcRequestFingerprint(request)
-	require.NoError(t, err)
-	assert.NotEqual(t, first, changed)
-	request.FrontendID = "frontend-1"
 	request.Session.Data = []byte("two")
-	changed, err = rpcRequestFingerprint(request)
+	changed, err = rpcRequestFingerprint(request, "command-1", false, "")
 	require.NoError(t, err)
 	assert.NotEqual(t, first, changed)
 }
 
+func TestRPCRequestFingerprintMakesReliableRetriesExecutorNeutral(t *testing.T) {
+	const key = "job-1"
+	digest := strings.Repeat("a", 64)
+	metadata := func(peerID, peerService string) []byte {
+		encoded, err := pcontext.Encode(pcontext.AddListToPropagateCtx(
+			context.Background(),
+			constants.IdempotencyKey, key,
+			constants.OwnerServerIDKey, "game-1",
+			constants.OwnerEpochKey, "7",
+			constants.RequestIDKey, "request-1",
+			constants.PeerIDKey, peerID,
+			constants.PeerServiceKey, peerService,
+			rpccontext.ReliableJobKey, key,
+			rpccontext.ReliableJobMetadataDigestKey, digest,
+			"tenant", "east",
+		))
+		require.NoError(t, err)
+		return encoded
+	}
+	request := &protos.Request{
+		Type:       protos.RPCType_User,
+		Msg:        &protos.Msg{Route: "game.player.move", Data: []byte("north"), Reply: "reply-1"},
+		FrontendID: "frontend-1",
+		Metadata:   metadata("worker-1", "worker-a"),
+	}
+	first, err := rpcRequestFingerprint(request, key, true, digest)
+	require.NoError(t, err)
+
+	request.FrontendID = "frontend-2"
+	request.Msg.Reply = "reply-2"
+	request.Metadata = metadata("worker-2", "worker-b")
+	retry, err := rpcRequestFingerprint(request, key, true, digest)
+	require.NoError(t, err)
+	assert.Equal(t, first, retry)
+
+	otherDigest := strings.Repeat("b", 64)
+	request.Metadata, err = pcontext.Encode(pcontext.AddListToPropagateCtx(
+		context.Background(),
+		constants.IdempotencyKey, key,
+		rpccontext.ReliableJobKey, key,
+		rpccontext.ReliableJobMetadataDigestKey, otherDigest,
+		"tenant", "east",
+	))
+	require.NoError(t, err)
+	changed, err := rpcRequestFingerprint(request, key, true, otherDigest)
+	require.NoError(t, err)
+	assert.NotEqual(t, first, changed)
+}
+
+func TestRPCRequestFingerprintDistinguishesLargeJSONIntegers(t *testing.T) {
+	request := &protos.Request{Metadata: []byte(`{"sequence":9007199254740992}`)}
+	first, err := rpcRequestFingerprint(request, "", false, "")
+	require.NoError(t, err)
+	request.Metadata = []byte(`{"sequence":9007199254740993}`)
+	second, err := rpcRequestFingerprint(request, "", false, "")
+	require.NoError(t, err)
+	assert.NotEqual(t, first, second)
+}
+
 func TestRPCRequestFingerprintRejectsMalformedMetadata(t *testing.T) {
-	_, err := rpcRequestFingerprint(&protos.Request{Metadata: []byte("not-json")})
+	_, err := rpcRequestFingerprint(&protos.Request{Metadata: []byte("not-json")}, "", false, "")
 	assert.ErrorContains(t, err, "fingerprint RPC metadata")
 }
 
@@ -481,9 +587,9 @@ func TestValidateOwnerFenceRejectsMalformedMetadata(t *testing.T) {
 }
 
 func TestRPCRequestFingerprintHandlesNilRequest(t *testing.T) {
-	first, err := rpcRequestFingerprint(nil)
+	first, err := rpcRequestFingerprint(nil, "", false, "")
 	require.NoError(t, err)
-	second, err := rpcRequestFingerprint(nil)
+	second, err := rpcRequestFingerprint(nil, "", false, "")
 	require.NoError(t, err)
 	assert.Equal(t, first, second)
 }

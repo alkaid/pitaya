@@ -164,6 +164,41 @@ func TestRedisIdempotencyClaimDeadlineExcludesResponseDelay(t *testing.T) {
 	assert.Less(t, claim.leaseDeadline, finished.Add(store.options.LeaseTTL-responseDelay/2))
 }
 
+func TestRedisIdempotencyStoreSanitizesClaimInfrastructureError(t *testing.T) {
+	const secret = "redis://worker:claim-secret@redis.internal:6379"
+	client := &scriptedRedisIdempotencyClient{eval: func(context.Context, string, []string, ...interface{}) *redis.Cmd {
+		return redis.NewCmdResult(nil, errors.New(secret))
+	}}
+	store := testRedisIdempotencyStore(client)
+
+	response, err := store.Execute(context.Background(), "scope:key", "fingerprint", func(context.Context) (*protos.Response, error) {
+		t.Fatal("operation executed without an idempotency claim")
+		return nil, nil
+	})
+
+	require.Nil(t, response)
+	require.ErrorIs(t, err, ErrIdempotencyStoreUnavailable)
+	assert.Contains(t, err.Error(), secret)
+	assertIdempotencyWireError(t, err, ErrIdempotencyStoreUnavailable, secret)
+}
+
+func TestRedisIdempotencyStorePreservesParentCancellationDuringClaim(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	client := &scriptedRedisIdempotencyClient{eval: func(ctx context.Context, _ string, _ []string, _ ...interface{}) *redis.Cmd {
+		return redis.NewCmdResult(nil, ctx.Err())
+	}}
+	store := testRedisIdempotencyStore(client)
+
+	_, err := store.Execute(ctx, "scope:key", "fingerprint", func(context.Context) (*protos.Response, error) {
+		t.Fatal("operation executed after parent cancellation")
+		return nil, nil
+	})
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.NotErrorIs(t, err, ErrIdempotencyStoreUnavailable)
+}
+
 func TestRedisIdempotencyStoreReplaysDoneResponseWithoutExecuting(t *testing.T) {
 	result, err := encodeRedisIdempotencyResult(&protos.Response{Data: []byte("cached")}, nil)
 	require.NoError(t, err)
@@ -226,11 +261,12 @@ func TestRedisIdempotencyStoreWaitHonorsContext(t *testing.T) {
 
 func TestRedisIdempotencyStoreReportsCommitUncertainty(t *testing.T) {
 	for _, test := range []struct {
-		name        string
-		complete    *redis.Cmd
-		expectedErr error
+		name            string
+		complete        *redis.Cmd
+		expectedErr     error
+		forbiddenDetail string
 	}{
-		{name: "transport error", complete: redis.NewCmdResult(nil, errors.New("connection lost")), expectedErr: constants.ErrIdempotencyCommitUnknown},
+		{name: "transport error", complete: redis.NewCmdResult(nil, errors.New("connection lost")), expectedErr: constants.ErrIdempotencyCommitUnknown, forbiddenDetail: "connection lost"},
 		{name: "owner lost", complete: redis.NewCmdResult(int64(0), nil), expectedErr: constants.ErrIdempotencyLeaseLost},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -249,7 +285,46 @@ func TestRedisIdempotencyStoreReportsCommitUncertainty(t *testing.T) {
 			assert.Equal(t, int32(http.StatusInternalServerError), response.Status.Code)
 			assert.NotEqual(t, []byte("performed"), response.Data)
 			assert.ErrorIs(t, err, test.expectedErr)
+			assertIdempotencyWireError(t, err, test.expectedErr, test.forbiddenDetail)
 		})
+	}
+}
+
+func TestRedisIdempotencyStoreSanitizesLeaseRenewalError(t *testing.T) {
+	const secret = "redis TLS handshake failed for lease-secret.internal"
+	var renewCalls atomic.Int32
+	client := &scriptedRedisIdempotencyClient{eval: func(_ context.Context, script string, _ []string, _ ...interface{}) *redis.Cmd {
+		require.Equal(t, redisIdempotencyRenewScript, script)
+		renewCalls.Add(1)
+		return redis.NewCmdResult(nil, errors.New(secret))
+	}}
+	store := testRedisIdempotencyStore(client)
+	store.options.HeartbeatInterval = time.Millisecond
+	executionCtx, cancelExecution := context.WithCancelCause(context.Background())
+
+	err := store.renewLease(
+		context.Background(),
+		"scope:key",
+		"fingerprint",
+		"owner",
+		time.Now().Add(200*time.Millisecond),
+		cancelExecution,
+	)
+
+	require.Positive(t, renewCalls.Load())
+	require.ErrorIs(t, err, constants.ErrIdempotencyLeaseLost)
+	require.ErrorIs(t, context.Cause(executionCtx), constants.ErrIdempotencyLeaseLost)
+	assert.Contains(t, err.Error(), secret)
+	assertIdempotencyWireError(t, err, constants.ErrIdempotencyLeaseLost, secret)
+}
+
+func assertIdempotencyWireError(t *testing.T, err, expected error, forbiddenDetail string) {
+	t.Helper()
+	response := rpcErrorResponse(err)
+	require.NotNil(t, response.Status)
+	assert.Equal(t, expected.Error(), response.Status.Message)
+	if forbiddenDetail != "" {
+		assert.NotContains(t, response.Status.Message, forbiddenDetail)
 	}
 }
 

@@ -25,6 +25,7 @@ import (
 	"errors"
 	"math/rand"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/alkaid/pitaya/v2/cluster"
@@ -35,6 +36,7 @@ import (
 	"github.com/alkaid/pitaya/v2/conn/packet"
 	"github.com/alkaid/pitaya/v2/constants"
 	pcontext "github.com/alkaid/pitaya/v2/context"
+	rpccontext "github.com/alkaid/pitaya/v2/internal/rpccontext"
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/route"
 	serializemocks "github.com/alkaid/pitaya/v2/serialize/mocks"
@@ -385,6 +387,8 @@ func TestAgentRemoteSendRequestAddsTargetOwnerFence(t *testing.T) {
 	) (*protos.Response, error) {
 		assert.Equal(t, target.ID, pcontext.GetFromPropagateCtx(ctx, constants.OwnerServerIDKey))
 		assert.Equal(t, "73", pcontext.GetFromPropagateCtx(ctx, constants.OwnerEpochKey))
+		assert.Equal(t, "job-1", pcontext.GetFromPropagateCtx(ctx, rpccontext.ReliableJobKey))
+		assert.Equal(t, strings.Repeat("a", 64), pcontext.GetFromPropagateCtx(ctx, rpccontext.ReliableJobMetadataDigestKey))
 		return &protos.Response{}, nil
 	})
 
@@ -402,8 +406,18 @@ func TestAgentRemoteSendRequestAddsTargetOwnerFence(t *testing.T) {
 	)
 	require.NoError(t, err)
 
+	ctx := rpccontext.WithReliableRPCJob(
+		pcontext.AddListToPropagateCtx(
+			context.Background(),
+			constants.IdempotencyKey, "job-1",
+			rpccontext.ReliableJobKey, "spoofed-job",
+			rpccontext.ReliableJobMetadataDigestKey, strings.Repeat("f", 64),
+		),
+		"job-1",
+		strings.Repeat("a", 64),
+	)
 	_, err = remote.SendRequest(
-		context.Background(),
+		ctx,
 		target.ID,
 		constants.SessionBindRoute,
 		[]byte("bind"),

@@ -2626,6 +2626,38 @@ func TestEtcdSDInvalidWatchResponseRecoversFromSnapshot(t *testing.T) {
 	assert.Positive(t, revisionFloor)
 }
 
+func TestEtcdSDInitialCreatedWatchBuildsSnapshot(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
+	embedded, cli := helpers.GetTestEtcd(t)
+	t.Cleanup(func() { embedded.Terminate(t) })
+	self := NewServer("frontend-self", "frontend", true, nil)
+	sd := getEtcdSD(t, cfg, self, cli)
+	sd.namespaceClient(sd.cli)
+
+	actual := NewServer("room-actual", "room", false, nil)
+	_, err := sd.cli.Put(context.Background(), getKey(actual.ID, actual.Type), actual.AsJSONString())
+	require.NoError(t, err)
+	sd.cli.Watcher = &invalidFirstWatcher{
+		Watcher:  sd.cli.Watcher,
+		response: clientv3.WatchResponse{Created: true},
+	}
+
+	watchCtx, cancelWatch := context.WithCancel(context.Background())
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		sd.watchEtcdChanges(watchCtx)
+	}()
+	t.Cleanup(func() {
+		cancelWatch()
+		<-watchDone
+	})
+	helpers.ShouldEventuallyReturn(t, func() bool {
+		_, getErr := sd.GetServer(actual.ID)
+		return getErr == nil
+	}, true, 20*time.Millisecond, 5*time.Second)
+}
+
 func TestEtcdSDKeysOnlySyncRepairsExistingServerRevision(t *testing.T) {
 	cfg := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
 	embedded, cli := helpers.GetTestEtcd(t)

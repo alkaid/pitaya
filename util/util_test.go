@@ -77,6 +77,20 @@ func TestLogRecoveredPanicCannotEscapeRecoveryBoundary(t *testing.T) {
 	})
 }
 
+func TestSafeCallHandlesNormalAndRecoveredCalls(t *testing.T) {
+	called := false
+	SafeCall(nil, func() { called = true })
+	require.True(t, called)
+
+	var recovered any
+	SafeCall(func(value any) { recovered = value }, func() { panic("safe-call panic") })
+	assert.Equal(t, "safe-call panic", recovered)
+
+	require.NotPanics(t, func() {
+		SafeCall(nil, func() { panic(panicFormattingValue{}) })
+	})
+}
+
 func (s *someStruct) TestFunc(arg1 int, arg2 string) (*someStruct, error) {
 	return &someStruct{
 		A: arg1,
@@ -115,8 +129,8 @@ func TestPcall(t *testing.T) {
 		{"test_pcall_2", s, "TestFunc", []reflect.Value{reflect.ValueOf(s), reflect.ValueOf(20), reflect.ValueOf("ble")}, &someStruct{A: 20, B: "ble"}, nil},
 		{"test_pcall_3", s, "TestFunc", []reflect.Value{reflect.ValueOf(s), reflect.ValueOf(11), reflect.ValueOf("blb")}, &someStruct{A: 11, B: "blb"}, nil},
 		{"test_pcall_4", s, "TestFuncErr", []reflect.Value{reflect.ValueOf(s), reflect.ValueOf("blberror")}, nil, errors.New("blberror")},
-		{"test_pcall_5", s, "TestFuncThrow", []reflect.Value{reflect.ValueOf(s)}, nil, errors.New("ohnoes")},
-		{"test_pcall_formatting_panic", s, "TestFuncThrowFormattingValue", []reflect.Value{reflect.ValueOf(s)}, nil, errors.New("rpc call internal error - TestFuncThrowFormattingValue")},
+		{"test_pcall_5", s, "TestFuncThrow", []reflect.Value{reflect.ValueOf(s)}, nil, ErrRPCHandlerPanic},
+		{"test_pcall_formatting_panic", s, "TestFuncThrowFormattingValue", []reflect.Value{reflect.ValueOf(s)}, nil, ErrRPCHandlerPanic},
 		{"test_pcall_6", s, "TestFuncNil", []reflect.Value{reflect.ValueOf(s), reflect.ValueOf("kkk")}, nil, constants.ErrReplyShouldBeNotNull},
 	}
 
