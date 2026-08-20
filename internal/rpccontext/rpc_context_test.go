@@ -11,12 +11,17 @@ import (
 func TestReliableRPCJobContextLifecycle(t *testing.T) {
 	_, _, ok := ReliableRPCJobFromContext(nil)
 	assert.False(t, ok)
+	markedFromNil := WithReliableRPCJob(nil, "job-from-nil", "digest-from-nil")
+	id, digest, ok := ReliableRPCJobFromContext(markedFromNil)
+	assert.True(t, ok)
+	assert.Equal(t, "job-from-nil", id)
+	assert.Equal(t, "digest-from-nil", digest)
 
 	base := context.WithValue(context.Background(), struct{}{}, "preserved")
 	base, cancel := context.WithDeadline(base, time.Now().Add(time.Minute))
 	defer cancel()
 	marked := WithReliableRPCJob(base, "job-1", "digest-1")
-	id, digest, ok := ReliableRPCJobFromContext(marked)
+	id, digest, ok = ReliableRPCJobFromContext(marked)
 	assert.True(t, ok)
 	assert.Equal(t, "job-1", id)
 	assert.Equal(t, "digest-1", digest)

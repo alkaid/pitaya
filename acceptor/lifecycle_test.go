@@ -135,6 +135,23 @@ func (l *blockedErrorListener) Accept() (net.Conn, error) {
 func (l *blockedErrorListener) Close() error   { return nil }
 func (l *blockedErrorListener) Addr() net.Addr { return queuedListenerAddr{} }
 
+func TestTCPServeClosesAcceptedConnectionWhenContextCanceled(t *testing.T) {
+	listener := newQueuedListener(1)
+	server, peer := net.Pipe()
+	listener.connections <- server
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = peer.Close()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.NoError(t, peer.SetReadDeadline(time.Now().Add(time.Second)))
+	require.NoError(t, NewTCPAcceptor("unused").serve(ctx, listener))
+	_, err := peer.Read(make([]byte, 1))
+	require.ErrorIs(t, err, io.EOF)
+}
+
 func TestAcceptorStopBeforeServeIsSafeAndIdempotent(t *testing.T) {
 	tests := []struct {
 		name string
