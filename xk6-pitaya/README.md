@@ -3,7 +3,7 @@
 `xk6-pitaya` is a [k6](https://go.k6.io/k6) extension that provides a [Pitaya](https://github.com/alkaid/pitaya) client implementation.
 
 Its module path is `github.com/alkaid/pitaya/xk6-pitaya`. The module requires Go
-1.26.5 and is versioned separately from the root framework. Building the host
+1.26.5 or newer and is versioned separately from the root framework. Building the host
 binary needs the pinned xk6/k6 versions below; building the image also needs
 Docker. No public `@latest` installation is documented until a submodule tag has
 been published and verified without local replacements.
@@ -97,6 +97,19 @@ export default async () => {
 export function teardown() {
 }
 ```
+
+## Request completion behavior
+
+Each request publishes its response waiter before the receive loop can deliver
+the matching response. A request promise is completed once and its waiter is
+removed after a response, send failure, timeout, VU cancellation, or disconnect.
+Disconnecting rejects outstanding requests immediately instead of leaving them
+pending until their individual timeouts. Responses that arrive after cleanup,
+or duplicate a response already delivered, are discarded.
+
+The request timeout remains configured by `requestTimeoutMs`. A response body
+that is valid JSON resolves to the decoded value; a non-JSON response continues
+to resolve to its raw byte array for compatibility.
 
 ## Running the scenario 1 example
 

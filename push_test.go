@@ -96,7 +96,7 @@ func TestSendToUsersLocalSession(t *testing.T) {
 
 			config := config.NewDefaultPitayaConfig()
 			builder := newAppTestBuilder(true, "testtype", Standalone, map[string]string{}, *config)
-			builder.SessionPool = mockSessionPool
+			replaceBuilderSessionPoolForTest(builder, mockSessionPool)
 			app := builder.Build().(*App)
 			errArr, err := app.SendPushToUsers(route, data, []string{uid1, uid2}, app.server.Type)
 
@@ -151,7 +151,7 @@ func TestSendToUsersRemoteSession(t *testing.T) {
 
 			config := config.NewDefaultPitayaConfig()
 			builder := newAppTestBuilder(true, "testtype", Cluster, map[string]string{}, *config)
-			builder.SessionPool = mockSessionPool
+			replaceBuilderSessionPoolForTest(builder, mockSessionPool)
 			builder.RPCClient = mockRPCClient
 			app := builder.Build()
 

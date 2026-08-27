@@ -76,13 +76,14 @@ func (mi *ModuleInstance) NewClient(call sobek.ConstructorCall) *sobek.Object {
 	}
 
 	client := &Client{
-		vu:        mi.vu,
-		client:    nil,
-		handshake: opts.HandshakeData,
-		responses: make(map[uint]chan []byte, 100),
-		pushes:    make(map[string]chan []byte, 100),
-		timeout:   time.Duration(opts.RequestTimeoutMs) * time.Millisecond,
-		metrics:   mi.metrics,
+		vu:            mi.vu,
+		client:        nil,
+		handshake:     opts.HandshakeData,
+		responses:     make(map[uint]*pendingResponse, 100),
+		connectionErr: errClientNotConnected,
+		pushes:        make(map[string]chan []byte, 100),
+		timeout:       time.Duration(opts.RequestTimeoutMs) * time.Millisecond,
+		metrics:       mi.metrics,
 	}
 
 	client.client = pitayaclient.New(client.timeout)

@@ -21,14 +21,21 @@
 package acceptorwrapper
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
 
+	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/metrics"
+	metricsmocks "github.com/alkaid/pitaya/v2/metrics/mocks"
 	"github.com/alkaid/pitaya/v2/mocks"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 func TestRateLimiterGetNextMessage(t *testing.T) {
@@ -170,4 +177,75 @@ func TestRateLimiterShouldRateLimit(t *testing.T) {
 			assert.Equal(t, table.should, should)
 		})
 	}
+}
+
+func TestRateLimiterDropsPayloadFromDebugLogsAndPreservesCounter(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	conn := mocks.NewMockPlayerConn(ctrl)
+	reporter := metricsmocks.NewMockReporter(ctrl)
+	const secret = "unique-secret-auth-token-7a08c"
+	terminalErr := errors.New("stop reading")
+	accepted := []byte("accepted")
+	secretPayload := []byte(secret)
+
+	gomock.InOrder(
+		conn.EXPECT().GetNextMessage().Return(accepted, nil),
+		conn.EXPECT().GetNextMessage().Return(secretPayload, nil),
+		conn.EXPECT().GetNextMessage().Return(secretPayload, nil),
+		conn.EXPECT().GetNextMessage().Return(secretPayload, nil),
+		conn.EXPECT().GetNextMessage().Return(nil, terminalErr),
+	)
+	reporter.EXPECT().ReportCount(metrics.ExceededRateLimiting, map[string]string{}, float64(1)).Times(3)
+
+	var output bytes.Buffer
+	encoderConfig := zap.NewProductionEncoderConfig()
+	core := zapcore.NewCore(zapcore.NewJSONEncoder(encoderConfig), zapcore.AddSync(&output), zap.DebugLevel)
+	previousLogger := logger.Zap
+	logger.Zap = zap.New(core)
+	t.Cleanup(func() { logger.Zap = previousLogger })
+
+	limiter := NewRateLimiter([]metrics.Reporter{reporter}, conn, 1, time.Hour, false)
+	message, err := limiter.GetNextMessage()
+	require.NoError(t, err)
+	require.Equal(t, accepted, message)
+	message, err = limiter.GetNextMessage()
+	require.ErrorIs(t, err, terminalErr)
+	require.Nil(t, message)
+	require.NotContains(t, output.String(), secret)
+
+	lines := bytes.Split(bytes.TrimSpace(output.Bytes()), []byte("\n"))
+	require.Len(t, lines, 3)
+	for _, line := range lines {
+		entry := map[string]any{}
+		require.NoError(t, json.Unmarshal(line, &entry))
+		require.Equal(t, "debug", entry["level"])
+		require.Equal(t, "rate limit exceeded", entry["msg"])
+		require.Equal(t, float64(len(secretPayload)), entry["message_length"])
+		require.Equal(t, float64(1), entry["limit"])
+		require.Contains(t, entry, "interval")
+		require.NotContains(t, entry, "data")
+	}
+}
+
+func TestRateLimiterDoesNotLogAcceptedPayload(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	conn := mocks.NewMockPlayerConn(ctrl)
+	payload := []byte("ordinary-message")
+	conn.EXPECT().GetNextMessage().Return(payload, nil)
+
+	var output bytes.Buffer
+	core := zapcore.NewCore(
+		zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()),
+		zapcore.AddSync(&output),
+		zap.DebugLevel,
+	)
+	previousLogger := logger.Zap
+	logger.Zap = zap.New(core)
+	t.Cleanup(func() { logger.Zap = previousLogger })
+
+	limiter := NewRateLimiter(nil, conn, 1, time.Second, false)
+	message, err := limiter.GetNextMessage()
+	require.NoError(t, err)
+	require.Equal(t, payload, message)
+	require.Empty(t, output.String())
 }

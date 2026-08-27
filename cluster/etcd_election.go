@@ -28,6 +28,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/alkaid/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/util"
 	"go.etcd.io/etcd/api/v3/v3rpc/rpctypes"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency"
@@ -689,7 +690,7 @@ func (sd *etcdServiceDiscovery) notifyLeaderChange(generation uint64, leader str
 		listener := sd.election.listener
 		sd.election.leaderMu.Unlock()
 		if listener != nil {
-			listener(leader)
+			executeLeaderChangeListener(listener, generation, leader, initial)
 		}
 	})
 	if accepted && initial {
@@ -700,4 +701,20 @@ func (sd *etcdServiceDiscovery) notifyLeaderChange(generation uint64, leader str
 		sd.election.leaderMu.Unlock()
 	}
 	return accepted
+}
+
+func executeLeaderChangeListener(listener LeaderChangeListener, generation uint64, leader string, initial bool) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			util.LogRecoveredPanic(
+				logger.Zap,
+				"etcd leader listener panicked",
+				recovered,
+				zap.String("callback_kind", "leader_listener"),
+				zap.Uint64("generation", generation),
+				zap.Bool("initial", initial),
+			)
+		}
+	}()
+	listener(leader)
 }

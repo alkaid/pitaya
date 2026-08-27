@@ -48,14 +48,6 @@ func (c PitayaConfig) Validate() error {
 	}
 
 	nonNegativeInt("pitaya.buffer.agent.messages", c.Buffer.Agent.Messages)
-	nonNegativeInt("pitaya.buffer.handler.localprocess", c.Buffer.Handler.LocalProcess)
-	nonNegativeInt("pitaya.buffer.handler.remoteprocess", c.Buffer.Handler.RemoteProcess)
-	if c.Concurrency.Handler.Dispatch <= 0 {
-		errs = append(errs, fmt.Errorf(
-			"pitaya.concurrency.handler.dispatch must be positive, got %d",
-			c.Concurrency.Handler.Dispatch,
-		))
-	}
 
 	if c.Metrics.Prometheus == nil {
 		errs = append(errs, errors.New("pitaya.metrics.prometheus must be configured"))

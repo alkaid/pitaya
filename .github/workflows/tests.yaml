@@ -209,8 +209,8 @@ jobs:
     if: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
     needs: compile
     runs-on: ubuntu-24.04
-    # Leave setup and failure-diagnostic headroom beyond go test's 10m timeout.
-    timeout-minutes: 15
+    # Leave setup and failure-diagnostic headroom for the root and xk6 race sets.
+    timeout-minutes: 20
     steps:
     - name: Checkout
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -227,7 +227,7 @@ jobs:
       run: |
         GOWORK=off go mod download
         GOWORK=off go mod verify
-    - name: Run the full targeted race set
+    - name: Run the root and xk6 targeted race sets
       run: make test-race
 
   integration:

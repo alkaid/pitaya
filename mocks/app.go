@@ -591,13 +591,15 @@ func (mr *MockPitayaMockRecorder) KickBackend(ctx, uid, targetServerType, callba
 }
 
 // LazyRegister mocks base method.
-func (m *MockPitaya) LazyRegister(c component.Component, options ...component.Option) {
+func (m *MockPitaya) LazyRegister(c component.Component, options ...component.Option) error {
 	m.ctrl.T.Helper()
 	varargs := []any{c}
 	for _, a := range options {
 		varargs = append(varargs, a)
 	}
-	m.ctrl.Call(m, "LazyRegister", varargs...)
+	ret := m.ctrl.Call(m, "LazyRegister", varargs...)
+	ret0, _ := ret[0].(error)
+	return ret0
 }
 
 // LazyRegister indicates an expected call of LazyRegister.
@@ -608,13 +610,15 @@ func (mr *MockPitayaMockRecorder) LazyRegister(c any, options ...any) *gomock.Ca
 }
 
 // LazyRegisterRemote mocks base method.
-func (m *MockPitaya) LazyRegisterRemote(c component.Component, options ...component.Option) {
+func (m *MockPitaya) LazyRegisterRemote(c component.Component, options ...component.Option) error {
 	m.ctrl.T.Helper()
 	varargs := []any{c}
 	for _, a := range options {
 		varargs = append(varargs, a)
 	}
-	m.ctrl.Call(m, "LazyRegisterRemote", varargs...)
+	ret := m.ctrl.Call(m, "LazyRegisterRemote", varargs...)
+	ret0, _ := ret[0].(error)
+	return ret0
 }
 
 // LazyRegisterRemote indicates an expected call of LazyRegisterRemote.
@@ -887,9 +891,11 @@ func (mr *MockPitayaMockRecorder) Register(c any, options ...any) *gomock.Call {
 }
 
 // RegisterInterceptor mocks base method.
-func (m *MockPitaya) RegisterInterceptor(serviceName string, interceptor *component.Interceptor) {
+func (m *MockPitaya) RegisterInterceptor(serviceName string, interceptor *component.Interceptor) error {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "RegisterInterceptor", serviceName, interceptor)
+	ret := m.ctrl.Call(m, "RegisterInterceptor", serviceName, interceptor)
+	ret0, _ := ret[0].(error)
+	return ret0
 }
 
 // RegisterInterceptor indicates an expected call of RegisterInterceptor.
@@ -972,9 +978,11 @@ func (mr *MockPitayaMockRecorder) RegisterRemote(c any, options ...any) *gomock.
 }
 
 // RegisterRemoteInterceptor mocks base method.
-func (m *MockPitaya) RegisterRemoteInterceptor(serviceName string, interceptor *component.Interceptor) {
+func (m *MockPitaya) RegisterRemoteInterceptor(serviceName string, interceptor *component.Interceptor) error {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "RegisterRemoteInterceptor", serviceName, interceptor)
+	ret := m.ctrl.Call(m, "RegisterRemoteInterceptor", serviceName, interceptor)
+	ret0, _ := ret[0].(error)
+	return ret0
 }
 
 // RegisterRemoteInterceptor indicates an expected call of RegisterRemoteInterceptor.

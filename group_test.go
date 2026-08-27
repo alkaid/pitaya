@@ -495,7 +495,7 @@ func TestBroadcast(t *testing.T) {
 
 	config := config.NewDefaultPitayaConfig()
 	builder := newAppTestBuilder(true, "testtype", Cluster, map[string]string{}, *config)
-	builder.SessionPool = mockSessionPool
+	replaceBuilderSessionPoolForTest(builder, mockSessionPool)
 	app := builder.Build()
 	groupName := isolatedGroupName(t, app, "testBroadcast")
 
@@ -658,7 +658,7 @@ func TestGroupBroadcastLegacyBackendReusesSnapshotAcrossPages(t *testing.T) {
 	}
 	conf := config.NewDefaultPitayaConfig()
 	builder := newAppTestBuilder(true, "testtype", Cluster, map[string]string{}, *conf)
-	builder.SessionPool = pool
+	replaceBuilderSessionPoolForTest(builder, pool)
 	app := builder.Build().(*App)
 	app.groups = backend
 
@@ -695,7 +695,7 @@ func TestGroupBroadcastRejectsCrossPageDuplicateBeforeSendingPage(t *testing.T) 
 	}
 	conf := config.NewDefaultPitayaConfig()
 	builder := newAppTestBuilder(true, "testtype", Cluster, map[string]string{}, *conf)
-	builder.SessionPool = pool
+	replaceBuilderSessionPoolForTest(builder, pool)
 	app := builder.Build().(*App)
 	app.groups = backend
 
@@ -747,7 +747,7 @@ func TestGroupBroadcastWithOptionsStablePartialResult(t *testing.T) {
 
 	conf := config.NewDefaultPitayaConfig()
 	builder := newAppTestBuilder(true, "testtype", Cluster, map[string]string{}, *conf)
-	builder.SessionPool = pool
+	replaceBuilderSessionPoolForTest(builder, pool)
 	app := builder.Build()
 	groupName := createIsolatedTestGroup(t, app, "testBroadcastPartial")
 	assert.NoError(t, app.GroupAddMember(ctx, groupName, successUID))
@@ -794,7 +794,7 @@ func TestGroupBroadcastRateLimitSpansMembershipPages(t *testing.T) {
 
 	conf := config.NewDefaultPitayaConfig()
 	builder := newAppTestBuilder(true, "testtype", Cluster, map[string]string{}, *conf)
-	builder.SessionPool = pool
+	replaceBuilderSessionPoolForTest(builder, pool)
 	app := builder.Build()
 	groupName := createIsolatedTestGroup(t, app, "testBroadcastRateLimitPages")
 	for _, uid := range []string{"rate-a", "rate-b", "rate-c"} {
@@ -836,7 +836,7 @@ func TestGroupBroadcastResumesAfterLastCompletedPage(t *testing.T) {
 
 	conf := config.NewDefaultPitayaConfig()
 	builder := newAppTestBuilder(true, "testtype", Cluster, map[string]string{}, *conf)
-	builder.SessionPool = pool
+	replaceBuilderSessionPoolForTest(builder, pool)
 	app := builder.Build()
 	groupName := createIsolatedTestGroup(t, app, "testBroadcastResumePages")
 	for _, uid := range []string{"resume-a", "resume-b", "resume-c"} {
@@ -882,7 +882,7 @@ func TestGroupBroadcastCancellationStopsRemainingPushesWithoutRateLimit(t *testi
 
 	conf := config.NewDefaultPitayaConfig()
 	builder := newAppTestBuilder(true, "testtype", Cluster, map[string]string{}, *conf)
-	builder.SessionPool = pool
+	replaceBuilderSessionPoolForTest(builder, pool)
 	app := builder.Build()
 	groupName := createIsolatedTestGroup(t, app, "testBroadcastCancelWithoutRateLimit")
 	for _, uid := range []string{"cancel-a", "cancel-b", "cancel-c"} {

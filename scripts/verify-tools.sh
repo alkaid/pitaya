@@ -84,10 +84,48 @@ if (
 	exit 1
 fi
 
+go_version_at_least() {
+	local actual=${1#go}
+	local minimum=$2
+	local actual_major actual_minor actual_patch
+	local minimum_major minimum_minor minimum_patch
+
+	if [[ ! $actual =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+		return 2
+	fi
+	actual_major=${BASH_REMATCH[1]}
+	actual_minor=${BASH_REMATCH[2]}
+	actual_patch=${BASH_REMATCH[3]}
+
+	if [[ ! $minimum =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+		return 2
+	fi
+	minimum_major=${BASH_REMATCH[1]}
+	minimum_minor=${BASH_REMATCH[2]}
+	minimum_patch=${BASH_REMATCH[3]}
+
+	if ((actual_major != minimum_major)); then
+		((actual_major > minimum_major))
+		return
+	fi
+	if ((actual_minor != minimum_minor)); then
+		((actual_minor > minimum_minor))
+		return
+	fi
+	((actual_patch >= minimum_patch))
+}
+
 required_go=$(awk '$1 == "go" { print $2; exit }' "$repo_root/go.mod")
 actual_go=$(go env GOVERSION)
-if [[ $actual_go != "go$required_go" ]]; then
-	echo "Go $required_go is required (found ${actual_go#go})" >&2
+if go_version_at_least "$actual_go" "$required_go"; then
+	:
+else
+	version_status=$?
+	if ((version_status == 2)); then
+		echo "unable to compare Go versions: minimum $required_go, found $actual_go" >&2
+	else
+		echo "Go $required_go or newer is required (found ${actual_go#go})" >&2
+	fi
 	exit 1
 fi
 

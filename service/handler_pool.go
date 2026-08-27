@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 
@@ -35,25 +37,83 @@ func handlerNotFoundError(rt *route.Route) error {
 
 // HandlerPool ...
 type HandlerPool struct {
-	handlers     map[string]*component.Handler     // all handler method
-	interceptors map[string]*component.Interceptor // 所有拦截分发器,优先级别高于 handlers
+	registerMu sync.Mutex
+	registry   atomic.Pointer[handlerRegistrySnapshot]
+}
+
+type handlerRegistrySnapshot struct {
+	handlers     map[string]*component.Handler
+	interceptors map[string]*component.Interceptor
 }
 
 // NewHandlerPool ...
 func NewHandlerPool() *HandlerPool {
-	return &HandlerPool{
+	h := &HandlerPool{}
+	h.registry.Store(&handlerRegistrySnapshot{
 		handlers:     make(map[string]*component.Handler),
 		interceptors: make(map[string]*component.Interceptor),
+	})
+	return h
+}
+
+func (h *HandlerPool) loadRegistry() *handlerRegistrySnapshot {
+	if snapshot := h.registry.Load(); snapshot != nil {
+		return snapshot
 	}
+	return &handlerRegistrySnapshot{
+		handlers:     map[string]*component.Handler{},
+		interceptors: map[string]*component.Interceptor{},
+	}
+}
+
+func cloneHandlers(source map[string]*component.Handler, additional int) map[string]*component.Handler {
+	cloned := make(map[string]*component.Handler, len(source)+additional)
+	for name, handler := range source {
+		cloned[name] = handler
+	}
+	return cloned
+}
+
+func cloneInterceptors(source map[string]*component.Interceptor, additional int) map[string]*component.Interceptor {
+	cloned := make(map[string]*component.Interceptor, len(source)+additional)
+	for name, interceptor := range source {
+		cloned[name] = interceptor
+	}
+	return cloned
 }
 
 // Register ...
 func (h *HandlerPool) Register(serviceName string, name string, handler *component.Handler) {
-	handleName := fmt.Sprintf("%s.%s", serviceName, name)
-	if _, ok := h.handlers[handleName]; ok {
-		logger.Zap.Warn("handler already registered,overwriting", zap.String("name", handleName))
+	h.registerService(serviceName, map[string]*component.Handler{name: handler})
+}
+
+func (h *HandlerPool) registerService(serviceName string, handlers map[string]*component.Handler) {
+	h.registerServices(map[string]map[string]*component.Handler{serviceName: handlers})
+}
+
+func (h *HandlerPool) registerServices(services map[string]map[string]*component.Handler) {
+	h.registerMu.Lock()
+	defer h.registerMu.Unlock()
+
+	current := h.loadRegistry()
+	additional := 0
+	for _, handlers := range services {
+		additional += len(handlers)
 	}
-	h.handlers[fmt.Sprintf("%s.%s", serviceName, name)] = handler
+	nextHandlers := cloneHandlers(current.handlers, additional)
+	for serviceName, handlers := range services {
+		for name, handler := range handlers {
+			handleName := fmt.Sprintf("%s.%s", serviceName, name)
+			if _, ok := nextHandlers[handleName]; ok {
+				logger.Zap.Warn("handler already registered,overwriting", zap.String("name", handleName))
+			}
+			nextHandlers[handleName] = handler
+		}
+	}
+	h.registry.Store(&handlerRegistrySnapshot{
+		handlers:     nextHandlers,
+		interceptors: current.interceptors,
+	})
 }
 
 // RegisterInterceptor 注册拦截分发器,优先级别高于 component.Handler
@@ -61,13 +121,46 @@ func (h *HandlerPool) Register(serviceName string, name string, handler *compone
 //	@receiver h
 //	@param serviceName
 //	@param interceptor
-func (h *HandlerPool) RegisterInterceptor(serviceName string, interceptor *component.Interceptor) {
-	h.interceptors[serviceName] = interceptor
+func (h *HandlerPool) RegisterInterceptor(serviceName string, interceptor *component.Interceptor) error {
+	if err := validateInterceptorRegistration("handler", serviceName, interceptor, true); err != nil {
+		return err
+	}
+	h.registerMu.Lock()
+	defer h.registerMu.Unlock()
+	current := h.loadRegistry()
+	nextInterceptors := cloneInterceptors(current.interceptors, 1)
+	nextInterceptors[serviceName] = interceptor
+	h.registry.Store(&handlerRegistrySnapshot{
+		handlers:     current.handlers,
+		interceptors: nextInterceptors,
+	})
+	return nil
 }
 
 // GetHandlers ...
 func (h *HandlerPool) GetHandlers() map[string]*component.Handler {
-	return h.handlers
+	current := h.loadRegistry()
+	return cloneHandlers(current.handlers, 0)
+}
+
+func validateInterceptorRegistration(kind, serviceName string, interceptor *component.Interceptor, rejectReserved bool) error {
+	if interceptor == nil {
+		return fmt.Errorf("%s interceptor: interceptor is nil", kind)
+	}
+	if interceptor.InterceptorFun == nil {
+		return fmt.Errorf("%s interceptor: interceptor function is nil", kind)
+	}
+	trimmed := strings.TrimSpace(serviceName)
+	if trimmed == "" {
+		return fmt.Errorf("%s interceptor: service name is empty", kind)
+	}
+	if trimmed != serviceName || strings.Contains(serviceName, ".") {
+		return fmt.Errorf("%s interceptor: invalid service name %q", kind, serviceName)
+	}
+	if rejectReserved && isReservedHandlerServiceName(serviceName) {
+		return fmt.Errorf("%s interceptor: service name %q is reserved", kind, serviceName)
+	}
+	return nil
 }
 
 // ProcessHandlerMessage ...
@@ -221,7 +314,7 @@ func (h *HandlerPool) ProcessHandlerMessage(
 }
 
 func (h *HandlerPool) getHandler(rt *route.Route) (*component.Handler, error) {
-	handler, ok := h.handlers[rt.Short()]
+	handler, ok := h.loadRegistry().handlers[rt.Short()]
 	if !ok {
 		e := fmt.Errorf("pitaya/handler: %s not found", rt.String())
 		return nil, e
@@ -230,7 +323,7 @@ func (h *HandlerPool) getHandler(rt *route.Route) (*component.Handler, error) {
 
 }
 func (h *HandlerPool) getInterceptor(rt *route.Route) (*component.Interceptor, error) {
-	handler, ok := h.interceptors[rt.Service]
+	handler, ok := h.loadRegistry().interceptors[rt.Service]
 	if !ok {
 		e := fmt.Errorf("pitaya/handler/dispatcher: %s not found", rt.String())
 		return nil, e

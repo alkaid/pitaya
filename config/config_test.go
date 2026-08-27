@@ -56,6 +56,8 @@ func TestNewConfig(t *testing.T) {
 
 	cfg := viper.New()
 	cfg.SetDefault("pitaya.buffer.agent.messages", 20)
+	cfg.Set("pitaya.buffer.handler.localprocess", -7)
+	cfg.Set("pitaya.buffer.handler.remoteprocess", 999)
 	cfg.Set("pitaya.concurrency.handler.dispatch", 23)
 	cfg.SetDefault("pitaya.no.default", "custom")
 
@@ -66,6 +68,10 @@ func TestNewConfig(t *testing.T) {
 	}{
 		{[]*viper.Viper{}, "pitaya.buffer.agent.messages", 100},
 		{[]*viper.Viper{cfg}, "pitaya.buffer.agent.messages", 20},
+		{[]*viper.Viper{}, "pitaya.buffer.handler.localprocess", 20},
+		{[]*viper.Viper{cfg}, "pitaya.buffer.handler.localprocess", -7},
+		{[]*viper.Viper{}, "pitaya.buffer.handler.remoteprocess", 20},
+		{[]*viper.Viper{cfg}, "pitaya.buffer.handler.remoteprocess", 999},
 		{[]*viper.Viper{}, "pitaya.no.default", nil},
 		{[]*viper.Viper{cfg}, "pitaya.no.default", "custom"},
 		{[]*viper.Viper{}, "pitaya.concurrency.handler.dispatch", 25},
@@ -84,6 +90,26 @@ func TestNewConfig(t *testing.T) {
 			assert.Equal(t, table.val, c.Get(table.key))
 		})
 	}
+}
+
+func TestDeprecatedHandlerQueueSettingsRemainParseableButIgnored(t *testing.T) {
+	viperConfig := viper.New()
+	viperConfig.Set("pitaya.buffer.handler.localprocess", -7)
+	viperConfig.Set("pitaya.buffer.handler.remoteprocess", 999)
+	viperConfig.Set("pitaya.concurrency.handler.dispatch", -11)
+
+	loaded := NewConfig(viperConfig)
+	require.NoError(t, loaded.InitLoad())
+
+	got := loaded.PitayaConfig()
+	require.Equal(t, -7, got.Buffer.Handler.LocalProcess)
+	require.Equal(t, 999, got.Buffer.Handler.RemoteProcess)
+	require.Equal(t, -11, got.Concurrency.Handler.Dispatch)
+
+	runtimeConfig := NewDefaultPitayaConfig()
+	runtimeConfig.Buffer.Handler = got.Buffer.Handler
+	runtimeConfig.Concurrency.Handler = got.Concurrency.Handler
+	require.NoError(t, runtimeConfig.Validate())
 }
 
 func TestDefaultCustomMetricsSpecPreservesEmptyRepresentation(t *testing.T) {

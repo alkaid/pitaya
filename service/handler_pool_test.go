@@ -25,6 +25,8 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/alkaid/goerrors/apierrors"
@@ -45,8 +47,7 @@ func TestGetHandlerExists(t *testing.T) {
 	rt := route.NewRoute("", uuid.New().String(), uuid.New().String())
 	expected := &component.Handler{}
 	handlerPool := NewHandlerPool()
-	handlerPool.handlers[rt.Short()] = expected
-	defer func() { delete(handlerPool.handlers, rt.Short()) }()
+	handlerPool.Register(rt.Service, rt.Method, expected)
 
 	h, err := handlerPool.getHandler(rt)
 	assert.NoError(t, err)
@@ -62,6 +63,150 @@ func TestGetHandlerDoesntExist(t *testing.T) {
 	assert.Contains(t, err.Error(), fmt.Sprintf("%s not found", rt.String()))
 }
 
+func TestGetHandlersReturnsMapSnapshot(t *testing.T) {
+	pool := NewHandlerPool()
+	expected := &component.Handler{}
+	pool.Register("snapshot", "handle", expected)
+
+	external := pool.GetHandlers()
+	delete(external, "snapshot.handle")
+	external["injected.handle"] = &component.Handler{}
+
+	actual := pool.GetHandlers()
+	assert.Same(t, expected, actual["snapshot.handle"])
+	assert.NotContains(t, actual, "injected.handle")
+}
+
+func TestHandlerPoolPublishesWholeServiceSnapshot(t *testing.T) {
+	pool := NewHandlerPool()
+	const registrations = 200
+	var published atomic.Int64
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+		for index := range registrations {
+			serviceName := fmt.Sprintf("service-%03d", index)
+			pool.registerService(serviceName, map[string]*component.Handler{
+				"first":  {},
+				"second": {},
+			})
+			published.Store(int64(index + 1))
+		}
+	}()
+
+	var readers sync.WaitGroup
+	readers.Add(4)
+	for range 4 {
+		go func() {
+			defer readers.Done()
+			for {
+				snapshot := pool.loadRegistry()
+				visible := int(published.Load())
+				for index := range visible {
+					serviceName := fmt.Sprintf("service-%03d", index)
+					_, first := snapshot.handlers[serviceName+".first"]
+					_, second := snapshot.handlers[serviceName+".second"]
+					if first != second {
+						t.Errorf("service %s was partially visible", serviceName)
+						return
+					}
+				}
+				select {
+				case <-done:
+					return
+				default:
+				}
+			}
+		}()
+	}
+	readers.Wait()
+
+	assert.Len(t, pool.GetHandlers(), registrations*2)
+}
+
+func TestHandlerPoolConcurrentRegistrationAndLookup(t *testing.T) {
+	pool := NewHandlerPool()
+	rt := route.NewRoute("", "runtime", "handle")
+	pool.Register(rt.Service, rt.Method, &component.Handler{})
+	requireInterceptor := func() *component.Interceptor {
+		return &component.Interceptor{InterceptorFun: func(context.Context, route.Route, []byte) (proto.Message, error) {
+			return nil, nil
+		}}
+	}
+	assert.NoError(t, pool.RegisterInterceptor(rt.Service, requireInterceptor()))
+
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	workers.Add(5)
+	go func() {
+		defer workers.Done()
+		<-start
+		for range 1000 {
+			assert.NoError(t, pool.RegisterInterceptor(rt.Service, requireInterceptor()))
+			pool.Register(rt.Service, rt.Method, &component.Handler{})
+		}
+	}()
+	for range 4 {
+		go func() {
+			defer workers.Done()
+			<-start
+			for range 5000 {
+				if _, err := pool.getHandler(rt); err != nil {
+					t.Errorf("handler lookup failed during registration: %v", err)
+					return
+				}
+				if _, err := pool.getInterceptor(rt); err != nil {
+					t.Errorf("interceptor lookup failed during registration: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	close(start)
+	workers.Wait()
+}
+
+func TestHandlerPoolRejectsInvalidInterceptorWithoutChangingSnapshot(t *testing.T) {
+	pool := NewHandlerPool()
+	valid := &component.Interceptor{InterceptorFun: func(context.Context, route.Route, []byte) (proto.Message, error) {
+		return nil, nil
+	}}
+	assert.NoError(t, pool.RegisterInterceptor("valid", valid))
+
+	tests := []struct {
+		name        string
+		serviceName string
+		interceptor *component.Interceptor
+	}{
+		{name: "nil interceptor", serviceName: "valid"},
+		{name: "nil function", serviceName: "valid", interceptor: &component.Interceptor{}},
+		{name: "empty service", interceptor: valid},
+		{name: "whitespace service", serviceName: " valid ", interceptor: valid},
+		{name: "route-shaped service", serviceName: "valid.method", interceptor: valid},
+		{name: "reserved service", serviceName: "sys", interceptor: valid},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			before := pool.loadRegistry()
+			assert.Error(t, pool.RegisterInterceptor(test.serviceName, test.interceptor))
+			after := pool.loadRegistry()
+			assert.Same(t, before, after)
+		})
+	}
+}
+
+func BenchmarkHandlerPoolLookup(b *testing.B) {
+	pool := NewHandlerPool()
+	rt := route.NewRoute("", "benchmark", "handle")
+	pool.Register(rt.Service, rt.Method, &component.Handler{})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		_, _ = pool.getHandler(rt)
+	}
+}
+
 func TestProcessHandlerMessage(t *testing.T) {
 	tObj := &TestType{}
 
@@ -71,19 +216,20 @@ func TestProcessHandlerMessage(t *testing.T) {
 	assert.True(t, ok)
 	assert.NotNil(t, m)
 	rt := route.NewRoute("", uuid.New().String(), uuid.New().String())
-	handlerPool.handlers[rt.Short()] = &component.Handler{Receiver: reflect.ValueOf(tObj), Method: m, Type: m.Type.In(2)}
+	primaryHandler := &component.Handler{Receiver: reflect.ValueOf(tObj), Method: m, Type: m.Type.In(2)}
+	handlerPool.Register(rt.Service, rt.Method, primaryHandler)
 
 	m, ok = reflect.TypeOf(tObj).MethodByName("HandlerPointerErr")
 	assert.True(t, ok)
 	assert.NotNil(t, m)
 	rtErr := route.NewRoute("", uuid.New().String(), uuid.New().String())
-	handlerPool.handlers[rtErr.Short()] = &component.Handler{Receiver: reflect.ValueOf(tObj), Method: m, Type: m.Type.In(2)}
+	handlerPool.Register(rtErr.Service, rtErr.Method, &component.Handler{Receiver: reflect.ValueOf(tObj), Method: m, Type: m.Type.In(2)})
 
 	m, ok = reflect.TypeOf(tObj).MethodByName("HandlerPointerStruct")
 	assert.True(t, ok)
 	assert.NotNil(t, m)
 	rtSt := route.NewRoute("", uuid.New().String(), uuid.New().String())
-	handlerPool.handlers[rtSt.Short()] = &component.Handler{Receiver: reflect.ValueOf(tObj), Method: m, Type: m.Type.In(2)}
+	handlerPool.Register(rtSt.Service, rtSt.Method, &component.Handler{Receiver: reflect.ValueOf(tObj), Method: m, Type: m.Type.In(2)})
 
 	tables := []struct {
 		name         string
@@ -109,7 +255,7 @@ func TestProcessHandlerMessage(t *testing.T) {
 
 	for _, table := range tables {
 		t.Run(table.name, func(t *testing.T) {
-			handlerPool.handlers[rt.Short()].MessageType = table.handlerType
+			primaryHandler.MessageType = table.handlerType
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 			ss := session_mocks.NewMockSession(ctrl)
@@ -139,7 +285,7 @@ func TestProcessHandlerMessageBrokenBeforePipeline(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	rt := route.NewRoute("", uuid.New().String(), uuid.New().String())
 	handlerPool := NewHandlerPool()
-	handlerPool.handlers[rt.Short()] = &component.Handler{}
+	handlerPool.Register(rt.Service, rt.Method, &component.Handler{})
 	expected := errors.New("oh noes")
 	before := func(ctx context.Context, _ route.Route, in interface{}) (context.Context, interface{}, error) {
 		return ctx, nil, expected
@@ -164,7 +310,7 @@ func TestProcessHandlerMessageBrokenAfterPipeline(t *testing.T) {
 	assert.NotNil(t, m)
 	rt := route.NewRoute("", uuid.New().String(), uuid.New().String())
 	handlerPool := NewHandlerPool()
-	handlerPool.handlers[rt.Short()] = &component.Handler{Receiver: reflect.ValueOf(tObj), Method: m, Type: m.Type.In(2)}
+	handlerPool.Register(rt.Service, rt.Method, &component.Handler{Receiver: reflect.ValueOf(tObj), Method: m, Type: m.Type.In(2)})
 
 	after := func(ctx context.Context, _ route.Route, _ interface{}, out interface{}, err error) (interface{}, error) {
 		return nil, errors.New("oh noes")
@@ -216,12 +362,13 @@ func TestProcessHandlerMessageRejectsReservedSysRouteBeforeDispatch(t *testing.T
 							handlerPool := NewHandlerPool()
 							switch dispatch {
 							case "interceptor":
-								handlerPool.RegisterInterceptor(serviceName, &component.Interceptor{
+								err := handlerPool.RegisterInterceptor(serviceName, &component.Interceptor{
 									InterceptorFun: func(context.Context, route.Route, []byte) (proto.Message, error) {
 										calls++
 										return nil, nil
 									},
 								})
+								assert.Error(t, err)
 							case "handler":
 								receiver := &sysHandlerSideEffect{calls: &calls}
 								method, ok := reflect.TypeOf(receiver).MethodByName("Handle")

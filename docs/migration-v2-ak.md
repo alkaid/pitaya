@@ -24,9 +24,11 @@ import pitaya "github.com/alkaid/pitaya/v2"
 
 ## 模块、工具链和测试依赖
 
-根模块、`pitaya-cli` 和 `xk6-pitaya` 都要求 Go 1.26.5。
+根模块、`pitaya-cli` 和 `xk6-pitaya` 都要求 Go 1.26.5 或更高版本。
 
 `xk6-pitaya` 从 k6 v0.46.0 升到 v1.8.0，对外类型从 Goja 切到 `github.com/grafana/sobek`。自定义扩展需要按 k6 v1 运行时重新构建，并把 `goja.Promise`、`goja.Object` 和 `goja.ConstructorCall` 改为对应的 Sobek 类型。
+
+`xk6-pitaya` 的 request waiter 现在会在响应可投递前完成注册，并在响应、发送失败、超时、VU context 取消或断连后按 request identity 清理。断连会立即 reject 全部未完成 promise；迟到和重复响应会被丢弃，不再创建孤立 waiter。公开 JS API、`requestTimeoutMs`、指标名以及非 JSON 响应继续以原始字节数组 resolve 的行为保持不变。若底层 client 产生重复 request ID，连接会按协议错误关闭，所有未完成 promise 都会 reject，避免把响应错配给旧请求。
 
 生成的 gRPC stub 使用 support package v9，要求 grpc-go 1.64 或更高版本。嵌入 `protos.UnimplementedPitayaServer` 时必须按值嵌入，不能嵌入可能为 nil 的指针。即使部署没有启用 gRPC，这仍然是编译期迁移。
 
@@ -45,6 +47,23 @@ import pitaya "github.com/alkaid/pitaya/v2"
 服务端日志改用当前基于 Zap 的 `logger` API。client 包仍保留独立的 logger hook，但它不能替代服务端全局日志配置；需要继续使用 Logrus 的应用应自行维护 adapter。
 
 ## 公共 Go API
+
+### 运行期注册返回错误
+
+四个运行期注册方法现在直接返回 `error`：
+
+```go
+LazyRegister(component.Component, ...component.Option) error
+LazyRegisterRemote(component.Component, ...component.Option) error
+RegisterInterceptor(string, *component.Interceptor) error
+RegisterRemoteInterceptor(string, *component.Interceptor) error
+```
+
+普通的 `app.LazyRegister(...)` 调用语句仍可编译但会丢弃结果；升级时应全部改为检查错误。把这些方法保存为精确函数值、自定义实现 `pitaya.Pitaya`、或从该接口生成 fake/mock 的代码必须更新 method set 并重新生成测试产物。
+
+重复 service、保留 handler service 名、非法 handler/remote 签名、nil interceptor、nil interceptor function、空白/带点号的 interceptor service 名都会同步返回错误，不再只写日志或在调用时 panic。Standalone 或不完整测试 App 缺少对应能力时分别返回可用 `errors.Is` 匹配的 `service.ErrHandlerServiceUnavailable` 或 `service.ErrRemoteServiceUnavailable`。
+
+handler 与 interceptor 的热注册改为注册侧串行、读侧不可变快照。一次 handler service 注册只发布一个包含全部 method 的新快照；注册返回后开始的 lookup 一定可见，在途调用可以继续使用已取得的旧 handler。`HandlerPool.GetHandlers` 返回 map 复制品，修改该 map 不再影响运行期 registry。
 
 ### 有状态任务接纳
 
@@ -296,6 +315,18 @@ Start -> HandshakeValidated -> Working -> Closed
 
 部署新服务端前，应先升级或验证全部客户端。协议测试至少覆盖 ACK-first、Data-first、heartbeat-before-handshake、重复 Handshake/ACK、延迟 ACK 和未完成握手的渐进清理。
 
+### 客户端 TLS、连接与分帧
+
+`client.Client.ConnectTo` 对 `wss://`、`tls://` 和 `tcps://` 连接不再隐式设置 `InsecureSkipVerify`。默认使用系统信任链并校验证书主机名；传入 `tls.Config` 时使用其克隆，调用方的 `ServerName`、信任池和其他字段不会被框架改写。WebSocket 连接也只修改 `websocket.DefaultDialer` 的值副本，不再把进程级默认 dialer 变成共享可变状态。
+
+使用私有 CA 或自签证书的应用必须把 CA 安装到系统信任链，或在库调用处显式传入 `tls.Config.RootCAs`。依赖错误证书仍能连接的环境会在升级后失败。调用方仍可自行显式设置 `InsecureSkipVerify=true`，但该选择完全由应用承担，框架和 CLI 不会代为开启。
+
+`pitaya-cli` 现在只尝试用户指定的 scheme，不再按 `wss -> ws -> tls -> tcp` 顺序自动探测，也不会在 TLS 失败后静默降级到明文。未写 scheme 的地址保持 legacy 含义，确定性解释为 `tcp://`。TLS 用户必须显式写 `wss://`、`tls://` 或 `tcps://`。
+
+客户端 dial 和 Pitaya 握手都有 5 秒有界超时。握手首包不是 `Handshake`、响应 JSON/压缩体非法、ACK 写失败或服务端停滞时，`ConnectTo` 返回错误并关闭、清除本次连接；失败的连接不会启动 heartbeat、消息 reader 或 disconnect callback。服务端返回零或负 heartbeat 时客户端不启动 ticker。
+
+TCP/TLS/WS 输入按 4 byte header 中声明的长度精确读取，不再以一次 `Read`、短读或 1024 byte 整数倍推断 packet 边界。合法的任意 header/payload 分段和粘连 frame 保持原 wire format；截断 header/body、非法 packet type 或畸形 Data message 会作为协议错误受控断连。message 解码失败不会向 `MsgChannel` 投递 nil，也不会把原始 payload 写入日志。
+
 ### 消息和错误载荷解码
 
 压缩的 Pitaya message payload 与压缩的客户端握手响应，解压后都不得超过 16 MiB。超过上限时，message decoder 返回错误；client 会在进入 connected 状态前中止握手。未压缩 payload 的处理不变。需要发送高压缩率大载荷的应用必须拆分或缩小数据。
@@ -348,6 +379,8 @@ Flush 不从 `DialTimeout` 或 `GrantLease.Timeout` 派生 deadline，普通调�
 
 topology listener 与 leader listener 使用各自的 FIFO lane。同一 lane 保序，两条 lane 可以并发。每条 callback queue 上限为 64，满时对 discovery worker 施加 backpressure，不丢弃已接纳事件。listener 应快速返回，长期阻塞仍可能让 etcd client 的上游缓存增长。
 
+两类 listener 都是非关键 observer。单个 topology listener panic 会记录结构化恢复日志，并继续同一事件的其余 listener；leader listener panic 也不会阻止后续 generation。权威 topology/leader 状态已经在 callback 前提交，不会因 observer panic 回滚。dispatcher 的 barrier 和 drain 在 panic 后仍会完成。旧代码若依赖 listener panic 终止进程，必须改为显式向应用 supervisor 报告不可恢复错误；框架不再把 observer panic 当作隐式 fail-fast 信号。
+
 `Init` 等待初始 topology callback 和首个已确认的非空 leader 状态，但 leader listener 自身在独立 lane 异步执行。`SyncServers` 会等待本次同步接纳的 topology callback，`SDListener` 不能同步调用它，否则会等待自己所在的 lane。
 
 正常关闭顺序必须是 `BeforeShutdown -> Shutdown`。两者一进入就会立即使本地 owner epoch 失效，带旧 epoch 的新 RPC 会在 callback drain 或 lease revoke 完成前 fail-closed。`BeforeShutdown` 随后停止新 callback 接纳、取消 Flush、等待已接纳 callback drain，再 revoke lease。callback 不能同步调用 `BeforeShutdown`；callback 内可以调用 `Shutdown`，但这不等价于立即 revoke，注册可能继续存在到 lease TTL，默认最长约 60 秒。
@@ -357,6 +390,8 @@ leader 候选会增加一次有界的线性 etcd read，用于核对当前 key�
 ### Standalone 模式绑定
 
 Standalone frontend 的 Bind 和 Close 继续执行本地 UID ownership、Redis restore/flush 以及重绑清理，但不再尝试 cluster Fork 或 Notify。应用不应依赖 Standalone 模式产生集群广播副作用。
+
+Standalone 或自定义构造的 `HandlerService` 没有 `RemoteService` 时，显式路由到其他 server type 不再静默等待客户端超时。Request 会立即返回 HTTP 503 语义的 `remote_service_unavailable`，metadata 只包含 `route` 和 `server_type`；Notify 不发送 response，只记录不含 payload 的结构化 warning，并完成对应 trace 和 response-time metric。本机 route 以及配置完整的 Cluster route 行为不变。调用方若确实需要跨服路由，必须提供与当前 server/session graph 一致的 `RemoteService`，不能把客户端 timeout 当作能力探测。
 
 ### NATS RPC 入站校验
 
@@ -370,6 +405,10 @@ NATS RPC server 会在 protobuf 解引用前拒绝以下输入，并继续处理
 
 内部 publisher 也必须生成满足这些约束的 Request，不能依赖 proto3 空对象被接纳。拒绝会计入 `dropped_messages`。消息 pump panic、subscription channel 异常关闭等非正常退出会触发 App 停止信号；正常 Shutdown 不报告故障。
 
+传播 context 中的 `reqTimeout` 现在只接受可由 `time.ParseDuration` 解析且大于零的 string。缺失值使用 NATS client 默认 timeout，并以规范化 duration string 传播；wrong type（包括 JSON number 解码后的 `float64`）、空串、非法、零或负值会在 marshal 和 NATS publish 前返回 `invalid_request_timeout` BadRequest。合法 override 仍受父 context 的更早 deadline 限制。依赖数字 timeout 或把非法值当作立即超时的调用方必须改为正 duration string。
+
+user push/kick subscription 解码失败后会立即丢弃消息并计入 `dropped_messages`，不再向下游投递零值 protobuf。诊断日志只包含 channel kind、payload 长度、累计 malformed 数和 decode error，不包含 payload。空 protobuf 在 wire 上仍是合法零值对象；只有 `proto.Unmarshal` 失败的 payload 属于本条拒绝规则。
+
 `NatsRPCServer.BeforeShutdown` 和 `Shutdown` 共享幂等的停止屏障。正常关闭会先冻结 subscription admission，对全部 server-owned 入站订阅执行 Drain，并等待每个订阅进入 closed 状态及异步 push/kick callback 返回。确认 NATS 不再写本地 channel 后，message、binding、push 和 kick consumer 会完整消费已经交付到本地缓冲的消息；message pump 最后关闭私有的 request dispatcher channel，使 dispatcher 追平全部任务接纳。
 
 本地 consumer 全部退出后，server 才关闭 RPC task admission、取消关停前已接纳 task 的 context 并等待 task 完成，最后 Drain NATS 连接并等待 terminal callback。业务 callback 必须监听 context 并及时返回，否则会耗尽下文的 30 秒 runtime quiescence 预算。subscription Drain 或 Unsubscribe 异常，或者 NATS connection 在 Shutdown 前或过程中已经关闭时，会退回快速取消路径。该路径不再等待底层不会发送的 subscription closed 状态，会冻结新的 push/kick callback、取消本地 consumer，并等待已经进入的 callback 退出；它不能承诺本地缓冲零丢失。依赖旧版 Shutdown 很快返回的应用需要重新分配关闭预算。
@@ -381,6 +420,10 @@ NATS RPC server 会在 protobuf 解引用前拒绝以下输入，并继续处理
 ## 应用启动和关闭
 
 App 先初始化 components、stateful pools、RPC 和 service discovery modules，再启动所有 Acceptor。全部 Acceptor 都报告 ready 后才启动 connection reader、进入 running 并执行 `onStarted`。首个 listener ready 不再表示业务流量已经开始处理；bind、TLS 或 ready 失败由 `App.Start` panic 传播。
+
+启动现在使用显式事务账本。框架会在任何 `Component.Init` 前预检完整的 handler/remote 注册批次和 framework module 名称；重复 service、保留名、非法签名、Standalone 上的 remote 注册、缺失 remote capability，以及与 `rpcServer`、`rpcClient`、`serviceDiscovery`、`uniqueSession`、`configLoader`、`statefulGoPool` 冲突的 module 名都会使 `App.Start` panic。此时 component/module Init 和 Acceptor Serve 均未发生，`IsRunning()` 保持 false。旧版本依赖“记录注册错误后继续提供部分路由”的部署必须改为修正注册，不能再把该状态当作降级启动。
+
+自定义生命周期增加明确的提交边界：`Component.Init` panic 或 `Module.Init` error/panic 的当前对象尚未提交，必须在失败前自行清理本次获得的资源，框架不会猜测半初始化对象能否安全 Shutdown。只要 Init 正常返回，对象就进入 App 账本；后续 Init/AfterInit 失败时，框架会逆序调用所有已提交 owner 的 `BeforeShutdown` 和 `Shutdown`。单个清理 hook panic 或 Module.Shutdown error 会与原始启动错误通过 `errors.Join` 合并，但不会阻止其他 owner 清理。`App.Start` 仍无返回值并以 panic 暴露该聚合错误，下游 supervisor 必须按启动失败处理；测试可以用 `errors.Is`/`errors.As` 匹配主错误和回滚错误。失败后的同一 App 不支持再次 Start。
 
 关闭顺序固定为：
 
@@ -410,9 +453,17 @@ Acceptor 在 ready 后意外返回错误或 nil 都会触发 App 停止。自定
 
 `NewBuilder` 会在构造依赖前校验配置，`Builder.Build` 会再次校验可能被调用方修改过的 `Builder.Config`。任一校验失败都会以包含全部字段错误的 `invalid pitaya config` panic 终止构建，不再把非法值带到后台 goroutine 后才表现为忙等、索引越界或资源泄漏。
 
-以下值现在必须为正数：heartbeat、metrics period、session cache TTL、memory-group tick、启用后的 session drain timeout/period、启用后的 rate-limit interval/limit、handler dispatch 数、Worker concurrency/pool，以及 Cluster 模式下 RPC fanout、NATS connection/request timeout、NATS services/message/push buffer、etcd dial/heartbeat/sync/revoke/grant/retry interval 和 sync parallelism。etcd heartbeat TTL 还必须至少为 1 秒，因为 etcd lease API 以整秒接收 TTL；旧配置中的亚秒值会在 Build 阶段被拒绝。StatsD 启用时 `rate` 必须是有限数且位于 `(0, 1]`，NaN 和正负无穷值会在 Build 阶段被拒绝。buffer、Redis pool、GoPool buffer/escape budget 及部分可选 duration 只允许非负值。Prometheus、StatsD、Redis、Worker、NATS 和 etcd endpoint 的必需字段也会被验证。
+以下值现在必须为正数：heartbeat、metrics period、session cache TTL、memory-group tick、启用后的 session drain timeout/period、启用后的 rate-limit interval/limit、Worker concurrency/pool，以及 Cluster 模式下 RPC fanout、NATS connection/request timeout、NATS services/message/push buffer、etcd dial/heartbeat/sync/revoke/grant/retry interval 和 sync parallelism。etcd heartbeat TTL 还必须至少为 1 秒，因为 etcd lease API 以整秒接收 TTL；旧配置中的亚秒值会在 Build 阶段被拒绝。StatsD 启用时 `rate` 必须是有限数且位于 `(0, 1]`，NaN 和正负无穷值会在 Build 阶段被拒绝。agent buffer、Redis pool、GoPool buffer/escape budget 及部分可选 duration 只允许非负值。Prometheus、StatsD、Redis、Worker、NATS 和 etcd endpoint 的必需字段也会被验证。
 
 etcd 用户名和密码必须同时为空或同时配置；启用 election 时必须提供名称。NATS `maxreconnectionretries` 继续接受 `-1`（无限重试）和 `0`（不重试），etcd `grantlease.maxretries=0` 也继续表示零次重试。默认 Builder 只构造 NATS transport，因此 `ValidateCluster` 不校验未启用的 gRPC 子配置。导出的 `NewNatsRPCClient`、`NewNatsRPCServer`、`NewGRPCClient` 和 `NewGRPCServer` 各自校验实际使用的子配置并返回 error；直接构造 gRPC 时 dial/request timeout 必须为正，server port 必须位于 1..65535。NATS 旧 sentinel 现在会被带字段路径的错误包装；`errors.Is` 仍可识别，但依赖 `err == constants.ErrNats...` 的代码必须改用 `errors.Is`。自定义配置生成器应直接调用 `PitayaConfig.Validate`，Cluster 部署还应调用 `ValidateCluster`，并在进入 Builder 前处理错误。
+
+Builder 现在是 single-use，且公开字段配置只支持在一个 goroutine 中、首次 `Build` 前完成；并发或第二次 `Build` 会 panic。Build 入口会复制 Builder 自有的 acceptor、post-build hook 和 metrics reporter slices，并生成只读 resolved graph，后续 App、RemoteService、AgentFactory 和 HandlerService 不再交叉读取实时 Builder 字段。Build 返回后重新赋值 Builder 字段不会改接已构造 App；通过共享指针或嵌套 map/slice 修改对象仍是不受支持的 data race/共享 mutation。
+
+Cluster 默认派生依赖不再允许局部 root 替换。单换 `SessionPool` 必须同时提供用该 pool 构造的 caller-owned `RPCServer`；单换 `MetricsReporters` 必须同时提供 caller-owned `RPCClient` 和 `RPCServer`；单换 `Server` 必须同时提供 caller-owned `ServiceDiscovery`、`RPCClient` 和 `RPCServer`。默认 `SessionPool` 仍在使用时，替换 `Redis`、`pitaya.storage.redis` 构造配置或 session cache TTL 也会失败，必须提供从新 cache graph 构造的 pool。Standalone 单换 `SessionPool` 继续支持。
+
+不一致组合会在 logger 初始化、Router mutation、`RPCServer.SetPitayaServer` 和 post-build hook 前以 `invalid builder dependency graph` panic，并在错误中指出字段路径和成组替换方法。框架不会自动重建公开 transport，因为调用方可能已经在该实例上安装自定义配置。完整 caller-owned transport group 仍可使用，但其内部捕获的 roots 由调用方保证一致，Builder 不做反射式 introspection。
+
+`pitaya.buffer.handler.localprocess`、`pitaya.buffer.handler.remoteprocess` 和 `pitaya.concurrency.handler.dispatch` 仍会被 Viper 解析，但已弃用且完全忽略，任意值都不再参与配置验证。偏离旧默认值 20/20/25 时，每次 Build 只记录一条合并 warning。容量应改由 `pitaya.buffer.agent.messages`、`pitaya.gopools.<pool>.taskbuffer`、`pitaya.cluster.rpc.server.nats.buffer.messages` 和 `.push` 调整；下一个 major 会删除这三个兼容字段及 `NewHandlerService` 的两个 legacy buffer 参数。
 
 本批次为 NATS client/server 新增 TLS 和认证配置。TLS 默认关闭；生产集群必须显式启用，并选择 username/password、token 或 credentials file 中恰好一种认证方式。NATS URL 不再接受内嵌 userinfo，旧的 `nats://user:pass@host:4222` 必须改为普通 URL 加 `auth` 字段。TLS 最低版本为 1.2；`cafile` 为空时使用系统根证书，`certfile`/`keyfile` 可配置 client certificate。证书、credentials file 和相关配置只在 transport 构造时读取，轮换后必须重启进程。
 
@@ -430,7 +481,7 @@ etcd 用户名和密码必须同时为空或同时配置；启用 election 时�
 
 ### Timer 执行与关闭语义
 
-全局 `TimerManager` 现在只有一个调度 owner；多个 handler dispatcher 只作为 standby，不会并发推进同一批 timer。`NewTimer` 和 `NewCountTimer` 保持源码兼容，但默认回调策略明确为 `timer.ExecutionSerial`：慢回调会阻塞后续 tick，且关闭会等待已经开始的回调完成。等待串行回调期间，owner 仍排空 timer 创建/关闭 mutation，因此回调内批量创建超过 channel capacity 的 timer 不会自锁，也不会推进新的 tick。
+每个 App 现在固定启动一个全局 `TimerManager` 调度 owner，不再按 legacy handler dispatch 值提交 standby goroutine。`NewTimer` 和 `NewCountTimer` 保持源码兼容，但默认回调策略明确为 `timer.ExecutionSerial`：慢回调会阻塞后续 tick，且关闭会等待已经开始的回调完成。等待串行回调期间，owner 仍排空 timer 创建/关闭 mutation，因此回调内批量创建超过 channel capacity 的 timer 不会自锁，也不会推进新的 tick。
 
 需要其他 overrun 行为时使用 `NewTimerWithPolicy` 或 `NewCountTimerWithPolicy`：
 
@@ -536,6 +587,24 @@ session backend map/generation/mutex、remote fanout worker、etcd callback queu
 `Session.GetOnCloseCallbacks()`、`GetSubscriptions()` 和 `GetDataEncoded()` 现在返回防御性副本。修改 getter 返回的 slice 不再改变 Session 内部状态；应使用对应 setter 或受支持的 Session API。过去依赖共享 backing array 的代码虽然可能继续编译，但行为已经改变。
 
 Linux/amd64 仍是唯一完整 runtime 和 release-verification 平台。Darwin/amd64 与 Windows/amd64 新增 `CGO_ENABLED=0` compile-only CI；这只证明 root、CLI 和 xk6 当前可交叉编译，不代表外部服务、signal、Docker 或生产运行支持。
+
+### Prometheus exporter 生命周期
+
+默认 Builder 不再通过全局 registry、`http.DefaultServeMux` 和后台 `ListenAndServe` 启动 Prometheus。collector 构造只写入当前 App 的私有 `prometheus.Registry`；exporter 使用自己的 mux，并通过 `prometheus.Gatherers{pitayaRegistry, prometheus.DefaultGatherer}` 保留 Go/process 以及应用注册到 default registry 的 collector。两边出现重复 FQName 时 scrape 会返回可诊断错误，不会静默选择其中一份。
+
+`pitaya.metrics.prometheus.enabled=true` 现在表示启动必要能力。`NewBuilder`/`Build` 不占用端口；`App.Start` 在其他 module、Acceptor 和 `running=true` 之前同步 bind `pitaya.metrics.prometheus.port`。collector 配置或 bind 失败会使启动失败，不能再以“App 已运行但没有 metrics”的状态继续。`Serve` 在运行期意外退出会触发 dependency-failure shutdown；正常 `App.Shutdown` 先停止接受 scrape，再以有界 HTTP shutdown 释放 listener，重复关闭保持幂等。
+
+启用默认 Prometheus 后，`Builder.MetricsReporters` 必须保留 Builder 创建的 Prometheus reporter；可继续追加其他 reporter，但删除该实例会在 dependency graph preflight 中失败，避免 exporter 与 App reporter manager 指向不同图。需要完全自管 metrics 的应用应关闭默认 Prometheus，并把自己的 reporter/exporter 作为显式 module 注册。
+
+`CreatePrometheusReporter` 和 `metrics.GetPrometheusReporter` 仅作为 deprecated 兼容入口保留。它们仍在返回前完成同步 bind 并立即可抓取，但进程内所有调用共享同一个 reporter/exporter owner。调用方必须在全部共享引用停止上报后统一调用新增的 `ShutdownPrometheusReporter`（或 `metrics.ShutdownPrometheusReporter`）；该关闭是进程级、幂等操作，不能按单个 consumer 分别管理。默认 Builder 不使用这个 singleton。
+
+### StatsD duration 与限流日志
+
+Reporter 接口中两个内建 duration 指标 `response_time_ns` 和 `handler_delay_ns` 继续使用纳秒，Prometheus 的名称和值也不变。StatsD adapter 现在只对这两个精确常量除以 1,000,000 后调用 `TimeInMilliseconds`：200ms 的 wire 值从错误的 200,000,000 修正为 200。现有 StatsD dashboard、SLO 和告警阈值若按旧错误值配置，升级时必须除以 1,000,000。指标名暂不改动，避免同时产生新旧 series。
+
+自定义 summary 的数值合同没有变化；即使名称以 `_ns` 结尾也不会自动换算。需要毫秒语义的自定义 reporter 仍应由调用方在自己的 adapter 边界明确处理，不能依赖名称后缀推断单位。
+
+连接限流的预期拒绝不再以 ERROR 记录完整消息。新日志为 Debug，只包含 `message_length`、`limit`、`interval` 和固定的 rate-limit error；`exceeded_rate_limiting` counter 仍是告警和容量分析的主信号。依赖拒绝日志 payload 或 ERROR 数量的日志消费者必须迁移，原始业务、认证或用户数据不会再进入该日志路径。
 
 ## 验证工具迁移
 

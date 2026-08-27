@@ -90,7 +90,7 @@ func TestReportLatency(t *testing.T) {
 	expectedType := uuid.New().String()
 	expectedErrored := "failed"
 
-	mockClient.EXPECT().TimeInMilliseconds("response_time_ns", float64(expectedDuration.Nanoseconds()), gomock.Any(), sr.rate).Do(func(n string, d float64, tags []string, r float64) {
+	mockClient.EXPECT().TimeInMilliseconds("response_time_ns", float64(expectedDuration/time.Millisecond), gomock.Any(), sr.rate).Do(func(n string, d float64, tags []string, r float64) {
 		assert.Contains(t, tags, fmt.Sprintf("route:%s", expectedRoute))
 		assert.Contains(t, tags, fmt.Sprintf("type:%s", expectedType))
 		assert.Contains(t, tags, fmt.Sprintf("status:%s", expectedErrored))
@@ -104,6 +104,48 @@ func TestReportLatency(t *testing.T) {
 		"status":     expectedErrored,
 		"serverType": sr.serverType,
 	}, float64(expectedDuration.Nanoseconds()))
+	assert.NoError(t, err)
+}
+
+func TestReportBuiltInDurationsConvertNanosecondsToMilliseconds(t *testing.T) {
+	tests := []struct {
+		name  string
+		value time.Duration
+		want  float64
+	}{
+		{name: "one nanosecond", value: time.Nanosecond, want: 0.000001},
+		{name: "below millisecond", value: 999999 * time.Nanosecond, want: 0.999999},
+		{name: "one millisecond", value: time.Millisecond, want: 1},
+		{name: "two hundred milliseconds", value: 200 * time.Millisecond, want: 200},
+		{name: "large duration", value: 36*time.Hour + 123*time.Nanosecond, want: float64((36*time.Hour + 123*time.Nanosecond).Nanoseconds()) / float64(time.Millisecond)},
+	}
+	for _, metric := range []string{ResponseTime, ProcessDelay} {
+		t.Run(metric, func(t *testing.T) {
+			for _, test := range tests {
+				t.Run(test.name, func(t *testing.T) {
+					ctrl := gomock.NewController(t)
+					client := metricsmocks.NewMockClient(ctrl)
+					reporter, err := NewStatsdReporter(config.NewDefaultPitayaConfig().Metrics, "frontend", client)
+					assert.NoError(t, err)
+					client.EXPECT().TimeInMilliseconds(metric, test.want, gomock.Any(), reporter.rate)
+
+					err = reporter.ReportSummary(metric, nil, float64(test.value.Nanoseconds()))
+					assert.NoError(t, err)
+				})
+			}
+		})
+	}
+}
+
+func TestReportCustomSummaryPreservesRawValue(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	client := metricsmocks.NewMockClient(ctrl)
+	reporter, err := NewStatsdReporter(config.NewDefaultPitayaConfig().Metrics, "frontend", client)
+	assert.NoError(t, err)
+	const value = 200_000_000.25
+	client.EXPECT().TimeInMilliseconds("custom_latency_ns", value, gomock.Any(), reporter.rate)
+
+	err = reporter.ReportSummary("custom_latency_ns", nil, value)
 	assert.NoError(t, err)
 }
 

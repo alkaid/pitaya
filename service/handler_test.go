@@ -53,6 +53,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.uber.org/mock/gomock"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -149,8 +152,10 @@ func TestHandlerServiceRegisterFailsIfRegisterTwice(t *testing.T) {
 	svc := NewHandlerService(nil, nil, 0, 0, nil, nil, nil, nil, nil, handlerPool)
 	err := svc.Register(&MyComp{}, []component.Option{})
 	assert.NoError(t, err)
+	published := handlerPool.loadRegistry()
 	err = svc.Register(&MyComp{}, []component.Option{})
 	assert.Contains(t, err.Error(), "handler: service already defined")
+	assert.Same(t, published, handlerPool.loadRegistry())
 }
 
 func TestHandlerServiceRegisterFailsIfNoHandlerMethods(t *testing.T) {
@@ -158,6 +163,7 @@ func TestHandlerServiceRegisterFailsIfNoHandlerMethods(t *testing.T) {
 	svc := NewHandlerService(nil, nil, 0, 0, nil, nil, nil, nil, nil, handlerPool)
 	err := svc.Register(&NoHandlerRemoteComp{}, []component.Option{})
 	assert.Equal(t, errors.New("type NoHandlerRemoteComp has no exported methods of handler type"), err)
+	assert.Empty(t, handlerPool.GetHandlers())
 }
 
 func TestHandlerServiceRegisterRejectsReservedSysName(t *testing.T) {
@@ -371,6 +377,86 @@ func TestHandlerServiceProcessNotifyLogsSubmissionErrorWithoutResponse(t *testin
 	svc.processMessage(mockAgent, msg)
 }
 
+func TestHandlerServiceProcessRequestWithoutRemoteServiceAnswersUnavailable(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	msg := &message.Message{ID: 42, Type: message.Request, Route: "backend.chat.send"}
+	mockSession := mocks.NewMockSession(ctrl)
+	mockSession.EXPECT().Go(gomock.Any(), gomock.Any()).Times(0)
+	mockAgent := agentmocks.NewMockAgent(ctrl)
+	mockAgent.EXPECT().GetSession().Return(mockSession).AnyTimes()
+	mockAgent.EXPECT().AnswerWithError(gomock.Any(), msg.ID, gomock.Any()).Do(
+		func(_ context.Context, _ uint, err error) {
+			assert.True(t, apierrors.IsServiceUnavailable(err))
+			assert.ErrorIs(t, err, ErrRemoteServiceUnavailable)
+			apiErr := apierrors.FromError(err)
+			assert.Equal(t, "remote_service_unavailable", apiErr.Status.GetReason())
+			assert.Equal(t, "backend.chat.send", apiErr.Status.GetMetadata()["route"])
+			assert.Equal(t, "backend", apiErr.Status.GetMetadata()["server_type"])
+		},
+	).Times(1)
+	svc := NewHandlerService(
+		nil,
+		nil,
+		0,
+		0,
+		&cluster.Server{ID: "frontend-1", Type: "frontend"},
+		nil,
+		nil,
+		nil,
+		nil,
+		NewHandlerPool(),
+	)
+
+	svc.processMessage(mockAgent, msg)
+}
+
+func TestHandlerServiceProcessNotifyWithoutRemoteServiceCompletesTelemetry(t *testing.T) {
+	originalProvider := otel.GetTracerProvider()
+	spanRecorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithSpanProcessor(spanRecorder),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	otel.SetTracerProvider(provider)
+	t.Cleanup(func() {
+		require.NoError(t, provider.Shutdown(context.Background()))
+		otel.SetTracerProvider(originalProvider)
+	})
+
+	ctrl := gomock.NewController(t)
+	msg := &message.Message{Type: message.Notify, Route: "backend.chat.send"}
+	mockSession := mocks.NewMockSession(ctrl)
+	mockSession.EXPECT().Go(gomock.Any(), gomock.Any()).Times(0)
+	mockAgent := agentmocks.NewMockAgent(ctrl)
+	mockAgent.EXPECT().GetSession().Return(mockSession).AnyTimes()
+	mockAgent.EXPECT().AnswerWithError(gomock.Any(), gomock.Any(), gomock.Any()).Times(0)
+	reporter := metricsmocks.NewMockReporter(ctrl)
+	reporter.EXPECT().ReportSummary(metrics.ResponseTime, gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ string, tags map[string]string, _ float64) error {
+			assert.Equal(t, "backend.chat.send", tags["route"])
+			assert.Equal(t, "failed", tags["status"])
+			assert.Equal(t, handlerType, tags["type"])
+			return nil
+		},
+	).Times(1)
+	svc := NewHandlerService(
+		nil,
+		nil,
+		0,
+		0,
+		&cluster.Server{ID: "frontend-1", Type: "frontend"},
+		nil,
+		nil,
+		[]metrics.Reporter{reporter},
+		nil,
+		NewHandlerPool(),
+	)
+
+	svc.processMessage(mockAgent, msg)
+
+	require.Len(t, spanRecorder.Ended(), 1)
+}
+
 func TestHandlerServiceProcessMessageRejectsReservedSysRoutes(t *testing.T) {
 	tables := []struct {
 		name    string
@@ -427,7 +513,7 @@ func TestHandlerServiceLocalProcess(t *testing.T) {
 	assert.NotNil(t, m)
 	rt := route.NewRoute("", uuid.New().String(), uuid.New().String())
 	handlerPool := NewHandlerPool()
-	handlerPool.handlers[rt.Short()] = &component.Handler{Receiver: reflect.ValueOf(tObj), Method: m, Type: m.Type.In(2), IsRawArg: true}
+	handlerPool.Register(rt.Service, rt.Method, &component.Handler{Receiver: reflect.ValueOf(tObj), Method: m, Type: m.Type.In(2), IsRawArg: true})
 
 	tables := []struct {
 		name    string

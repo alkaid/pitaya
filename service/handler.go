@@ -59,8 +59,9 @@ import (
 )
 
 var (
-	handlerType              = "handler"
-	ErrHandlerServiceStopped = errors.New("handler service is stopping")
+	handlerType                  = "handler"
+	ErrHandlerServiceStopped     = errors.New("handler service is stopping")
+	ErrHandlerServiceUnavailable = errors.New("handler service is not configured")
 )
 
 type (
@@ -76,6 +77,7 @@ type (
 		agentFactory     agent.AgentFactory
 		handlerPool      *HandlerPool
 		handlers         map[string]*component.Handler // all handler method
+		registryMu       sync.RWMutex
 		taskMu           sync.Mutex
 		taskWG           sync.WaitGroup
 		tasksClosed      bool
@@ -91,7 +93,9 @@ type (
 	}
 )
 
-// NewHandlerService creates and returns a new handler service
+// NewHandlerService creates and returns a new handler service.
+// localProcessBufferSize and remoteProcessBufferSize are retained for source
+// compatibility only. They are deprecated and ignored.
 func NewHandlerService(
 	packetDecoder codec.PacketDecoder,
 	serializer serialize.Serializer,
@@ -104,6 +108,8 @@ func NewHandlerService(
 	handlerHooks *pipeline.HandlerHooks,
 	handlerPool *HandlerPool,
 ) *HandlerService {
+	_ = localProcessBufferSize
+	_ = remoteProcessBufferSize
 	taskCtx, cancelTasks := context.WithCancel(context.Background())
 	h := &HandlerService{
 		services:         make(map[string]*component.Service),
@@ -136,25 +142,64 @@ func (h *HandlerService) DispatchContext(ctx context.Context, _ int) {
 
 // Register registers components
 func (h *HandlerService) Register(comp component.Component, opts []component.Option) error {
-	s := component.NewService(comp, opts)
-	if isReservedHandlerServiceName(s.Name) {
-		return fmt.Errorf("handler: service name %q is reserved", s.Name)
-	}
-
-	if _, ok := h.services[s.Name]; ok {
-		return fmt.Errorf("handler: service already defined: %s", s.Name)
-	}
-
-	if err := s.ExtractHandler(); err != nil {
+	prepared, err := h.PrepareRegistrations([]ComponentRegistration{{Component: comp, Options: opts}})
+	if err != nil {
 		return err
 	}
+	return h.CommitPreparedRegistrations(prepared)
+}
 
-	// register all handlers
-	h.services[s.Name] = s
-	for name, handler := range s.Handlers {
-		h.handlerPool.Register(s.Name, name, handler)
+// PrepareRegistrations validates a handler batch against the current registry
+// without publishing it.
+func (h *HandlerService) PrepareRegistrations(registrations []ComponentRegistration) (*PreparedHandlerRegistrations, error) {
+	prepared, err := PrepareHandlerRegistrations(registrations)
+	if err != nil {
+		return nil, err
+	}
+	h.registryMu.RLock()
+	defer h.registryMu.RUnlock()
+	for _, preparedService := range prepared.services {
+		if _, ok := h.services[preparedService.Name]; ok {
+			return nil, fmt.Errorf("handler: service already defined: %s", preparedService.Name)
+		}
+	}
+	return prepared, nil
+}
+
+// CommitPreparedRegistrations publishes a complete prepared batch. The method
+// rechecks live registry names so a concurrent runtime registration cannot cause
+// a partial startup commit.
+func (h *HandlerService) CommitPreparedRegistrations(prepared *PreparedHandlerRegistrations) error {
+	if prepared == nil || len(prepared.services) == 0 {
+		return nil
+	}
+	h.registryMu.Lock()
+	defer h.registryMu.Unlock()
+	if err := h.validatePreparedRegistrationsLocked(prepared); err != nil {
+		return err
+	}
+	h.commitPreparedRegistrationsLocked(prepared)
+	return nil
+}
+
+func (h *HandlerService) validatePreparedRegistrationsLocked(prepared *PreparedHandlerRegistrations) error {
+	for _, preparedService := range prepared.services {
+		if _, ok := h.services[preparedService.Name]; ok {
+			return fmt.Errorf("handler: service already defined: %s", preparedService.Name)
+		}
 	}
 	return nil
+}
+
+func (h *HandlerService) commitPreparedRegistrationsLocked(prepared *PreparedHandlerRegistrations) {
+	batch := make(map[string]map[string]*component.Handler, len(prepared.services))
+	for _, preparedService := range prepared.services {
+		batch[preparedService.Name] = preparedService.Handlers
+	}
+	h.handlerPool.registerServices(batch)
+	for _, preparedService := range prepared.services {
+		h.services[preparedService.Name] = preparedService
+	}
 }
 
 // RegisterInterceptor 注册拦截分发器,优先级别高于 component.Remote
@@ -162,8 +207,8 @@ func (h *HandlerService) Register(comp component.Component, opts []component.Opt
 //	@receiver h
 //	@param serviceName
 //	@param interceptor
-func (h *HandlerService) RegisterInterceptor(serviceName string, interceptor *component.Interceptor) {
-	h.handlerPool.RegisterInterceptor(serviceName, interceptor)
+func (h *HandlerService) RegisterInterceptor(serviceName string, interceptor *component.Interceptor) error {
+	return h.handlerPool.RegisterInterceptor(serviceName, interceptor)
 }
 
 // Handle handles messages from a conn
@@ -410,20 +455,38 @@ func (h *HandlerService) processMessage(a agent.Agent, msg *message.Message) {
 				h.remoteService.remoteProcess(ctx, nil, a, r, msg)
 			})
 		} else {
-			logger.Log.Warnf("request made to another server type but no remoteService running")
+			publicErr := apierrors.ServiceUnavailable(
+				"remote_service_unavailable",
+				"remote service unavailable",
+				"",
+			).WithMetadata(map[string]string{
+				"route":       r.String(),
+				"server_type": r.SvType,
+			}).WithCause(ErrRemoteServiceUnavailable)
+			util.GetLoggerFromCtx(ctx).Warn(
+				"request routed to another server type without a remote service",
+				zap.String("route", r.String()),
+				zap.String("server_type", r.SvType),
+			)
+			h.completeMessageWithError(ctx, a, msg, publicErr)
+			return
 		}
 	}
 	if err != nil {
 		logg := util.GetLoggerFromCtx(ctx)
 		logg.Error("handler task submission failed", zap.Error(err))
 		publicErr := cluster.NormalizeTaskSubmissionError(err)
-		if msg.Type == message.Notify {
-			tracing.FinishSpan(ctx, publicErr)
-			metrics.ReportTimingFromCtx(ctx, h.metricsReporters, handlerType, publicErr)
-			return
-		}
-		a.AnswerWithError(ctx, msg.ID, publicErr)
+		h.completeMessageWithError(ctx, a, msg, publicErr)
 	}
+}
+
+func (h *HandlerService) completeMessageWithError(ctx context.Context, a agent.Agent, msg *message.Message, err error) {
+	if msg.Type == message.Notify {
+		tracing.FinishSpan(ctx, err)
+		metrics.ReportTimingFromCtx(ctx, h.metricsReporters, handlerType, err)
+		return
+	}
+	a.AnswerWithError(ctx, msg.ID, err)
 }
 
 func (h *HandlerService) submitSessionTask(sess session.Session, ctx context.Context, task func(context.Context)) error {
@@ -515,10 +578,20 @@ func (h *HandlerService) DumpServices() {
 	}
 }
 
+func (h *HandlerService) servicesSnapshot() map[string]*component.Service {
+	h.registryMu.RLock()
+	defer h.registryMu.RUnlock()
+	services := make(map[string]*component.Service, len(h.services))
+	for name, registered := range h.services {
+		services[name] = registered
+	}
+	return services
+}
+
 // Docs returns documentation for handlers
 func (h *HandlerService) Docs(getPtrNames bool) (map[string]interface{}, error) {
 	if h == nil {
 		return map[string]interface{}{}, nil
 	}
-	return docgenerator.HandlersDocs(h.server.Type, h.services, getPtrNames)
+	return docgenerator.HandlersDocs(h.server.Type, h.servicesSnapshot(), getPtrNames)
 }

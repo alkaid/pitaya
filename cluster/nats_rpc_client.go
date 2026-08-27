@@ -309,6 +309,13 @@ func (ns *NatsRPCClient) Call(
 	ctx = operationCtx
 	defer finishOperation()
 
+	var timeout time.Duration
+	ctx, timeout, err = resolveRequestTimeout(ctx, ns.reqTimeout)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+	logger.Log.Debugf("[rpc_client] sending remote nats request for route %s with timeout of %s", route, timeout)
+
 	if session != nil {
 		requestID := util.NanoID(16)
 		requestInfo := ""
@@ -319,13 +326,6 @@ func (ns *NatsRPCClient) Call(
 		session.SetRequestInFlight(requestID, requestInfo, true)
 		defer session.SetRequestInFlight(requestID, "", false)
 	}
-
-	reqTimeout := pcontext.GetFromPropagateCtx(ctx, constants.RequestTimeout)
-	if reqTimeout == nil {
-		reqTimeout = ns.reqTimeout.String()
-		ctx = pcontext.AddToPropagateCtx(ctx, constants.RequestTimeout, reqTimeout)
-	}
-	logger.Log.Debugf("[rpc_client] sending remote nats request for route %s with timeout of %s", route, reqTimeout)
 
 	req, err1 := buildRequest(ctx, rpcType, route.String(), session, msg, ns.server)
 	err = err1
@@ -358,8 +358,6 @@ func (ns *NatsRPCClient) Call(
 		return &protos.Response{}, nil
 	}
 
-	var timeout time.Duration
-	timeout, _ = time.ParseDuration(reqTimeout.(string))
 	requestCtx, cancelRequest := context.WithTimeout(ctx, timeout)
 	defer cancelRequest()
 	m, err = ns.conn.RequestMsgWithContext(requestCtx, &nats.Msg{
@@ -389,6 +387,35 @@ func (ns *NatsRPCClient) Call(
 		return nil, err
 	}
 	return res, nil
+}
+
+func resolveRequestTimeout(ctx context.Context, defaultTimeout time.Duration) (context.Context, time.Duration, error) {
+	value := pcontext.GetFromPropagateCtx(ctx, constants.RequestTimeout)
+	timeout := defaultTimeout
+	if value != nil {
+		text, ok := value.(string)
+		if !ok {
+			return ctx, 0, invalidRequestTimeoutError()
+		}
+		parsed, err := time.ParseDuration(text)
+		if err != nil || parsed <= 0 {
+			return ctx, 0, invalidRequestTimeoutError()
+		}
+		timeout = parsed
+	}
+	if timeout <= 0 {
+		return ctx, 0, invalidRequestTimeoutError()
+	}
+	ctx = pcontext.AddToPropagateCtx(ctx, constants.RequestTimeout, timeout.String())
+	return ctx, timeout, nil
+}
+
+func invalidRequestTimeoutError() error {
+	return apierrors.BadRequest(
+		"invalid_request_timeout",
+		"request timeout must be a positive duration string",
+		"",
+	).WithMetadata(map[string]string{"field": constants.RequestTimeout})
 }
 
 // Fork implement RPCClient.Fork

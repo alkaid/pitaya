@@ -22,6 +22,7 @@ package metrics
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/alkaid/pitaya/v2/constants"
 
@@ -135,7 +136,10 @@ func (s *StatsdReporter) ReportSummary(metric string, tagsMap map[string]string,
 		fullTags = append(fullTags, fmt.Sprintf("%s:%s", k, v))
 	}
 
-	err := s.client.TimeInMilliseconds(metric, float64(value), fullTags, s.rate)
+	if metric == ResponseTime || metric == ProcessDelay {
+		value /= float64(time.Millisecond)
+	}
+	err := s.client.TimeInMilliseconds(metric, value, fullTags, s.rate)
 	if err != nil {
 		logger.Zap.Error("failed to report summary", zap.Error(err))
 	}

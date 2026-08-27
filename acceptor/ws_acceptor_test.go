@@ -3,6 +3,7 @@ package acceptor
 import (
 	"crypto/tls"
 	"fmt"
+	"io"
 	"testing"
 	"time"
 
@@ -151,6 +152,78 @@ func TestWSConnRead(t *testing.T) {
 			assert.Equal(t, table.write, b)
 		})
 	}
+}
+
+type scriptedReadResult struct {
+	data []byte
+	err  error
+}
+
+type scriptedReader struct {
+	results []scriptedReadResult
+}
+
+func (r *scriptedReader) Read(p []byte) (int, error) {
+	if len(r.results) == 0 {
+		return 0, io.EOF
+	}
+	result := r.results[0]
+	r.results = r.results[1:]
+	return copy(p, result.data), result.err
+}
+
+func TestWSConnReadReturnsBytesBeforeMessageBoundaryEOF(t *testing.T) {
+	conn := &WSConn{reader: &scriptedReader{results: []scriptedReadResult{
+		{data: []byte("payload"), err: io.EOF},
+	}}}
+	buffer := make([]byte, 16)
+
+	n, err := conn.Read(buffer)
+	assert.NoError(t, err)
+	assert.Equal(t, "payload", string(buffer[:n]))
+	assert.Nil(t, conn.reader)
+}
+
+func TestWSConnReadDoesNotReturnZeroNilForNonEmptyBuffer(t *testing.T) {
+	conn := &WSConn{reader: &scriptedReader{results: []scriptedReadResult{
+		{},
+		{data: []byte("payload"), err: io.EOF},
+	}}}
+	buffer := make([]byte, 16)
+
+	n, err := conn.Read(buffer)
+	assert.NoError(t, err)
+	assert.Equal(t, "payload", string(buffer[:n]))
+}
+
+func TestWSConnReadSkipsEmptyWebSocketMessages(t *testing.T) {
+	w := NewWSAcceptor("127.0.0.1:0")
+	connections := w.GetConnChan()
+	defer w.Stop()
+	go w.ListenAndServe()
+
+	var sender *websocket.Conn
+	helpers.ShouldEventuallyReturn(t, func() error {
+		address := fmt.Sprintf("ws://%s", w.GetAddr())
+		var err error
+		sender, _, err = websocket.DefaultDialer.Dial(address, nil)
+		return err
+	}, nil, 10*time.Millisecond, 100*time.Millisecond)
+	t.Cleanup(func() { _ = sender.Close() })
+	receiver := helpers.ShouldEventuallyReceive(t, connections, 100*time.Millisecond).(*WSConn)
+	t.Cleanup(func() { _ = receiver.Close() })
+
+	assert.NoError(t, sender.WriteMessage(websocket.BinaryMessage, nil))
+	assert.NoError(t, sender.WriteMessage(websocket.BinaryMessage, []byte("first")))
+	assert.NoError(t, sender.WriteMessage(websocket.BinaryMessage, []byte("second")))
+
+	buffer := make([]byte, 16)
+	n, err := receiver.Read(buffer)
+	assert.NoError(t, err)
+	assert.Equal(t, "first", string(buffer[:n]))
+	n, err = receiver.Read(buffer)
+	assert.NoError(t, err)
+	assert.Equal(t, "second", string(buffer[:n]))
 }
 
 func TestWSConnWrite(t *testing.T) {

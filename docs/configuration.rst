@@ -452,11 +452,11 @@ Metrics Reporting
   * - pitaya.metrics.prometheus.enabled
     - false
     - bool
-    - Whether prometheus reporting should be enabled
+    - Whether the required App-managed prometheus exporter should be enabled. A collector or port bind failure prevents App readiness.
   * - pitaya.metrics.prometheus.port
     - 9090
     - int
-    - Port to expose prometheus metrics
+    - Port bound during App.Start to expose prometheus metrics. App.Shutdown releases the listener.
   * - pitaya.metrics.constTags
     - map[string]string{}
     - map[string]string
@@ -473,6 +473,7 @@ Metrics Reporting
     - []map[string]interface{}
     - []map[string]interface
     - Custom metrics counter
+
   * - pitaya.metrics.custom.counters[].Subsystem
     - ""
     - string
@@ -534,6 +535,19 @@ Metrics Reporting
     - map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001}
     - Custom summary objectives with quantiles 
 
+The default Builder registers Pitaya collectors in a private registry and
+serves it together with ``prometheus.DefaultGatherer`` through an exporter-owned
+HTTP mux. Constructing or building an App does not open the metrics port; the
+synchronous bind is part of ``App.Start`` readiness. Applications using the
+deprecated process-wide ``CreatePrometheusReporter`` compatibility API must call
+``ShutdownPrometheusReporter`` once, after all shared reporter users have
+stopped.
+
+StatsD's ``TimeInMilliseconds`` adapter converts the two built-in duration
+metrics, ``response_time_ns`` and ``handler_delay_ns``, from the reporter's
+nanosecond values to milliseconds. Custom summaries keep their supplied numeric
+value, including custom names ending in ``_ns``.
+
 Concurrency
 ===========
 
@@ -553,15 +567,22 @@ Concurrency
   * - pitaya.buffer.handler.localprocess
     - 20
     - int
-    - Buffer size for messages received by the handler and processed locally
+    - Deprecated compatibility field. Parsed but ignored; local admission is owned by the agent buffer and the session/user keyed executor task buffer.
   * - pitaya.buffer.handler.remoteprocess
     - 20
     - int
-    - Buffer size for messages received by the handler and forwarded to remote servers
+    - Deprecated compatibility field. Parsed but ignored; remote admission is owned by the keyed executor and NATS transport buffers.
   * - pitaya.concurrency.handler.dispatch
     - 25
     - int
-    - Number of dispatcher goroutines reading decoded agent messages. Handler method ordering and keyed execution are not controlled by this value.
+    - Deprecated compatibility field. Parsed but ignored; each App starts exactly one global timer dispatcher owner.
+
+Handler traffic is not admitted through a separate local/remote queue. Tune
+``pitaya.buffer.agent.messages`` for each agent's pending writes,
+``pitaya.gopools.<pool>.taskbuffer`` for session/user keyed execution, and
+``pitaya.cluster.rpc.server.nats.buffer.messages`` or ``.push`` for NATS
+transport buffering. The three deprecated fields above may be removed in the
+next major release.
 
 Modules
 =======

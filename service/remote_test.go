@@ -169,6 +169,25 @@ func TestRemoteServiceAllowsReservedSysName(t *testing.T) {
 	assert.Equal(t, "ack", result.B)
 }
 
+func TestRemoteServiceRegisterInterceptorValidatesBeforePublishing(t *testing.T) {
+	svc := NewRemoteService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+	valid := &component.Interceptor{InterceptorFun: func(context.Context, route.Route, []byte) (proto.Message, error) {
+		return nil, nil
+	}}
+	require.NoError(t, svc.RegisterInterceptor("sys", valid))
+	published, ok := svc.remoteRegistryOwner.lookupInterceptor("sys")
+	require.True(t, ok)
+	assert.Same(t, valid, published)
+
+	assert.Error(t, svc.RegisterInterceptor("remote", nil))
+	assert.Error(t, svc.RegisterInterceptor("remote", &component.Interceptor{}))
+	assert.Error(t, svc.RegisterInterceptor("", valid))
+	assert.Error(t, svc.RegisterInterceptor(" remote ", valid))
+	assert.Error(t, svc.RegisterInterceptor("remote.method", valid))
+	_, ok = svc.remoteRegistryOwner.lookupInterceptor("remote")
+	assert.False(t, ok)
+}
+
 func TestRemoteServiceAddRemoteBindingListener(t *testing.T) {
 	svc := NewRemoteService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	ctrl := gomock.NewController(t)
@@ -679,7 +698,7 @@ func TestRemoteServiceHandleRPCSys(t *testing.T) {
 			sessionPool := session.NewSessionPool()
 			handlerPool := NewHandlerPool()
 			mockSD.EXPECT().GetSelfServer().Return(&cluster.Server{Frontend: table.req.Session == nil})
-			handlerPool.handlers[rt.Short()] = &component.Handler{Receiver: reflect.ValueOf(tObj), Method: m, Type: m.Type.In(2)}
+			handlerPool.Register(rt.Service, rt.Method, &component.Handler{Receiver: reflect.ValueOf(tObj), Method: m, Type: m.Type.In(2)})
 			svc := NewRemoteService(mockRPCClient, mockRPCServer, mockSD, packetEncoder, mockSerializer, router, messageEncoder, &cluster.Server{}, sessionPool, nil, pipeline.NewHandlerHooks(), handlerPool)
 			assert.NotNil(t, svc)
 

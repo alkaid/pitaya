@@ -22,6 +22,7 @@ package cluster
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/pkg/errors"
@@ -58,16 +59,32 @@ func (sd *etcdServiceDiscovery) notifyListeners(act Action, sv *Server, old ...*
 	}
 	_, _ = sd.enqueueCallback(func() {
 		for _, listener := range listeners {
-			switch act {
-			case DEL:
-				listener.RemoveServer(sv)
-			case ADD:
-				listener.AddServer(sv)
-			case Modify:
-				listener.ModifyServer(sv, oldServer)
-			}
+			executeTopologyListener(listener, act, sv, oldServer)
 		}
 	})
+}
+
+func executeTopologyListener(listener SDListener, act Action, server, oldServer *Server) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			util.LogRecoveredPanic(
+				logger.Zap,
+				"etcd topology listener panicked",
+				recovered,
+				zap.String("callback_kind", "topology_listener"),
+				zap.Int("action", int(act)),
+				zap.String("listener_type", fmt.Sprintf("%T", listener)),
+			)
+		}
+	}()
+	switch act {
+	case DEL:
+		listener.RemoveServer(server)
+	case ADD:
+		listener.AddServer(server)
+	case Modify:
+		listener.ModifyServer(server, oldServer)
+	}
 }
 
 func (sd *etcdServiceDiscovery) writeLockScope(f func()) {

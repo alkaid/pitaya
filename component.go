@@ -21,11 +21,11 @@
 package pitaya
 
 import (
+	"fmt"
 	"reflect"
 
 	"github.com/alkaid/pitaya/v2/component"
-	"github.com/alkaid/pitaya/v2/logger"
-	"go.uber.org/zap"
+	"github.com/alkaid/pitaya/v2/service"
 )
 
 type regComp struct {
@@ -49,21 +49,29 @@ func (app *App) RegisterSubscribe(c component.Component, options ...component.Op
 	app.remoteComp = append(app.remoteComp, regComp{c, options})
 }
 
-func (app *App) LazyRegister(c component.Component, options ...component.Option) {
-	if err := app.handlerService.Register(c, options); err != nil {
-		logger.Zap.Error("Failed to lazy register handler", zap.Error(err))
+func (app *App) LazyRegister(c component.Component, options ...component.Option) error {
+	if app.handlerService == nil {
+		return service.ErrHandlerServiceUnavailable
 	}
+	return app.handlerService.Register(c, options)
 }
-func (app *App) LazyRegisterRemote(c component.Component, options ...component.Option) {
-	if err := app.remoteService.Register(c, options); err != nil {
-		logger.Zap.Error("Failed to lazy register remote", zap.Error(err))
+func (app *App) LazyRegisterRemote(c component.Component, options ...component.Option) error {
+	if app.remoteService == nil {
+		return service.ErrRemoteServiceUnavailable
 	}
+	return app.remoteService.Register(c, options)
 }
-func (app *App) RegisterInterceptor(serviceName string, interceptor *component.Interceptor) {
-	app.handlerService.RegisterInterceptor(serviceName, interceptor)
+func (app *App) RegisterInterceptor(serviceName string, interceptor *component.Interceptor) error {
+	if app.handlerService == nil {
+		return service.ErrHandlerServiceUnavailable
+	}
+	return app.handlerService.RegisterInterceptor(serviceName, interceptor)
 }
-func (app *App) RegisterRemoteInterceptor(serviceName string, interceptor *component.Interceptor) {
-	app.remoteService.RegisterInterceptor(serviceName, interceptor)
+func (app *App) RegisterRemoteInterceptor(serviceName string, interceptor *component.Interceptor) error {
+	if app.remoteService == nil {
+		return service.ErrRemoteServiceUnavailable
+	}
+	return app.remoteService.RegisterInterceptor(serviceName, interceptor)
 }
 
 // Value components can be non-comparable; compare their reference-bearing fields by identity.
@@ -131,51 +139,95 @@ func uniqueComponents(group []regComp, seen *[]component.Component) []component.
 	return components
 }
 
-func (app *App) startupComponents() {
+func componentRegistrations(registrations []regComp) []service.ComponentRegistration {
+	result := make([]service.ComponentRegistration, 0, len(registrations))
+	for _, registration := range registrations {
+		result = append(result, service.ComponentRegistration{
+			Component: registration.comp,
+			Options:   registration.opts,
+		})
+	}
+	return result
+}
+
+func componentLifecycleName(comp component.Component) string {
+	if comp == nil {
+		return "<nil>"
+	}
+	typeOf := reflect.TypeOf(comp)
+	for typeOf.Kind() == reflect.Pointer {
+		typeOf = typeOf.Elem()
+	}
+	if typeOf.Name() != "" {
+		return typeOf.Name()
+	}
+	return reflect.TypeOf(comp).String()
+}
+
+func (app *App) startupComponents() error {
+	if app.handlerService == nil && len(app.handlerComp) > 0 {
+		return service.ErrHandlerServiceUnavailable
+	}
+	if app.remoteService == nil && len(app.remoteComp) > 0 {
+		return service.ErrRemoteServiceUnavailable
+	}
+
+	var preparedHandlers *service.PreparedHandlerRegistrations
+	var preparedRemotes *service.PreparedRemoteRegistrations
+	var err error
+	if len(app.handlerComp) > 0 {
+		preparedHandlers, err = app.handlerService.PrepareRegistrations(componentRegistrations(app.handlerComp))
+		if err != nil {
+			return fmt.Errorf("preflight handler components: %w", err)
+		}
+	}
+	if len(app.remoteComp) > 0 {
+		preparedRemotes, err = app.remoteService.PrepareRegistrations(componentRegistrations(app.remoteComp))
+		if err != nil {
+			return fmt.Errorf("preflight remote components: %w", err)
+		}
+	}
+
+	journal := app.ensureStartupJournal()
 	seen := make([]component.Component, 0, len(app.handlerComp)+len(app.remoteComp))
-	for _, group := range [][]regComp{app.handlerComp, app.remoteComp} {
+	for groupIndex, group := range [][]regComp{app.handlerComp, app.remoteComp} {
 		components := uniqueComponents(group, &seen)
 		for _, comp := range components {
-			comp.Init()
+			name := componentLifecycleName(comp)
+			if err := callLifecycleHook("component", name, "Init", comp.Init); err != nil {
+				return err
+			}
+			journal.recordComponent(groupIndex, comp, name)
 		}
 		for _, comp := range components {
-			comp.AfterInit()
-		}
-	}
-
-	// register all components
-	for _, c := range app.handlerComp {
-		if err := app.handlerService.Register(c.comp, c.opts); err != nil {
-			logger.Zap.Error("Failed to register handler", zap.Error(err))
-		}
-	}
-
-	// register all remote components
-	for _, c := range app.remoteComp {
-		if app.remoteService == nil {
-			logger.Zap.Warn("registered a remote component but remoteService is not running! skipping...")
-		} else {
-			if err := app.remoteService.Register(c.comp, c.opts); err != nil {
-				logger.Zap.Error("Failed to register remote", zap.Error(err))
+			name := componentLifecycleName(comp)
+			if err := callLifecycleHook("component", name, "AfterInit", comp.AfterInit); err != nil {
+				return err
 			}
 		}
 	}
 
-	app.handlerService.DumpServices()
+	if err := service.CommitPreparedComponentRegistrations(
+		app.handlerService,
+		preparedHandlers,
+		app.remoteService,
+		preparedRemotes,
+	); err != nil {
+		return fmt.Errorf("commit components: %w", err)
+	}
+
+	if app.handlerService != nil {
+		app.handlerService.DumpServices()
+	}
 	if app.remoteService != nil {
 		app.remoteService.DumpServices()
 	}
+	return nil
 }
 
-func (app *App) shutdownComponents() {
-	seen := make([]component.Component, 0, len(app.handlerComp)+len(app.remoteComp))
-	for _, group := range [][]regComp{app.handlerComp, app.remoteComp} {
-		components := uniqueComponents(group, &seen)
-		for i := len(components) - 1; i >= 0; i-- {
-			components[i].BeforeShutdown()
-		}
-		for i := len(components) - 1; i >= 0; i-- {
-			components[i].Shutdown()
-		}
+func (app *App) shutdownComponents() error {
+	if app.startupJournal == nil {
+		return nil
 	}
+	return app.startupJournal.shutdownComponents()
 }

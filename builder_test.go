@@ -31,19 +31,45 @@ import (
 	"time"
 
 	"github.com/alkaid/pitaya/v2/acceptor"
+	"github.com/alkaid/pitaya/v2/cluster"
 	clustermocks "github.com/alkaid/pitaya/v2/cluster/mocks"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/constants"
 	pcontext "github.com/alkaid/pitaya/v2/context"
+	"github.com/alkaid/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/metrics"
+	metricsmocks "github.com/alkaid/pitaya/v2/metrics/mocks"
+	"github.com/alkaid/pitaya/v2/metrics/models"
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/service"
+	"github.com/alkaid/pitaya/v2/session"
+	sessionmocks "github.com/alkaid/pitaya/v2/session/mocks"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 type builderIdempotencyStore struct {
 	calls int
+}
+
+type resolvedGraphTestRPCServer struct{}
+
+func (*resolvedGraphTestRPCServer) SetPitayaServer(protos.PitayaServer) {}
+func (*resolvedGraphTestRPCServer) Subscribe(string, ...string) error   { return nil }
+func (*resolvedGraphTestRPCServer) Init() error                         { return nil }
+func (*resolvedGraphTestRPCServer) AfterInit()                          {}
+func (*resolvedGraphTestRPCServer) BeforeShutdown()                     {}
+func (*resolvedGraphTestRPCServer) Shutdown() error                     { return nil }
+
+func replaceBuilderSessionPoolForTest(builder *Builder, pool session.SessionPool) {
+	builder.SessionPool = pool
+	if builder.ServerMode == Cluster {
+		builder.RPCServer = &resolvedGraphTestRPCServer{}
+	}
 }
 
 func (s *builderIdempotencyStore) Execute(
@@ -260,6 +286,258 @@ func TestBuilderRejectsNilMetricsReporter(t *testing.T) {
 	assert.PanicsWithError(t, "nil metrics reporter at index 0", func() {
 		builder.Build()
 	})
+}
+
+func TestBuilderFailsFastWhenRequiredPrometheusReporterCannotBeConstructed(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig()
+	cfg.Metrics.Prometheus.Enabled = true
+	cfg.Metrics.Custom.Histograms = []*models.Histogram{{
+		Subsystem: "handler",
+		Name:      metrics.ResponseTime,
+		Help:      "conflicts with the built-in response-time summary",
+	}}
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		NewBuilder(false, "prometheus-construction", Standalone, nil, *cfg)
+	}()
+	require.NotNil(t, recovered)
+	require.Contains(t, fmt.Sprint(recovered), "configure required Prometheus exporter")
+	require.Contains(t, fmt.Sprint(recovered), "pitaya_handler_response_time_ns")
+}
+
+func TestBuilderRejectsRemovingRequiredPrometheusReporterFromResolvedGraph(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig()
+	cfg.Metrics.Prometheus.Enabled = true
+	builder := NewBuilder(false, "prometheus-resolved-graph", Standalone, nil, *cfg)
+	builder.MetricsReporters = nil
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		builder.Build()
+	}()
+	require.NotNil(t, recovered)
+	require.Contains(t, fmt.Sprint(recovered), "removed the reporter owned by the required Prometheus exporter")
+}
+
+func TestBuilderGraphRejectsDefaultDependenciesWithReplacedRootsBeforeSideEffects(t *testing.T) {
+	tables := []struct {
+		name       string
+		mutate     func(t *testing.T, builder *Builder)
+		wantFields []string
+	}{
+		{
+			name: "session pool requires custom rpc server",
+			mutate: func(t *testing.T, builder *Builder) {
+				builder.SessionPool = sessionmocks.NewMockSessionPool(gomock.NewController(t))
+			},
+			wantFields: []string{"Builder.RPCServer", "Builder.SessionPool"},
+		},
+		{
+			name: "server requires complete custom transport",
+			mutate: func(_ *testing.T, builder *Builder) {
+				builder.Server = cluster.NewServer("replacement", "cluster", false)
+			},
+			wantFields: []string{"Builder.RPCServer", "Builder.RPCClient", "Builder.ServiceDiscovery", "Builder.Server"},
+		},
+		{
+			name: "metrics require custom nats client and server",
+			mutate: func(t *testing.T, builder *Builder) {
+				builder.MetricsReporters = []metrics.Reporter{metricsmocks.NewMockReporter(gomock.NewController(t))}
+			},
+			wantFields: []string{"Builder.RPCServer", "Builder.RPCClient", "Builder.MetricsReporters"},
+		},
+	}
+
+	for _, table := range tables {
+		t.Run(table.name, func(t *testing.T) {
+			builder := NewDefaultBuilder(false, "cluster", Cluster, nil, *config.NewDefaultPitayaConfig())
+			hookCalled := false
+			builder.AddPostBuildHook(func(Pitaya) { hookCalled = true })
+			table.mutate(t, builder)
+
+			panicValue := captureBuilderPanic(t, builder)
+
+			message := fmt.Sprint(panicValue)
+			assert.Contains(t, message, "invalid builder dependency graph")
+			for _, field := range table.wantFields {
+				assert.Contains(t, message, field)
+			}
+			assert.False(t, hookCalled)
+			routerSD := reflect.ValueOf(builder.Router).Elem().FieldByName("serviceDiscovery")
+			assert.True(t, routerSD.IsNil(), "graph preflight must run before Router mutation")
+		})
+	}
+}
+
+func TestBuilderGraphRejectsStaleDefaultSessionCacheInputs(t *testing.T) {
+	t.Run("redis identity", func(t *testing.T) {
+		builder := NewDefaultBuilder(false, "standalone", Standalone, nil, *config.NewDefaultPitayaConfig())
+		builder.Redis = nil
+
+		message := fmt.Sprint(captureBuilderPanic(t, builder))
+		assert.Contains(t, message, "Builder.Redis")
+		assert.Contains(t, message, "Builder.SessionPool")
+	})
+
+	t.Run("redis construction config", func(t *testing.T) {
+		builder := NewDefaultBuilder(false, "standalone", Standalone, nil, *config.NewDefaultPitayaConfig())
+		builder.Config.Storage.Redis.Addrs = []string{"redis.internal:6380"}
+
+		message := fmt.Sprint(captureBuilderPanic(t, builder))
+		assert.Contains(t, message, "Builder.Config.Storage.Redis")
+	})
+
+	t.Run("session cache ttl", func(t *testing.T) {
+		builder := NewDefaultBuilder(false, "standalone", Standalone, nil, *config.NewDefaultPitayaConfig())
+		builder.Config.Session.CacheTTL += time.Minute
+
+		message := fmt.Sprint(captureBuilderPanic(t, builder))
+		assert.Contains(t, message, "Builder.Config.Session.CacheTTL")
+	})
+}
+
+func TestBuilderGraphAcceptsSupportedDependencyReplacementGroups(t *testing.T) {
+	t.Run("standalone session pool", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		customPool := sessionmocks.NewMockSessionPool(ctrl)
+		builder := NewDefaultBuilder(false, "standalone", Standalone, nil, *config.NewDefaultPitayaConfig())
+		builder.SessionPool = customPool
+
+		app := builder.Build().(*App)
+
+		assert.Same(t, customPool, app.sessionPool)
+	})
+
+	t.Run("cluster session pool and rpc server", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		customPool := sessionmocks.NewMockSessionPool(ctrl)
+		customRPCServer := clustermocks.NewMockRPCServer(ctrl)
+		customRPCServer.EXPECT().SetPitayaServer(gomock.Any()).Times(1)
+		builder := NewDefaultBuilder(false, "cluster", Cluster, nil, *config.NewDefaultPitayaConfig())
+		builder.SessionPool = customPool
+		builder.RPCServer = customRPCServer
+
+		app := builder.Build().(*App)
+
+		assert.Same(t, customPool, app.sessionPool)
+		assert.Same(t, customRPCServer, app.rpcServer)
+	})
+
+	t.Run("server and complete custom transport", func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		customServer := cluster.NewServer("replacement", "cluster", false)
+		customRPCClient := clustermocks.NewMockRPCClient(ctrl)
+		customRPCServer := clustermocks.NewMockRPCServer(ctrl)
+		customDiscovery := clustermocks.NewMockServiceDiscovery(ctrl)
+		customRPCServer.EXPECT().SetPitayaServer(gomock.Any()).Times(1)
+		builder := NewDefaultBuilder(false, "cluster", Cluster, nil, *config.NewDefaultPitayaConfig())
+		builder.Server = customServer
+		builder.RPCClient = customRPCClient
+		builder.RPCServer = customRPCServer
+		builder.ServiceDiscovery = customDiscovery
+
+		app := builder.Build().(*App)
+
+		assert.Same(t, customServer, app.server)
+		assert.Same(t, customRPCClient, app.rpcClient)
+		assert.Same(t, customRPCServer, app.rpcServer)
+		assert.Same(t, customDiscovery, app.serviceDiscovery)
+	})
+}
+
+func TestBuilderBuildFreezesResolvedFieldAndSliceAssignments(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	firstReporter := metricsmocks.NewMockReporter(ctrl)
+	secondReporter := metricsmocks.NewMockReporter(ctrl)
+	builder := NewDefaultBuilder(false, "standalone", Standalone, nil, *config.NewDefaultPitayaConfig())
+	builder.MetricsReporters = []metrics.Reporter{firstReporter}
+	originalServer := builder.Server
+	originalPool := builder.SessionPool
+	originalHeartbeat := builder.Config.Heartbeat.Interval
+
+	app := builder.Build().(*App)
+	builder.Server = cluster.NewServer("replacement", "standalone", false)
+	builder.SessionPool = sessionmocks.NewMockSessionPool(ctrl)
+	builder.MetricsReporters[0] = secondReporter
+	builder.Config.Heartbeat.Interval = time.Second
+
+	assert.Same(t, originalServer, app.server)
+	assert.Same(t, originalPool, app.sessionPool)
+	require.Len(t, app.metricsReporters, 1)
+	assert.Same(t, firstReporter, app.metricsReporters[0])
+	assert.Equal(t, originalHeartbeat, app.config.Heartbeat.Interval)
+}
+
+func TestBuilderRejectsSecondBuild(t *testing.T) {
+	builder := NewDefaultBuilder(false, "standalone", Standalone, nil, *config.NewDefaultPitayaConfig())
+	require.NotNil(t, builder.Build())
+
+	panicValue := captureBuilderPanic(t, builder)
+
+	assert.EqualError(t, panicValue.(error), "builder build already started")
+}
+
+func TestBuilderRejectsConcurrentBuild(t *testing.T) {
+	builder := NewDefaultBuilder(false, "standalone", Standalone, nil, *config.NewDefaultPitayaConfig())
+	hookStarted := make(chan struct{})
+	releaseHook := make(chan struct{})
+	builder.AddPostBuildHook(func(Pitaya) {
+		close(hookStarted)
+		<-releaseHook
+	})
+
+	firstResult := make(chan Pitaya, 1)
+	firstPanic := make(chan any, 1)
+	go func() {
+		defer func() { firstPanic <- recover() }()
+		firstResult <- builder.Build()
+	}()
+	<-hookStarted
+
+	panicValue := captureBuilderPanic(t, builder)
+	assert.EqualError(t, panicValue.(error), "builder build already started")
+	close(releaseHook)
+	require.Nil(t, <-firstPanic)
+	require.NotNil(t, <-firstResult)
+}
+
+func TestWarnIgnoredHandlerConfigurationLogsOneDeprecation(t *testing.T) {
+	core, observed := observer.New(zapcore.WarnLevel)
+	previousLogger := logger.Zap
+	logger.Zap = zap.New(core)
+	t.Cleanup(func() { logger.Zap = previousLogger })
+	cfg := config.NewDefaultPitayaConfig()
+
+	warnIgnoredHandlerConfiguration(*cfg)
+	assert.Zero(t, observed.Len())
+
+	cfg.Buffer.Handler.LocalProcess = -1
+	cfg.Buffer.Handler.RemoteProcess = 999
+	cfg.Concurrency.Handler.Dispatch = 0
+	warnIgnoredHandlerConfiguration(*cfg)
+
+	entries := observed.All()
+	require.Len(t, entries, 1)
+	assert.Equal(t, "deprecated handler buffer and dispatch configuration is ignored", entries[0].Message)
+	fields := entries[0].ContextMap()
+	assert.EqualValues(t, -1, fields["pitaya.buffer.handler.localprocess"])
+	assert.EqualValues(t, 999, fields["pitaya.buffer.handler.remoteprocess"])
+	assert.EqualValues(t, 0, fields["pitaya.concurrency.handler.dispatch"])
+	assert.Len(t, fields["actual_capacity_owners"], 4)
+}
+
+func captureBuilderPanic(t *testing.T, builder *Builder) any {
+	t.Helper()
+	var panicValue any
+	func() {
+		defer func() { panicValue = recover() }()
+		builder.Build()
+	}()
+	require.NotNil(t, panicValue)
+	return panicValue
 }
 
 func TestBuilderStartConfigModulePolicy(t *testing.T) {

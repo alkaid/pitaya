@@ -63,8 +63,13 @@ compile-platform:
 test-unit:
 	@go test ./... -count=1
 
-test-race:
-	@GOWORK=off GOFLAGS= go test -race ./co ./session ./agent ./cluster ./service ./router ./acceptor ./timer ./logger ./config -count=10 -timeout=10m
+test-race-root:
+	@go test -race ./co ./session ./agent ./cluster ./service ./router ./acceptor ./acceptorwrapper ./client ./metrics ./timer ./logger ./config -count=10 -timeout=10m
+
+test-race-xk6:
+	@cd xk6-pitaya && go test -race ./... -count=10 -timeout=10m
+
+test-race: test-race-root test-race-xk6
 
 test-integration:
 	@./scripts/test-integration.sh
@@ -111,10 +116,10 @@ verify:
 scan-deps: init-toolchain
 	@./scripts/scan-deps.sh
 
-compile-core compile-root compile-platform test-unit test-race test-integration test-e2e-nats e2e-test-nats vet verify-root verify-fast verify init-toolchain setup-ci build-k6-extension protos-compile protos-compile-demo scan-deps: override export GOWORK := off
-compile-cli compile-xk6: override export GOWORK := $(WORKSPACE)
+compile-core compile-root compile-platform test-unit test-race-root test-integration test-e2e-nats e2e-test-nats vet verify-root verify-fast verify init-toolchain setup-ci build-k6-extension protos-compile protos-compile-demo scan-deps: override export GOWORK := off
+compile-cli compile-xk6 test-race-xk6: override export GOWORK := $(WORKSPACE)
 
-compile-core compile-root compile-cli compile-xk6 compile compile-platform test-unit test-race test-integration vet verify-root verify-fast test-e2e-nats e2e-test-nats verify: override export GOFLAGS :=
+compile-core compile-root compile-cli compile-xk6 compile compile-platform test-unit test-race-root test-race-xk6 test-race test-integration vet verify-root verify-fast test-e2e-nats e2e-test-nats verify: override export GOFLAGS :=
 
 init-toolchain:
 	@go mod download -modfile=$(TOOLS_MOD)
@@ -317,7 +322,7 @@ test-coverage-func coverage-func: test-coverage
 	@echo "\033[1;34m=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\033[0m"
 	@go tool cover -func="$(COVERAGE_PROFILE)" | grep -Ev "100[.]0%"
 
-.PHONY: compile-core compile-root compile-cli compile-xk6 compile compile-platform test-unit test-race test-integration vet verify-root module-verify tools-verify logrus-verify test-consumer test-distribution docs docs-lint verify-fast verify scan-deps test-e2e-nats e2e-test-nats e2e-test benchmark-test-nats benchmark-regression benchmark-gate-nats test-stress-nats benchmark-test-grpc test-fuzz-seeds test-fuzz-nightly test-fuzz-one test coverage coverage-stamped coverage-gate coverage-baseline init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
+.PHONY: compile-core compile-root compile-cli compile-xk6 compile compile-platform test-unit test-race-root test-race-xk6 test-race test-integration vet verify-root module-verify tools-verify logrus-verify test-consumer test-distribution docs docs-lint verify-fast verify scan-deps test-e2e-nats e2e-test-nats e2e-test benchmark-test-nats benchmark-regression benchmark-gate-nats test-stress-nats benchmark-test-grpc test-fuzz-seeds test-fuzz-nightly test-fuzz-one test coverage coverage-stamped coverage-gate coverage-baseline init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 
 mocks: agent-mock session-mock networkentity-mock pitaya-mock serializer-mock metrics-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 

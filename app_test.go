@@ -25,7 +25,9 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"reflect"
@@ -39,18 +41,23 @@ import (
 
 	"github.com/alkaid/pitaya/v2/acceptor"
 	"github.com/alkaid/pitaya/v2/cluster"
+	"github.com/alkaid/pitaya/v2/component"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/helpers"
 	"github.com/alkaid/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/metrics"
+	"github.com/alkaid/pitaya/v2/metrics/models"
 	acceptormocks "github.com/alkaid/pitaya/v2/mocks"
 	"github.com/alkaid/pitaya/v2/route"
 	"github.com/alkaid/pitaya/v2/router"
+	"github.com/alkaid/pitaya/v2/service"
 	"github.com/alkaid/pitaya/v2/session/mocks"
 	"github.com/alkaid/pitaya/v2/timer"
 	"github.com/alkaid/viper"
 	"github.com/gorilla/websocket"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/trace"
@@ -340,7 +347,7 @@ func TestInitSysRemotes(t *testing.T) {
 	app.initSysRemotes()
 	assert.Empty(t, app.handlerComp)
 	assert.Len(t, app.remoteComp, 1)
-	app.startupComponents()
+	require.NoError(t, app.startupComponents())
 }
 
 func TestSetDictionary(t *testing.T) {
@@ -647,6 +654,116 @@ func TestConfigureDefaultMetricsReporter(t *testing.T) {
 	}
 }
 
+func TestPrometheusExporterBindFailurePreventsAppReadiness(t *testing.T) {
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, occupied.Close()) })
+
+	cfg := config.NewDefaultPitayaConfig()
+	cfg.Metrics.Prometheus.Enabled = true
+	cfg.Metrics.Prometheus.Port = occupied.Addr().(*net.TCPAddr).Port
+	acceptorStarted := atomic.Bool{}
+	acc := newInitOrderAcceptor(func() error {
+		acceptorStarted.Store(true)
+		return nil
+	})
+	builder := newAppTestBuilder(true, "prometheus-bind-failure", Standalone, nil, *cfg)
+	builder.AddAcceptor(acc)
+	app := builder.Build().(*App)
+	laterModule := &MyMod{name: "must-not-start"}
+	require.NoError(t, app.RegisterModule(laterModule, "must-not-start"))
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		app.Start()
+	}()
+	require.NotNil(t, recovered)
+	require.Contains(t, fmt.Sprint(recovered), "bind prometheus exporter port")
+	require.False(t, app.IsRunning())
+	require.False(t, laterModule.running)
+	require.False(t, acceptorStarted.Load())
+	select {
+	case <-acc.serveChecked:
+		t.Fatal("acceptor Serve ran after required Prometheus bind failed")
+	default:
+	}
+}
+
+func TestPrometheusExporterLifecycleIncludesPrivateAndDefaultRegistries(t *testing.T) {
+	port := reserveTCPPort(t)
+	defaultCollector := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "pitaya_app_default_registry_probe",
+		Help: "App Prometheus default registry probe",
+	})
+	require.NoError(t, prometheus.Register(defaultCollector))
+	t.Cleanup(func() { prometheus.Unregister(defaultCollector) })
+	defaultCollector.Set(2)
+
+	cfg := config.NewDefaultPitayaConfig()
+	cfg.Metrics.Prometheus.Enabled = true
+	cfg.Metrics.Prometheus.Port = port
+	cfg.Metrics.Custom.Gauges = append(cfg.Metrics.Custom.Gauges, &models.Gauge{
+		Subsystem: "test",
+		Name:      "app_private_registry_probe",
+		Help:      "App Prometheus private registry probe",
+	})
+	app := newAppTestApp(false, "prometheus-lifecycle", Standalone, nil, *cfg).(*App)
+	reporter, ok := app.metricsReporters[0].(*metrics.PrometheusReporter)
+	require.True(t, ok)
+	require.NoError(t, reporter.ReportGauge("app_private_registry_probe", nil, 1))
+
+	started := make(chan struct{})
+	app.OnStarted(func() { close(started) })
+	startResult := make(chan any, 1)
+	go func() {
+		defer func() { startResult <- recover() }()
+		app.Start()
+	}()
+	t.Cleanup(app.Shutdown)
+	select {
+	case <-started:
+	case result := <-startResult:
+		t.Fatalf("App.Start exited before Prometheus readiness: %v", result)
+	case <-time.After(5 * time.Second):
+		t.Fatal("App did not become ready with Prometheus enabled")
+	}
+
+	_, exporterPort, err := net.SplitHostPort(app.prometheusExporter.Addr())
+	require.NoError(t, err)
+	client := &http.Client{Timeout: 2 * time.Second}
+	response, err := client.Get("http://127.0.0.1:" + exporterPort + "/metrics")
+	require.NoError(t, err)
+	body, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	require.Equal(t, http.StatusOK, response.StatusCode)
+	require.Contains(t, string(body), "pitaya_test_app_private_registry_probe")
+	require.Contains(t, string(body), "pitaya_app_default_registry_probe")
+
+	addr := app.prometheusExporter.Addr()
+	app.Shutdown()
+	select {
+	case result := <-startResult:
+		require.Nil(t, result)
+	case <-time.After(5 * time.Second):
+		t.Fatal("App did not stop its Prometheus exporter")
+	}
+	app.Shutdown()
+	listener, err := net.Listen("tcp", addr)
+	require.NoError(t, err, "App Shutdown did not release the Prometheus port")
+	require.NoError(t, listener.Close())
+}
+
+func reserveTCPPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	port := listener.Addr().(*net.TCPAddr).Port
+	require.NoError(t, listener.Close())
+	return port
+}
+
 func TestDefaultSD(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
 	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
@@ -749,6 +866,49 @@ func TestStartAndListenStandalone(t *testing.T) {
 	}
 }
 
+func TestAppIgnoresLegacyHandlerDispatchSettingsAndRunsTimerOwner(t *testing.T) {
+	originalPrecision := timer.Precision
+	SetTimerPrecision(time.Millisecond)
+	t.Cleanup(func() { SetTimerPrecision(originalPrecision) })
+
+	cfg := config.NewDefaultPitayaConfig()
+	cfg.Buffer.Handler.LocalProcess = -1
+	cfg.Buffer.Handler.RemoteProcess = 999
+	cfg.Concurrency.Handler.Dispatch = -99
+	app := newAppTestApp(false, "legacy-handler-config", Standalone, nil, *cfg).(*App)
+	started := make(chan struct{})
+	app.OnStarted(func() { close(started) })
+	startResult := make(chan any, 1)
+	go func() {
+		defer func() { startResult <- recover() }()
+		app.Start()
+	}()
+
+	select {
+	case <-started:
+	case result := <-startResult:
+		t.Fatalf("App.Start exited before readiness: %v", result)
+	case <-time.After(5 * time.Second):
+		t.Fatal("App did not start with ignored legacy handler settings")
+	}
+
+	fired := make(chan struct{}, 1)
+	NewAfterTimer(time.Millisecond, func() { fired <- struct{}{} })
+	select {
+	case <-fired:
+	case <-time.After(time.Second):
+		t.Fatal("the App-managed timer dispatcher did not execute a callback")
+	}
+
+	app.Shutdown()
+	select {
+	case result := <-startResult:
+		require.Nil(t, result)
+	case <-time.After(5 * time.Second):
+		t.Fatal("App did not stop after legacy handler settings test")
+	}
+}
+
 func TestAppInitializesComponentsAndModulesBeforeStartingAcceptors(t *testing.T) {
 	cfg := config.NewDefaultPitayaConfig()
 	cfg.Concurrency.Handler.Dispatch = 1
@@ -785,6 +945,168 @@ func TestAppInitializesComponentsAndModulesBeforeStartingAcceptors(t *testing.T)
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for app shutdown")
 	}
+}
+
+func capturePanicError(t *testing.T, call func()) error {
+	t.Helper()
+	var panicValue any
+	func() {
+		defer func() { panicValue = recover() }()
+		call()
+	}()
+	if panicValue == nil {
+		t.Fatal("call did not panic")
+	}
+	err, ok := panicValue.(error)
+	if !ok {
+		t.Fatalf("panic = %#v, want error", panicValue)
+	}
+	return err
+}
+
+func requireAcceptorNotStarted(t *testing.T, acceptor *initOrderAcceptor) {
+	t.Helper()
+	select {
+	case err := <-acceptor.serveChecked:
+		t.Fatalf("acceptor Serve unexpectedly ran: %v", err)
+	default:
+	}
+}
+
+func TestValidateStartConfigurationRejectsInvalidServerTopology(t *testing.T) {
+	tests := []struct {
+		name      string
+		server    *cluster.Server
+		acceptors []acceptor.Acceptor
+		wantText  string
+	}{
+		{name: "missing server", wantText: "server is not configured"},
+		{
+			name:      "backend with acceptor",
+			server:    &cluster.Server{Frontend: false},
+			acceptors: []acceptor.Acceptor{nil},
+			wantText:  "acceptors are not allowed on backend servers",
+		},
+		{
+			name:     "frontend without acceptor",
+			server:   &cluster.Server{Frontend: true},
+			wantText: "frontend servers should have at least one configured acceptor",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			app := &App{server: test.server, acceptors: test.acceptors}
+			require.EqualError(t, app.validateStartConfiguration(), test.wantText)
+		})
+	}
+
+	require.NoError(t, (&App{server: &cluster.Server{Frontend: false}}).validateStartConfiguration())
+}
+
+func TestAppComponentPreflightFailurePreventsAllStartupSideEffects(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig()
+	cfg.Concurrency.Handler.Dispatch = 1
+	acc := newInitOrderAcceptor(func() error { return nil })
+	builder := newAppTestBuilder(true, "component-preflight", Standalone, nil, *cfg)
+	builder.AddAcceptor(acc)
+	app := builder.Build().(*App)
+	first := &MyComp{}
+	second := &MyComp{}
+	module := &LifecycleFaultModule{MyMod: MyMod{name: "user-module"}}
+	app.Register(first)
+	app.Register(second)
+	require.NoError(t, app.RegisterModule(module, "user-module"))
+
+	err := capturePanicError(t, app.Start)
+	require.ErrorContains(t, err, "service already defined in startup batch")
+	assert.Zero(t, first.initCount)
+	assert.Zero(t, second.initCount)
+	assert.False(t, module.running)
+	assert.False(t, app.IsRunning())
+	requireAcceptorNotStarted(t, acc)
+}
+
+func TestAppFrameworkModuleConflictFailsBeforeComponentInit(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig()
+	cfg.Concurrency.Handler.Dispatch = 1
+	acc := newInitOrderAcceptor(func() error { return nil })
+	builder := newAppTestBuilder(true, "module-preflight", Standalone, nil, *cfg)
+	builder.AddAcceptor(acc)
+	app := builder.Build().(*App)
+	component := &MyComp{}
+	app.Register(component)
+	require.NoError(t, app.RegisterModule(&MyMod{name: "conflict"}, "statefulGoPool"))
+
+	err := capturePanicError(t, app.Start)
+	require.ErrorContains(t, err, "module with name statefulGoPool already exists")
+	assert.Zero(t, component.initCount)
+	assert.False(t, app.IsRunning())
+	requireAcceptorNotStarted(t, acc)
+}
+
+func TestAppRemoteComponentWithoutRemoteServiceFailsBeforeInit(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig()
+	cfg.Concurrency.Handler.Dispatch = 1
+	acc := newInitOrderAcceptor(func() error { return nil })
+	builder := newAppTestBuilder(true, "remote-preflight", Standalone, nil, *cfg)
+	builder.AddAcceptor(acc)
+	app := builder.Build().(*App)
+	component := &MyComp{}
+	app.RegisterRemote(component)
+
+	err := capturePanicError(t, app.Start)
+	require.ErrorIs(t, err, service.ErrRemoteServiceUnavailable)
+	assert.Zero(t, component.initCount)
+	assert.False(t, app.IsRunning())
+	requireAcceptorNotStarted(t, acc)
+}
+
+func TestAppComponentInitPanicRollsBackBeforeAcceptorStartup(t *testing.T) {
+	initErr := errors.New("component init panic")
+	cfg := config.NewDefaultPitayaConfig()
+	cfg.Concurrency.Handler.Dispatch = 1
+	acc := newInitOrderAcceptor(func() error { return nil })
+	builder := newAppTestBuilder(true, "component-rollback", Standalone, nil, *cfg)
+	builder.AddAcceptor(acc)
+	app := builder.Build().(*App)
+	first := &LifecycleFaultComp{MyComp: MyComp{name: "first"}}
+	failing := &LifecycleFaultComp{MyComp: MyComp{name: "failing"}, initPanic: initErr}
+	app.Register(first, component.WithName("first"))
+	app.Register(failing, component.WithName("failing"))
+
+	err := capturePanicError(t, app.Start)
+	require.ErrorIs(t, err, initErr)
+	assert.Equal(t, 1, first.beforeShutdownCount)
+	assert.Equal(t, 1, first.shutdownCount)
+	assert.Zero(t, failing.shutdownCount)
+	assert.False(t, failing.running)
+	assert.False(t, app.IsRunning())
+	requireAcceptorNotStarted(t, acc)
+}
+
+func TestAppModuleInitErrorRollsBackComponentsAndInitializedModules(t *testing.T) {
+	initErr := errors.New("module init error")
+	cleanupErr := errors.New("component shutdown panic")
+	cfg := config.NewDefaultPitayaConfig()
+	cfg.Concurrency.Handler.Dispatch = 1
+	acc := newInitOrderAcceptor(func() error { return nil })
+	builder := newAppTestBuilder(true, "module-rollback", Standalone, nil, *cfg)
+	builder.AddAcceptor(acc)
+	app := builder.Build().(*App)
+	component := &LifecycleFaultComp{MyComp: MyComp{}, shutdownPanic: cleanupErr}
+	module := &LifecycleFaultModule{MyMod: MyMod{name: "failing-module"}, initErr: initErr}
+	app.Register(component)
+	require.NoError(t, app.RegisterModule(module, "failing-module"))
+
+	err := capturePanicError(t, app.Start)
+	require.ErrorIs(t, err, initErr)
+	require.ErrorIs(t, err, cleanupErr)
+	assert.Equal(t, 1, component.beforeShutdownCount)
+	assert.Equal(t, 1, component.shutdownCount)
+	assert.Zero(t, module.shutdownCount, "failed Init module owns its partial cleanup")
+	assert.False(t, app.IsRunning())
+	requireAcceptorNotStarted(t, acc)
 }
 
 func TestAppWaitsForAllAcceptorsBeforeStartingConnectionReaders(t *testing.T) {
@@ -1144,7 +1466,7 @@ func expectedSysDocumentation(pointerNames bool) map[string]interface{} {
 func TestDocumentation(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
 	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
-	app.startupComponents()
+	require.NoError(t, app.startupComponents())
 	doc, err := app.Documentation(false)
 	assert.NoError(t, err)
 	assert.Equal(t, expectedSysDocumentation(false), doc)

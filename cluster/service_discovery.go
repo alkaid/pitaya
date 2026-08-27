@@ -42,6 +42,8 @@ type ServiceDiscovery interface {
 	// An SDListener callback must not call SyncServers synchronously; schedule a
 	// later synchronization after the callback returns instead. SDListener and
 	// LeaderChangeListener use independent FIFO lanes and may run concurrently.
+	// Listeners are non-critical observers: they must return promptly, and a panic
+	// is logged and isolated so remaining listeners and later work still execute.
 	SyncServers(firstSync bool) error
 	// Neither listener type may call BeforeShutdown synchronously; Shutdown is
 	// safe because it does not join callback drains.

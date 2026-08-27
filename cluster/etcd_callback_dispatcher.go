@@ -4,6 +4,10 @@ import (
 	"context"
 	"sync"
 	"sync/atomic"
+
+	"github.com/alkaid/pitaya/v2/logger"
+	"github.com/alkaid/pitaya/v2/util"
+	"go.uber.org/zap"
 )
 
 const callbackQueueLimit = 64
@@ -94,10 +98,24 @@ func (d *callbackDispatcher) run() {
 		d.notFull.Signal()
 		d.lock.Unlock()
 
-		if work.callback != nil {
-			work.callback()
+		d.executeWork(work)
+	}
+}
+
+func (d *callbackDispatcher) executeWork(work callbackWork) {
+	defer close(work.done)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			util.LogRecoveredPanic(
+				logger.Zap,
+				"etcd callback work panicked",
+				recovered,
+				zap.String("callback_kind", "dispatcher_work"),
+			)
 		}
-		close(work.done)
+	}()
+	if work.callback != nil {
+		work.callback()
 	}
 }
 

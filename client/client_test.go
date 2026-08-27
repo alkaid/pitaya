@@ -26,11 +26,6 @@ func TestHandleHandshakeResponseRejectsOversizedInflatedPayload(t *testing.T) {
 	encoder := codec.NewPomeloPacketEncoder()
 	frame, err := encoder.Encode(packet.Handshake, compressed)
 	require.NoError(t, err)
-	if len(frame)%1024 == 0 {
-		heartbeat, encodeErr := encoder.Encode(packet.Heartbeat, nil)
-		require.NoError(t, encodeErr)
-		frame = append(frame, heartbeat...)
-	}
 
 	clientConn, serverConn := net.Pipe()
 	t.Cleanup(func() {

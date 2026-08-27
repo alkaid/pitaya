@@ -116,11 +116,6 @@ func TestPitayaConfigValidateRejectsUnsafeRuntimeValues(t *testing.T) {
 			want:   "pitaya.buffer.agent.messages",
 		},
 		{
-			name:   "handler dispatch concurrency",
-			mutate: func(cfg *PitayaConfig) { cfg.Concurrency.Handler.Dispatch = 0 },
-			want:   "pitaya.concurrency.handler.dispatch",
-		},
-		{
 			name: "session drain period",
 			mutate: func(cfg *PitayaConfig) {
 				cfg.Session.Drain.Enabled = true
@@ -178,6 +173,27 @@ func TestPitayaConfigValidateRejectsUnsafeRuntimeValues(t *testing.T) {
 			err := cfg.Validate()
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), test.want)
+		})
+	}
+}
+
+func TestPitayaConfigValidateIgnoresDeprecatedHandlerQueueSettings(t *testing.T) {
+	tables := []struct {
+		name   string
+		mutate func(*PitayaConfig)
+	}{
+		{name: "local process", mutate: func(cfg *PitayaConfig) { cfg.Buffer.Handler.LocalProcess = -1 }},
+		{name: "remote process", mutate: func(cfg *PitayaConfig) { cfg.Buffer.Handler.RemoteProcess = -1 }},
+		{name: "dispatch zero", mutate: func(cfg *PitayaConfig) { cfg.Concurrency.Handler.Dispatch = 0 }},
+		{name: "dispatch negative", mutate: func(cfg *PitayaConfig) { cfg.Concurrency.Handler.Dispatch = -1000 }},
+	}
+
+	for _, table := range tables {
+		t.Run(table.name, func(t *testing.T) {
+			cfg := NewDefaultPitayaConfig()
+			table.mutate(cfg)
+
+			require.NoError(t, cfg.Validate())
 		})
 	}
 }

@@ -77,6 +77,10 @@ func (p *StatefulPoolsModule) Init() error {
 	for _, cfg := range p.cfgMap {
 		pool, err := NewStatefulPool(cfg, p.reporters)
 		if err != nil {
+			for name, initialized := range p.pools {
+				initialized.pool.Release()
+				delete(p.pools, name)
+			}
 			return err
 		}
 		p.pools[cfg.Name] = pool

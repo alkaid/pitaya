@@ -23,22 +23,12 @@ package metrics
 import (
 	"errors"
 	"fmt"
-	"net/http"
 	"sort"
-	"sync"
 
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/constants"
-	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/metrics/models"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"go.uber.org/zap"
-)
-
-var (
-	prometheusReporter   *PrometheusReporter
-	prometheusReporterMu sync.Mutex
 )
 
 const prometheusNamespace = "pitaya"
@@ -547,45 +537,24 @@ func newPrometheusReporter(
 	return reporter, nil
 }
 
-// GetPrometheusReporter gets the prometheus reporter singleton
-func GetPrometheusReporter(
+// NewPrometheusReporter creates a reporter registered only in a private
+// registry. It does not open a listener or mutate Prometheus globals.
+func NewPrometheusReporter(
 	serverType string,
-	config config.MetricsConfig,
+	metricsConfig config.MetricsConfig,
 	metricsSpecs models.CustomMetricsSpec,
-) (*PrometheusReporter, error) {
-	return getPrometheusReporter(serverType, config, &metricsSpecs)
-}
-
-func getPrometheusReporter(
-	serverType string,
-	config config.MetricsConfig,
-	metricsSpecs *models.CustomMetricsSpec,
-) (*PrometheusReporter, error) {
-	prometheusReporterMu.Lock()
-	defer prometheusReporterMu.Unlock()
-	if prometheusReporter != nil {
-		return prometheusReporter, nil
-	}
-
+) (*PrometheusReporter, *prometheus.Registry, error) {
+	registry := prometheus.NewRegistry()
 	reporter, err := newPrometheusReporter(
 		serverType,
-		config,
-		metricsSpecs,
-		prometheus.DefaultRegisterer,
+		metricsConfig,
+		&metricsSpecs,
+		registry,
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	prometheusReporter = reporter
-	http.Handle("/metrics", promhttp.Handler())
-	go (func() {
-		err := http.ListenAndServe(fmt.Sprintf(":%d", config.Prometheus.Port), nil)
-		if err != nil {
-			logger.Zap.Error("prometheus reporter serve start failed", zap.Error(err))
-		}
-	})()
-
-	return prometheusReporter, nil
+	return reporter, registry, nil
 }
 
 // ReportSummary reports a summary metric

@@ -257,7 +257,8 @@ func (ns *NatsRPCServer) subscribeToUserKickChannel(uid string, svType string) (
 			kick := &protos.KickMsg{}
 			err := proto.Unmarshal(msg.Data, kick)
 			if err != nil {
-				logger.Zap.Error("error unrmarshalling push", zap.Error(err))
+				ns.rejectMalformedUserMessage("kick", msg, err)
+				return
 			}
 			select {
 			case ns.userKickCh <- kick:
@@ -277,7 +278,8 @@ func (ns *NatsRPCServer) subscribeToUserMessages(uid string, svType string) (*na
 			push := &protos.Push{}
 			err := proto.Unmarshal(msg.Data, push)
 			if err != nil {
-				logger.Zap.Error("error unmarshalling push", zap.Error(err))
+				ns.rejectMalformedUserMessage("push", msg, err)
+				return
 			}
 			logger.Zap.Debug("receive user's push", zap.String("uid", uid), zap.Int("remain", len(ns.userPushCh)))
 			select {
@@ -541,6 +543,21 @@ func (ns *NatsRPCServer) rejectMalformedRequest(msg *nats.Msg, err error) {
 		)
 	}
 	logger.Zap.Warn("rejecting malformed nats rpc request", fields...)
+}
+
+func (ns *NatsRPCServer) rejectMalformedUserMessage(kind string, msg *nats.Msg, err error) {
+	count := ns.malformedRequests.Add(1)
+	payloadBytes := 0
+	if msg != nil {
+		payloadBytes = len(msg.Data)
+	}
+	logger.Zap.Warn(
+		"rejecting malformed nats user message",
+		zap.String("channel_kind", kind),
+		zap.Int("payload_bytes", payloadBytes),
+		zap.Uint64("malformed_count", count),
+		zap.Error(err),
+	)
 }
 
 // GetUnhandledRequestsChannel gets the unhandled requests channel from nats rpc server

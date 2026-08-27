@@ -21,6 +21,7 @@
 package service
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
@@ -32,8 +33,9 @@ import (
 	"github.com/alkaid/pitaya/v2/component"
 	"github.com/alkaid/pitaya/v2/docgenerator"
 	"github.com/alkaid/pitaya/v2/logger"
-	"go.uber.org/zap"
 )
+
+var ErrRemoteServiceUnavailable = errors.New("remote service is not configured")
 
 // remoteRegistryOwner owns the component registry and its synchronization.
 // Handler execution only keeps a pointer snapshot, so registration never holds
@@ -133,39 +135,97 @@ func (r *RemoteService) GetRemoteBindingListener() []cluster.RemoteBindingListen
 
 // Register registers components
 func (r *RemoteService) Register(comp component.Component, opts []component.Option) error {
-	s := component.NewService(comp, opts)
-	r.remoteRegistryOwner.mu.Lock()
-	defer r.remoteRegistryOwner.mu.Unlock()
-	services := lo.If(s.Options.Subscriber, r.subscribers).Else(r.services)
-
-	if _, ok := services[s.Name]; ok {
-		return goerrors.WithStack(fmt.Errorf("remote: service already defined: %s", s.Name))
-	}
-
-	if err := s.ExtractRemote(); err != nil {
+	prepared, err := r.PrepareRegistrations([]ComponentRegistration{{Component: comp, Options: opts}})
+	if err != nil {
 		return err
 	}
+	return r.CommitPreparedRegistrations(prepared)
+}
 
-	services[s.Name] = s
-	// register all remotes
-	for name, remote := range s.Remotes {
-		remoteName := fmt.Sprintf("%s.%s", s.Name, name)
-		if _, ok := r.remotes[remoteName]; ok {
-			logger.Zap.Warn("remote already registered, overwriting", zap.String("name", remoteName))
-		}
-		r.remotes[remoteName] = remote
+// PrepareRegistrations validates a remote batch against the current registry
+// without mutating remote maps or Server subscriptions.
+func (r *RemoteService) PrepareRegistrations(registrations []ComponentRegistration) (*PreparedRemoteRegistrations, error) {
+	prepared, err := PrepareRemoteRegistrations(registrations)
+	if err != nil {
+		return nil, err
 	}
-	if s.Options.Subscriber {
-		// 注册订阅信息到服务发现，供后续同步订阅时使用
-		for name := range s.Remotes {
-			fork := s.Options.ForkAll
-			if len(s.Options.ForkMethods) > 0 {
-				fork = slices.Contains(s.Options.ForkMethods, name)
+	r.remoteRegistryOwner.mu.RLock()
+	defer r.remoteRegistryOwner.mu.RUnlock()
+	for _, preparedService := range prepared.services {
+		if _, ok := r.services[preparedService.Name]; ok {
+			return nil, goerrors.WithStack(fmt.Errorf("remote: service already defined: %s", preparedService.Name))
+		}
+		if _, ok := r.subscribers[preparedService.Name]; ok {
+			return nil, goerrors.WithStack(fmt.Errorf("remote: service already defined: %s", preparedService.Name))
+		}
+		for name := range preparedService.Remotes {
+			remoteName := fmt.Sprintf("%s.%s", preparedService.Name, name)
+			if _, ok := r.remotes[remoteName]; ok {
+				return nil, goerrors.WithStack(fmt.Errorf("remote already defined: %s", remoteName))
 			}
-			r.server.AddSubscribe(s.Name, name, fork)
+		}
+		if preparedService.Options.Subscriber && r.server == nil {
+			return nil, fmt.Errorf("remote subscriber %s requires a server", preparedService.Name)
+		}
+	}
+	return prepared, nil
+}
+
+// CommitPreparedRegistrations publishes a complete prepared batch after
+// rechecking the live registry. Validation happens before any map or Server
+// subscription is mutated.
+func (r *RemoteService) CommitPreparedRegistrations(prepared *PreparedRemoteRegistrations) error {
+	if prepared == nil || len(prepared.services) == 0 {
+		return nil
+	}
+	r.remoteRegistryOwner.mu.Lock()
+	defer r.remoteRegistryOwner.mu.Unlock()
+	if err := r.validatePreparedRegistrationsLocked(prepared); err != nil {
+		return err
+	}
+	r.commitPreparedRegistrationsLocked(prepared)
+	return nil
+}
+
+func (r *RemoteService) validatePreparedRegistrationsLocked(prepared *PreparedRemoteRegistrations) error {
+	for _, preparedService := range prepared.services {
+		if _, ok := r.services[preparedService.Name]; ok {
+			return goerrors.WithStack(fmt.Errorf("remote: service already defined: %s", preparedService.Name))
+		}
+		if _, ok := r.subscribers[preparedService.Name]; ok {
+			return goerrors.WithStack(fmt.Errorf("remote: service already defined: %s", preparedService.Name))
+		}
+		for name := range preparedService.Remotes {
+			remoteName := fmt.Sprintf("%s.%s", preparedService.Name, name)
+			if _, ok := r.remotes[remoteName]; ok {
+				return goerrors.WithStack(fmt.Errorf("remote already defined: %s", remoteName))
+			}
+		}
+		if preparedService.Options.Subscriber && r.server == nil {
+			return fmt.Errorf("remote subscriber %s requires a server", preparedService.Name)
 		}
 	}
 	return nil
+}
+
+func (r *RemoteService) commitPreparedRegistrationsLocked(prepared *PreparedRemoteRegistrations) {
+	for _, preparedService := range prepared.services {
+		services := lo.If(preparedService.Options.Subscriber, r.subscribers).Else(r.services)
+		services[preparedService.Name] = preparedService
+		for name, remote := range preparedService.Remotes {
+			remoteName := fmt.Sprintf("%s.%s", preparedService.Name, name)
+			r.remotes[remoteName] = remote
+		}
+		if preparedService.Options.Subscriber {
+			for name := range preparedService.Remotes {
+				fork := preparedService.Options.ForkAll
+				if len(preparedService.Options.ForkMethods) > 0 {
+					fork = slices.Contains(preparedService.Options.ForkMethods, name)
+				}
+				r.server.AddSubscribe(preparedService.Name, name, fork)
+			}
+		}
+	}
 }
 
 // RegisterInterceptor 注册拦截分发器,优先级别高于 component.Remote
@@ -173,10 +233,14 @@ func (r *RemoteService) Register(comp component.Component, opts []component.Opti
 //	@receiver r
 //	@param serviceName
 //	@param interceptor
-func (r *RemoteService) RegisterInterceptor(serviceName string, interceptor *component.Interceptor) {
+func (r *RemoteService) RegisterInterceptor(serviceName string, interceptor *component.Interceptor) error {
+	if err := validateInterceptorRegistration("remote", serviceName, interceptor, false); err != nil {
+		return err
+	}
 	r.remoteRegistryOwner.mu.Lock()
 	defer r.remoteRegistryOwner.mu.Unlock()
 	r.interceptors[serviceName] = interceptor
+	return nil
 }
 
 // DumpServices outputs all registered services

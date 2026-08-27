@@ -377,26 +377,36 @@ func (c *WSConn) GetNextMessage() (b []byte, err error) {
 // Read can be made to time out and return an Error with Timeout() == true
 // after a fixed time limit; see SetDeadline and SetReadDeadline.
 func (c *WSConn) Read(b []byte) (int, error) {
-	if c.reader == nil {
-		t, r, err := c.conn.NextReader()
-		if err != nil {
-			return 0, err
-		}
-		c.typ = t
-		c.reader = r
+	if len(b) == 0 {
+		return 0, nil
 	}
-	n, err := c.reader.Read(b)
-	if err != nil && err != io.EOF {
-		return n, err
-	} else if err == io.EOF {
-		_, r, err := c.conn.NextReader()
-		if err != nil {
-			return 0, err
+	for {
+		if c.reader == nil {
+			t, r, err := c.conn.NextReader()
+			if err != nil {
+				return 0, err
+			}
+			c.typ = t
+			c.reader = r
 		}
-		c.reader = r
-	}
 
-	return n, nil
+		n, err := c.reader.Read(b)
+		if n > 0 {
+			if errors.Is(err, io.EOF) {
+				c.reader = nil
+				return n, nil
+			}
+			return n, err
+		}
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			c.reader = nil
+			continue
+		}
+		return 0, err
+	}
 }
 
 // Write writes data to the connection.

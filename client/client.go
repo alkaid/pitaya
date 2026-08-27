@@ -21,18 +21,20 @@
 package client
 
 import (
-	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"google.golang.org/protobuf/proto"
+	"io"
 	"net"
 	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/alkaid/pitaya/v2/logger"
 
@@ -69,18 +71,20 @@ type pendingRequest struct {
 
 var clientActivityEpoch = time.Now()
 
+const defaultClientIOTimeout = 5 * time.Second
+
 // Client struct
 type Client struct {
 	conn                net.Conn
 	Connected           bool
 	packetEncoder       codec.PacketEncoder
-	packetDecoder       codec.PacketDecoder
 	packetChan          chan *packet.Packet
 	IncomingMsgChan     chan *message.Message
 	pendingChan         chan bool
 	pendingRequests     map[uint]*pendingRequest
 	pendingReqMutex     sync.Mutex
 	requestTimeout      time.Duration
+	handshakeTimeout    time.Duration
 	closeChan           chan struct{}
 	nextID              uint32
 	messageEncoder      message.Encoder
@@ -98,6 +102,8 @@ func (c *Client) MsgChannel() chan *message.Message {
 
 // ConnectedStatus return the connection status
 func (c *Client) ConnectedStatus() bool {
+	c.connMutex.Lock()
+	defer c.connMutex.Unlock()
 	return c.Connected
 }
 
@@ -109,12 +115,12 @@ func New(requestTimeout ...time.Duration) *Client {
 	}
 
 	return &Client{
-		Connected:       false,
-		packetEncoder:   codec.NewPomeloPacketEncoder(),
-		packetDecoder:   codec.NewPomeloPacketDecoder(),
-		packetChan:      make(chan *packet.Packet, 10),
-		pendingRequests: make(map[uint]*pendingRequest),
-		requestTimeout:  reqTimeout,
+		Connected:        false,
+		packetEncoder:    codec.NewPomeloPacketEncoder(),
+		packetChan:       make(chan *packet.Packet, 10),
+		pendingRequests:  make(map[uint]*pendingRequest),
+		requestTimeout:   reqTimeout,
+		handshakeTimeout: defaultClientIOTimeout,
 		// 30 here is the limit of inflight messages
 		// TODO this should probably be configurable
 		pendingChan:    make(chan bool, 30),
@@ -149,7 +155,7 @@ func (c *Client) sendHandshakeRequest() error {
 		return err
 	}
 
-	_, err = c.connWriteWithDeadline(p)
+	_, err = c.connWriteWithTimeout(p, c.handshakeTimeout)
 	return err
 }
 
@@ -158,19 +164,20 @@ func (c *Client) handleHandshakeResponse() error {
 	if err != nil {
 		return err
 	}
+	if err := c.conn.SetReadDeadline(time.Time{}); err != nil {
+		return fmt.Errorf("clear handshake read deadline: %w", err)
+	}
 	c.startConnectionLoops(heartbeat)
 	return nil
 }
 
 func (c *Client) receiveHandshakeResponse() (int, error) {
 	c.recordServerActivity(time.Now())
-	buf := bytes.NewBuffer(nil)
-	packets, err := c.readPackets(buf)
+	handshakePacket, err := readPacket(c.conn)
 	if err != nil {
 		return 0, err
 	}
 
-	handshakePacket := packets[0]
 	if handshakePacket.Type != packet.Handshake {
 		return 0, fmt.Errorf("got first packet from server that is not a handshake, aborting")
 	}
@@ -197,7 +204,7 @@ func (c *Client) receiveHandshakeResponse() (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	_, err = c.connWriteWithDeadline(p)
+	_, err = c.connWriteWithTimeout(p, c.handshakeTimeout)
 	if err != nil {
 		return 0, err
 	}
@@ -207,13 +214,20 @@ func (c *Client) receiveHandshakeResponse() (int, error) {
 func (c *Client) startConnectionLoops(heartbeat int) {
 	c.Connected = true
 
-	go c.sendHeartbeats(heartbeat)
+	if heartbeat > 0 {
+		go c.sendHeartbeats(heartbeat)
+	}
 	go c.handleServerMessages()
 	go c.handlePackets()
 	go c.pendingRequestsReaper()
 }
+
 func (c *Client) connWriteWithDeadline(b []byte) (int, error) {
-	err := c.conn.SetWriteDeadline(time.Now().Add(time.Second * 5))
+	return c.connWriteWithTimeout(b, defaultClientIOTimeout)
+}
+
+func (c *Client) connWriteWithTimeout(b []byte, timeout time.Duration) (int, error) {
+	err := c.conn.SetWriteDeadline(time.Now().Add(timeout))
 	if err != nil {
 		return 0, err
 	}
@@ -264,13 +278,21 @@ func (c *Client) handlePackets() {
 	for {
 		select {
 		case p := <-c.packetChan:
+			if p == nil {
+				continue
+			}
 			switch p.Type {
 			case packet.Data:
-				// handle data
-				Log.Debug("client handle packets got", zap.String("data", string(p.Data)))
+				Log.Debug("client received data packet", zap.Int("payload_length", len(p.Data)))
 				m, err := message.Decode(p.Data)
 				if err != nil {
-					Log.Error("error decoding msg from sv", zap.Any("p", p), zap.String("data", string(p.Data)))
+					Log.Error("error decoding message from server",
+						zap.Uint8("packet_type", uint8(p.Type)),
+						zap.Int("payload_length", len(p.Data)),
+						zap.Error(err),
+					)
+					c.Disconnect(CloseReasonError)
+					return
 				}
 				if m.Type == message.Response {
 					c.pendingReqMutex.Lock()
@@ -287,6 +309,7 @@ func (c *Client) handlePackets() {
 			case packet.Kick:
 				Log.Warn("got kick packet from the server! disconnecting...")
 				c.Disconnect(CloseReasonKicked)
+				return
 			}
 		case <-c.closeChan:
 			return
@@ -294,37 +317,27 @@ func (c *Client) handlePackets() {
 	}
 }
 
-func (c *Client) readPackets(buf *bytes.Buffer) ([]*packet.Packet, error) {
-	// listen for sv messages
-	data := make([]byte, 1024)
-	n := len(data)
-	var err error
-
-	for n == len(data) {
-		n, err = c.conn.Read(data)
-		if err != nil {
-			return nil, err
-		}
-		buf.Write(data[:n])
+func readPacket(reader io.Reader) (*packet.Packet, error) {
+	header := make([]byte, codec.HeadLength)
+	if _, err := io.ReadFull(reader, header); err != nil {
+		return nil, err
 	}
-	packets, err := c.packetDecoder.Decode(buf.Bytes())
+
+	length, typ, err := codec.ParseHeader(header)
 	if err != nil {
-		Log.Error("error decoding packet from server", zap.Error(err))
+		return nil, err
 	}
-	totalProcessed := 0
-	for _, p := range packets {
-		totalProcessed += codec.HeadLength + p.Length
+	p := &packet.Packet{Type: typ, Length: length, Data: make([]byte, length)}
+	if _, err := io.ReadFull(reader, p.Data); err != nil {
+		return nil, err
 	}
-	buf.Next(totalProcessed)
-
-	return packets, nil
+	return p, nil
 }
 
 func (c *Client) handleServerMessages() {
-	buf := bytes.NewBuffer(nil)
 	defer c.Disconnect(CloseReasonError)
 	for {
-		packets, err := c.readPackets(buf)
+		p, err := readPacket(c.conn)
 		if err != nil {
 			select {
 			case <-c.closeChan:
@@ -335,9 +348,10 @@ func (c *Client) handleServerMessages() {
 			}
 		}
 		c.recordServerActivity(time.Now())
-
-		for _, p := range packets {
-			c.packetChan <- p
+		select {
+		case c.packetChan <- p:
+		case <-c.closeChan:
+			return
 		}
 	}
 }
@@ -382,19 +396,104 @@ func (c *Client) lastServerActivity() time.Time {
 // Disconnect disconnects the client
 func (c *Client) Disconnect(reason CloseReason) {
 	c.connMutex.Lock()
-	defer c.connMutex.Unlock()
-	if c.Connected {
-		c.Connected = false
-		close(c.closeChan)
-		c.conn.Close()
-		if c.onDisconnected != nil {
-			c.onDisconnected(reason)
-		}
+	if !c.Connected {
+		c.connMutex.Unlock()
+		return
+	}
+	c.Connected = false
+	close(c.closeChan)
+	_ = c.conn.Close()
+	callback := c.onDisconnected
+	c.connMutex.Unlock()
+
+	if callback != nil {
+		callback(reason)
 	}
 }
 
 func (c *Client) OnDisconnected(callback func(reason CloseReason)) {
+	c.connMutex.Lock()
+	defer c.connMutex.Unlock()
 	c.onDisconnected = callback
+}
+
+func cloneTLSConfig(configs []*tls.Config) (*tls.Config, error) {
+	if len(configs) == 0 {
+		return &tls.Config{}, nil
+	}
+	if configs[0] == nil {
+		return nil, errors.New("client: nil TLS config")
+	}
+	return configs[0].Clone(), nil
+}
+
+func configureTLSServerName(u *url.URL, tlsCfg *tls.Config) error {
+	if tlsCfg.ServerName != "" {
+		return nil
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("client: TLS target %q has no host", u.Host)
+	}
+	tlsCfg.ServerName = host
+	return nil
+}
+
+func (c *Client) dial(u *url.URL, tlsCfg *tls.Config) (net.Conn, error) {
+	switch u.Scheme {
+	case "wss":
+		if err := configureTLSServerName(u, tlsCfg); err != nil {
+			return nil, err
+		}
+		dialer := *websocket.DefaultDialer
+		dialer.TLSClientConfig = tlsCfg
+		ctx, cancel := context.WithTimeout(context.Background(), c.handshakeTimeout)
+		defer cancel()
+		wsconn, _, err := dialer.DialContext(ctx, u.String(), nil)
+		if err != nil {
+			return nil, err
+		}
+		conn, err := acceptor.NewWSConn(wsconn)
+		if err != nil {
+			_ = wsconn.Close()
+			return nil, err
+		}
+		return conn, nil
+	case "ws":
+		dialer := *websocket.DefaultDialer
+		ctx, cancel := context.WithTimeout(context.Background(), c.handshakeTimeout)
+		defer cancel()
+		wsconn, _, err := dialer.DialContext(ctx, u.String(), nil)
+		if err != nil {
+			return nil, err
+		}
+		conn, err := acceptor.NewWSConn(wsconn)
+		if err != nil {
+			_ = wsconn.Close()
+			return nil, err
+		}
+		return conn, nil
+	case "tcps", "tls":
+		if err := configureTLSServerName(u, tlsCfg); err != nil {
+			return nil, err
+		}
+		rawConn, err := net.DialTimeout("tcp", u.Host, c.handshakeTimeout)
+		if err != nil {
+			return nil, err
+		}
+		tlsConn := tls.Client(rawConn, tlsCfg)
+		ctx, cancel := context.WithTimeout(context.Background(), c.handshakeTimeout)
+		defer cancel()
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = rawConn.Close()
+			return nil, err
+		}
+		return tlsConn, nil
+	case "tcp":
+		return net.DialTimeout("tcp", u.Host, c.handshakeTimeout)
+	default:
+		return nil, errors.New("unSupport schme:" + u.Scheme)
+	}
 }
 
 // ConnectTo connects to the server at addr, for now the only supported protocol is tcp
@@ -407,52 +506,42 @@ func (c *Client) ConnectTo(uri string, tlsConfig ...*tls.Config) error {
 	if err != nil {
 		return err
 	}
-	var tlsCfg *tls.Config
-	if len(tlsConfig) > 0 {
-		tlsCfg = tlsConfig[0]
-	} else {
-		tlsCfg = &tls.Config{}
-	}
-	c.connMutex.Lock()
-	defer c.connMutex.Unlock()
-	switch u.Scheme {
-	case "wss":
-		tlsCfg.InsecureSkipVerify = true
-		fallthrough
-	case "ws":
-		dialer := websocket.DefaultDialer
-		dialer.TLSClientConfig = tlsCfg
-		var wsconn *websocket.Conn
-		wsconn, _, err = dialer.Dial(u.String(), nil)
-		if err != nil {
-			return err
-		}
-		c.conn, err = acceptor.NewWSConn(wsconn)
-		if err != nil {
-			return err
-		}
-	case "tcps", "tls":
-		tlsCfg.InsecureSkipVerify = true
-		c.conn, err = tls.Dial("tcp", u.Host, tlsCfg)
-	case "tcp":
-		c.conn, err = net.Dial("tcp", u.Host)
-	default:
-		return errors.New("unSupport schme:" + u.Scheme)
-	}
+	tlsCfg, err := cloneTLSConfig(tlsConfig)
 	if err != nil {
 		return err
 	}
+	c.connMutex.Lock()
+	defer c.connMutex.Unlock()
+	if c.Connected {
+		return errors.New("client: already connected")
+	}
+	c.conn, err = c.dial(u, tlsCfg)
+	if err != nil {
+		return err
+	}
+	connected := false
+	defer func() {
+		if !connected {
+			_ = c.conn.Close()
+			c.conn = nil
+		}
+	}()
 	c.IncomingMsgChan = make(chan *message.Message, 10)
 	c.closeChan = make(chan struct{})
+	c.packetChan = make(chan *packet.Packet, 10)
 
 	if err = c.handleHandshake(); err != nil {
 		return err
 	}
 
+	connected = true
 	return nil
 }
 
 func (c *Client) handleHandshake() error {
+	if err := c.conn.SetReadDeadline(time.Now().Add(c.handshakeTimeout)); err != nil {
+		return fmt.Errorf("set handshake read deadline: %w", err)
+	}
 	if err := c.sendHandshakeRequest(); err != nil {
 		return err
 	}

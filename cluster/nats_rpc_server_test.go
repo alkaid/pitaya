@@ -545,6 +545,16 @@ func TestNatsRPCServerSubscribeUserKickChannel(t *testing.T) {
 	sub, err := rpcServer.subscribeToUserKickChannel("someuid", sv.Type)
 	assert.NoError(t, err)
 	assert.NotNil(t, sub)
+	require.NoError(t, conn.Publish(GetUserKickTopic("someuid", sv.Type), []byte{0xff}))
+	require.NoError(t, conn.Flush())
+	require.Eventually(t, func() bool {
+		return rpcServer.malformedRequests.Load() == 1
+	}, time.Second, time.Millisecond)
+	select {
+	case msg := <-rpcServer.getUserKickChannel():
+		t.Fatalf("malformed kick reached user channel: %#v", msg)
+	default:
+	}
 	kick := &protos.KickMsg{UserId: "randomid"}
 	dt, err := proto.Marshal(kick)
 	assert.NoError(t, err)
@@ -584,11 +594,10 @@ func TestNatsRPCServerSubscribeToUserMessages(t *testing.T) {
 	tables := []struct {
 		uid    string
 		svType string
-		msg    []byte
 	}{
-		{"user1", "conn", []byte("msg1")},
-		{"user2", "game", []byte("")},
-		{"u", "conn", []byte("000")},
+		{"user1", "conn"},
+		{"user2", "game"},
+		{"u", "conn"},
 	}
 
 	for _, table := range tables {
@@ -596,10 +605,45 @@ func TestNatsRPCServerSubscribeToUserMessages(t *testing.T) {
 			subs, err := rpcServer.subscribeToUserMessages(table.uid, table.svType)
 			assert.NoError(t, err)
 			assert.Equal(t, true, subs.IsValid())
-			conn.Publish(GetUserMessagesTopic(table.uid, table.svType), table.msg)
-			helpers.ShouldEventuallyReceive(t, rpcServer.userPushCh)
+			payload, err := proto.Marshal(&protos.Push{Uid: table.uid})
+			require.NoError(t, err)
+			require.NoError(t, conn.Publish(GetUserMessagesTopic(table.uid, table.svType), payload))
+			push := helpers.ShouldEventuallyReceive(t, rpcServer.userPushCh).(*protos.Push)
+			assert.Equal(t, table.uid, push.Uid)
 		})
 	}
+}
+
+func TestNatsRPCServerRejectsMalformedUserPush(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	sv := getServer()
+	rpcServer, err := NewNatsRPCServer(cfg, sv, nil, nil, nil)
+	require.NoError(t, err)
+	s := helpers.GetTestNatsServer(t)
+	defer s.Shutdown()
+	conn, err := setupNatsConn(fmt.Sprintf("nats://%s", s.Addr()), nil)
+	require.NoError(t, err)
+	defer conn.Close()
+	rpcServer.conn = conn
+	_, err = rpcServer.subscribeToUserMessages("user1", sv.Type)
+	require.NoError(t, err)
+
+	require.NoError(t, conn.Publish(GetUserMessagesTopic("user1", sv.Type), []byte{0xff}))
+	require.NoError(t, conn.Flush())
+	require.Eventually(t, func() bool {
+		return rpcServer.malformedRequests.Load() == 1
+	}, time.Second, time.Millisecond)
+	select {
+	case msg := <-rpcServer.userPushCh:
+		t.Fatalf("malformed push reached user channel: %#v", msg)
+	default:
+	}
+
+	payload, err := proto.Marshal(&protos.Push{Uid: "user1"})
+	require.NoError(t, err)
+	require.NoError(t, conn.Publish(GetUserMessagesTopic("user1", sv.Type), payload))
+	push := helpers.ShouldEventuallyReceive(t, rpcServer.userPushCh).(*protos.Push)
+	assert.Equal(t, "user1", push.Uid)
 }
 
 func TestNatsRPCServerSubscribe(t *testing.T) {

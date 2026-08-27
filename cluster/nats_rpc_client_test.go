@@ -116,6 +116,119 @@ func TestNatsRPCClientConfigure(t *testing.T) {
 	}
 }
 
+func TestResolveNATSRequestTimeout(t *testing.T) {
+	defaultTimeout := 5 * time.Second
+	tables := []struct {
+		name       string
+		value      any
+		present    bool
+		want       time.Duration
+		wantStored string
+		wantErr    bool
+	}{
+		{name: "absent", want: defaultTimeout, wantStored: "5s"},
+		{name: "valid", value: "1500ms", present: true, want: 1500 * time.Millisecond, wantStored: "1.5s"},
+		{name: "wrong type", value: 5, present: true, wantErr: true},
+		{name: "json number", value: float64(5), present: true, wantErr: true},
+		{name: "empty", value: "", present: true, wantErr: true},
+		{name: "garbage", value: "garbage", present: true, wantErr: true},
+		{name: "zero", value: "0s", present: true, wantErr: true},
+		{name: "negative", value: "-1s", present: true, wantErr: true},
+	}
+
+	for _, table := range tables {
+		t.Run(table.name, func(t *testing.T) {
+			ctx := context.Background()
+			if table.present {
+				ctx = pcontext.AddToPropagateCtx(ctx, constants.RequestTimeout, table.value)
+			}
+
+			resolvedCtx, timeout, err := resolveRequestTimeout(ctx, defaultTimeout)
+			if table.wantErr {
+				require.Error(t, err)
+				assert.True(t, apierrors.IsBadRequest(err))
+				assert.Equal(t, "invalid_request_timeout", apierrors.FromError(err).Status.GetReason())
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, table.want, timeout)
+			assert.Equal(t, table.wantStored, pcontext.GetFromPropagateCtx(resolvedCtx, constants.RequestTimeout))
+		})
+	}
+}
+
+func TestNatsRPCClientCallRejectsInvalidRequestTimeoutBeforeNATS(t *testing.T) {
+	tables := []struct {
+		name  string
+		value any
+	}{
+		{name: "wrong type", value: map[string]any{"seconds": 1}},
+		{name: "json number", value: float64(1)},
+		{name: "invalid", value: "later"},
+		{name: "zero", value: "0s"},
+		{name: "negative", value: "-1s"},
+	}
+
+	for _, table := range tables {
+		t.Run(table.name, func(t *testing.T) {
+			cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Client.Nats
+			client, err := NewNatsRPCClient(cfg, getServer(), nil, nil)
+			require.NoError(t, err)
+			client.conn = &nats.Conn{}
+			client.running.Store(true)
+			t.Cleanup(client.cancelLifecycle)
+			ctx := pcontext.AddToPropagateCtx(context.Background(), constants.RequestTimeout, table.value)
+			target := NewServer("backend-1", "backend", false)
+
+			_, err = client.Call(
+				ctx,
+				protos.RPCType_User,
+				route.NewRoute(target.Type, "chat", "send"),
+				nil,
+				&message.Message{Type: message.Request},
+				target,
+			)
+
+			require.Error(t, err)
+			assert.True(t, apierrors.IsBadRequest(err))
+			assert.Equal(t, "invalid_request_timeout", apierrors.FromError(err).Status.GetReason())
+		})
+	}
+}
+
+func TestNatsRPCClientCallUsesEarlierParentRequestTimeout(t *testing.T) {
+	s := helpers.GetTestNatsServer(t)
+	defer s.Shutdown()
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Client.Nats
+	cfg.Connect = fmt.Sprintf("nats://%s", s.Addr())
+	client, err := NewNatsRPCClient(cfg, getServer(), nil, nil)
+	require.NoError(t, err)
+	require.NoError(t, client.Init())
+	defer func() { require.NoError(t, client.Shutdown()) }()
+	target := NewServer("backend-1", "backend", false)
+	sub, err := client.conn.Subscribe(getChannel(target.Type, target.ID), func(*nats.Msg) {})
+	require.NoError(t, err)
+	require.NoError(t, client.conn.Flush())
+	defer func() { require.NoError(t, sub.Unsubscribe()) }()
+
+	parentCtx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	ctx := pcontext.AddToPropagateCtx(parentCtx, constants.RequestTimeout, "2s")
+	started := time.Now()
+	_, err = client.Call(
+		ctx,
+		protos.RPCType_User,
+		route.NewRoute(target.Type, "chat", "send"),
+		nil,
+		&message.Message{Type: message.Request},
+		target,
+	)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, constants.ErrRPCRequestTimeout)
+	assert.Less(t, time.Since(started), time.Second)
+}
+
 func TestNatsRPCClientGetSubscribeChannel(t *testing.T) {
 	t.Parallel()
 	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Client.Nats

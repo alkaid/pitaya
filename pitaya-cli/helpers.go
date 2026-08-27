@@ -21,9 +21,7 @@
 package main
 
 import (
-	"crypto/tls"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,18 +74,10 @@ func protoClient(log Log, addr string) error {
 }
 
 func tryConnect(addr string) error {
-	tlsConfig := &tls.Config{InsecureSkipVerify: true}
-	if strings.Contains(addr, "://") {
-		return pClient.ConnectTo(addr, tlsConfig)
+	if !strings.Contains(addr, "://") {
+		addr = "tcp://" + addr
 	}
-
-	for _, uri := range []string{"wss://" + addr, "ws://" + addr, "tls://" + addr, "tcp://" + addr} {
-		if err := pClient.ConnectTo(uri, tlsConfig); err == nil {
-			return nil
-		}
-	}
-
-	return fmt.Errorf("failed to connect to %s", addr)
+	return pClient.ConnectTo(addr)
 }
 
 func readServerMessages(connection *serverConnection, callbacks serverCallbacks) {

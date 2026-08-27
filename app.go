@@ -57,7 +57,6 @@ import (
 	"github.com/alkaid/pitaya/v2/interfaces"
 	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/metrics"
-	mods "github.com/alkaid/pitaya/v2/modules"
 	"github.com/alkaid/pitaya/v2/remote"
 	"github.com/alkaid/pitaya/v2/router"
 	"github.com/alkaid/pitaya/v2/serialize"
@@ -310,20 +309,20 @@ type Pitaya interface {
 	// LazyRegister 延迟注册handle(终端api响应)
 	//  @param c 注意系统不会回调该component的生命周期函数
 	//  @param options
-	LazyRegister(c component.Component, options ...component.Option)
+	LazyRegister(c component.Component, options ...component.Option) error
 	// LazyRegisterRemote  延迟注册remote(远端rpc响应)
 	//  @param c 注意系统不会回调该component的生命周期函数
 	//  @param options
-	LazyRegisterRemote(c component.Component, options ...component.Option)
+	LazyRegisterRemote(c component.Component, options ...component.Option) error
 
 	// RegisterInterceptor 注册handle的拦截器,注册后原hande的消息响应将不再分发给handle
 	//  @param serviceName
 	//  @param interceptor
-	RegisterInterceptor(serviceName string, interceptor *component.Interceptor)
+	RegisterInterceptor(serviceName string, interceptor *component.Interceptor) error
 	// RegisterRemoteInterceptor 注册remote的拦截器,注册后原remote的消息响应将不再分发给remote
 	//  @param serviceName
 	//  @param interceptor
-	RegisterRemoteInterceptor(serviceName string, interceptor *component.Interceptor)
+	RegisterRemoteInterceptor(serviceName string, interceptor *component.Interceptor) error
 	RegisterModule(module interfaces.Module, name string) error
 	RegisterModuleAfter(module interfaces.Module, name string) error
 	RegisterModuleBefore(module interfaces.Module, name string) error
@@ -381,6 +380,7 @@ type App struct {
 	rpcServer           cluster.RPCServer
 	metricsReporters    []metrics.Reporter
 	metricsReporterMgr  metrics.Reporter
+	prometheusExporter  *metrics.PrometheusExporter
 	running             atomic.Bool
 	configurationLocked atomic.Bool
 	serializer          serialize.Serializer
@@ -419,11 +419,13 @@ type App struct {
 	stopConnectionsOnce sync.Once
 	stopBackgroundOnce  sync.Once
 	beforeModulesOnce   sync.Once
+	beforeModulesErr    error
 	drainTasksOnce      sync.Once
 	forceSessionsOnce   sync.Once
 	connectionsMu       sync.Mutex
 	connections         map[*trackedPlayerConn]struct{}
 	connectionsStopped  bool
+	startupJournal      *startupJournal
 }
 
 type trackedPlayerConn struct {
@@ -466,6 +468,7 @@ func NewApp(
 		groups,
 		sessionPool,
 		metricsReporters,
+		nil,
 		config,
 	)
 }
@@ -487,6 +490,7 @@ func newApp(
 	groups groups.GroupService,
 	sessionPool session.SessionPool,
 	metricsReporters []metrics.Reporter,
+	prometheusExporter *metrics.PrometheusExporter,
 	config config.PitayaConfig,
 ) *App {
 	app := &App{
@@ -504,6 +508,7 @@ func newApp(
 		dependencyDieChan:  dependencyDieChan,
 		acceptors:          acceptors,
 		metricsReporters:   metricsReporters,
+		prometheusExporter: prometheusExporter,
 		serverMode:         serverMode,
 		serializer:         serializer,
 		router:             router,
@@ -523,7 +528,9 @@ func newApp(
 	}
 	app.metricsReporterMgr = metrics.NewReporterMgr(metricsReporters)
 
-	app.initSysRemotes()
+	if app.remoteService != nil {
+		app.initSysRemotes()
+	}
 	return app
 }
 
@@ -768,52 +775,19 @@ func (app *App) Start() {
 	// Runtime configuration is immutable once startup begins. Readiness may turn
 	// false during drain while handlers still read routes and the dictionary.
 	app.configurationLocked.Store(true)
+	app.startupJournal = newStartupJournal()
 
-	if !app.server.Frontend && len(app.acceptors) > 0 {
-		logger.Log.Fatal("acceptors are not allowed on backend servers")
-	}
-
-	if app.server.Frontend && len(app.acceptors) == 0 {
-		logger.Log.Fatal("frontend servers should have at least one configured acceptor")
-	}
-
-	if app.serverMode == Cluster {
-		if reflect.TypeOf(app.rpcClient) == reflect.TypeOf(&cluster.GRPCClient{}) {
-			app.serviceDiscovery.AddListener(app.rpcClient.(*cluster.GRPCClient))
-		}
-
-		if err := app.RegisterModuleBefore(app.rpcServer, "rpcServer"); err != nil {
-			logger.Log.Fatal("failed to register rpc server module: %s", err.Error())
-		}
-		if err := app.RegisterModuleBefore(app.rpcClient, "rpcClient"); err != nil {
-			logger.Log.Fatal("failed to register rpc client module: %s", err.Error())
-		}
-		// set the service discovery as the last module to be started to ensure
-		// all modules have been properly initialized before the server starts
-		// receiving requests from other pitaya servers
-		if err := app.RegisterModuleAfter(app.serviceDiscovery, "serviceDiscovery"); err != nil {
-			logger.Log.Fatal("failed to register service discovery module: %s", err.Error())
-		}
+	if err := app.validateStartConfiguration(); err != nil {
+		panic(fmt.Errorf("start app: %w", err))
 	}
 
 	if err := app.listen(); err != nil {
-		deadline := time.Now().Add(runtimeShutdownTimeout)
-		acceptorErr := app.stopAcceptorsWithin(minDuration(dispatcherShutdownTimeout, time.Until(deadline)))
-		quiesceErr := app.quiesceRuntimeBefore(deadline)
-		timer.GlobalTicker.Stop()
-		if shutdownErr := errors.Join(acceptorErr, quiesceErr); shutdownErr != nil {
-			logger.Zap.Error("skipping session, module, and component teardown because runtime shutdown did not quiesce")
-			panic(fmt.Errorf("start app: %v: %w", err, shutdownErr))
-		}
-		app.forceCloseSessions()
-		app.shutdownModules()
-		app.shutdownComponents()
-		panic(fmt.Errorf("start app: %w", err))
+		panic(app.rollbackStartup(err))
 	}
 	app.startBackgroundTasks()
 
 	defer func() {
-		timer.GlobalTicker.Stop()
+		app.startupJournal.stopTicker()
 		app.running.Store(false)
 	}()
 
@@ -888,34 +862,71 @@ func (app *App) Start() {
 		panic(shutdownErr)
 	}
 	app.forceCloseSessions()
-	app.shutdownModules()
-	app.shutdownComponents()
+	if teardownErr := errors.Join(app.shutdownModules(), app.shutdownComponents()); teardownErr != nil {
+		panic(fmt.Errorf("shutdown app: %w", teardownErr))
+	}
+}
+
+func (app *App) validateStartConfiguration() error {
+	if app.server == nil {
+		return fmt.Errorf("server is not configured")
+	}
+	if !app.server.Frontend && len(app.acceptors) > 0 {
+		return fmt.Errorf("acceptors are not allowed on backend servers")
+	}
+	if app.server.Frontend && len(app.acceptors) == 0 {
+		return fmt.Errorf("frontend servers should have at least one configured acceptor")
+	}
+	return nil
+}
+
+func (app *App) rollbackStartup(startErr error) error {
+	app.running.Store(false)
+	journal := app.ensureStartupJournal()
+	journal.stopTicker()
+
+	var runtimeErr error
+	if journal.hasRuntimeStarted() {
+		deadline := time.Now().Add(runtimeShutdownTimeout)
+		acceptorErr := app.stopAcceptorsWithin(minDuration(dispatcherShutdownTimeout, time.Until(deadline)))
+		quiesceErr := app.quiesceRuntimeBefore(deadline)
+		runtimeErr = errors.Join(acceptorErr, quiesceErr)
+		if runtimeErr != nil {
+			logger.Zap.Error("skipping session, module, and component teardown because runtime shutdown did not quiesce")
+			return fmt.Errorf("start app: %w", errors.Join(startErr, runtimeErr))
+		}
+	}
+
+	if app.sessionPool != nil {
+		app.forceCloseSessions()
+	}
+	moduleErr := app.shutdownModules()
+	componentErr := journal.rollbackComponents()
+	return fmt.Errorf("start app: %w", errors.Join(startErr, moduleErr, componentErr))
 }
 
 func (app *App) listen() error {
-	app.startupComponents()
+	preparedModules, err := app.prepareRuntimeModules()
+	if err != nil {
+		return fmt.Errorf("prepare runtime modules: %w", err)
+	}
+	if err := app.startupComponents(); err != nil {
+		return err
+	}
 	// create global ticker instance, timer precision could be customized
 	// by SetTimerPrecision
 	timer.GlobalTicker = time.NewTicker(timer.Precision)
+	app.startupJournal.setTicker(timer.GlobalTicker)
 
-	// 改为强制唯一session
-	// if app.serverMode == Cluster && app.config.Session.Unique {
-	if app.serverMode == Cluster {
-		unique := mods.NewUniqueSession(app.server, app.rpcServer, app.rpcClient, app.sessionPool)
-		app.remoteService.AddRemoteBindingListener(unique)
-		app.RegisterModule(unique, "uniqueSession")
+	if err := app.commitRuntimeModules(preparedModules); err != nil {
+		return fmt.Errorf("commit runtime modules: %w", err)
 	}
-	// 注册配置重载回调
-	if app.conf != nil {
-		app.RegisterModuleBefore(config.NewConfigModule(app.conf), "configLoader")
+	if err := app.startModules(); err != nil {
+		return err
 	}
-	statefulGoPool := co.NewStatefulPoolsModule(app.config.GoPools, app.metricsReporters, app.config.Metrics.Period)
-
-	app.RegisterModuleBefore(statefulGoPool, "statefulGoPool")
-
-	app.startModules()
 
 	logger.Sugar.Infof("starting server %s:%s", app.server.Type, app.server.ID)
+	app.startupJournal.markRuntimeStarted()
 	if err := app.startRuntimeTasks(); err != nil {
 		return err
 	}
@@ -947,16 +958,13 @@ var ErrRuntimeShutdownTimeout = errors.New("pitaya: runtime shutdown timed out")
 func (app *App) startRuntimeTasks() error {
 	app.acceptCtx, app.cancelAccept = context.WithCancel(context.Background())
 	app.connectionCtx, app.cancelConnections = context.WithCancel(context.Background())
-	for i := 0; i < app.config.Concurrency.Handler.Dispatch; i++ {
-		threadID := i // 避免闭包值拷贝问题
-		app.dispatcherWG.Add(1)
-		if err := co.Submit(func() {
-			defer app.dispatcherWG.Done()
-			app.handlerService.DispatchContext(app.acceptCtx, threadID)
-		}); err != nil {
-			app.dispatcherWG.Done()
-			return fmt.Errorf("start handler dispatcher %d: %w", threadID, err)
-		}
+	app.dispatcherWG.Add(1)
+	if err := co.Submit(func() {
+		defer app.dispatcherWG.Done()
+		app.handlerService.DispatchContext(app.acceptCtx, 0)
+	}); err != nil {
+		app.dispatcherWG.Done()
+		return fmt.Errorf("start handler dispatcher: %w", err)
 	}
 
 	type startedAcceptor struct {
@@ -1188,7 +1196,7 @@ func (app *App) quiesceRuntimeBefore(deadline time.Time) error {
 		if app.worker != nil {
 			app.worker.Stop()
 		}
-		app.beforeShutdownModules()
+		_ = app.beforeShutdownModules()
 		app.drainHandlerTasks()
 	})
 }

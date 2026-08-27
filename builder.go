@@ -15,7 +15,6 @@ import (
 	"github.com/alkaid/pitaya/v2/groups"
 	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/metrics"
-	"github.com/alkaid/pitaya/v2/metrics/models"
 	"github.com/alkaid/pitaya/v2/pipeline"
 	"github.com/alkaid/pitaya/v2/router"
 	"github.com/alkaid/pitaya/v2/serialize"
@@ -30,30 +29,34 @@ import (
 
 // Builder holds dependency instances for a pitaya App
 type Builder struct {
-	acceptors         []acceptor.Acceptor
-	postBuildHooks    []func(app Pitaya)
-	dependencyDieChan chan bool
-	Config            config.PitayaConfig
-	DieChan           chan bool
-	PacketDecoder     codec.PacketDecoder
-	PacketEncoder     codec.PacketEncoder
-	MessageEncoder    *message.MessagesEncoder
-	Serializer        serialize.Serializer
-	Router            *router.Router
-	RPCClient         cluster.RPCClient
-	RPCServer         cluster.RPCServer
-	IdempotencyStore  service.IdempotencyStore
-	MetricsReporters  []metrics.Reporter
-	Server            *cluster.Server
-	ServerMode        ServerMode
-	ServiceDiscovery  cluster.ServiceDiscovery
-	Groups            groups.GroupService
-	SessionPool       session.SessionPool
-	Worker            *worker.Worker
-	RemoteHooks       *pipeline.RemoteHooks
-	HandlerHooks      *pipeline.HandlerHooks
-	Redis             redis.Cmdable
-	conf              *config.Config
+	acceptors          []acceptor.Acceptor
+	postBuildHooks     []func(app Pitaya)
+	dependencyDieChan  chan bool
+	Config             config.PitayaConfig
+	DieChan            chan bool
+	PacketDecoder      codec.PacketDecoder
+	PacketEncoder      codec.PacketEncoder
+	MessageEncoder     *message.MessagesEncoder
+	Serializer         serialize.Serializer
+	Router             *router.Router
+	RPCClient          cluster.RPCClient
+	RPCServer          cluster.RPCServer
+	IdempotencyStore   service.IdempotencyStore
+	MetricsReporters   []metrics.Reporter
+	Server             *cluster.Server
+	ServerMode         ServerMode
+	ServiceDiscovery   cluster.ServiceDiscovery
+	Groups             groups.GroupService
+	SessionPool        session.SessionPool
+	Worker             *worker.Worker
+	RemoteHooks        *pipeline.RemoteHooks
+	HandlerHooks       *pipeline.HandlerHooks
+	Redis              redis.Cmdable
+	conf               *config.Config
+	prometheusReporter *metrics.PrometheusReporter
+	prometheusExporter *metrics.PrometheusExporter
+	buildState         builderBuildState
+	provenance         *builderProvenance
 }
 
 // PitayaBuilder Builder interface
@@ -113,8 +116,20 @@ func NewBuilder(isFrontend bool,
 	dependencyDieChan := make(chan bool, 1)
 
 	metricsReporters := []metrics.Reporter{}
+	var prometheusReporter *metrics.PrometheusReporter
+	var prometheusExporter *metrics.PrometheusExporter
 	if config.Metrics.Prometheus.Enabled {
-		metricsReporters = addDefaultPrometheus(config.Metrics, config.Metrics.Custom, metricsReporters, serverType)
+		var err error
+		prometheusReporter, prometheusExporter, err = newManagedPrometheus(
+			serverType,
+			config.Metrics,
+			config.Metrics.Custom,
+			dependencyDieChan,
+		)
+		if err != nil {
+			panic(fmt.Errorf("configure required Prometheus exporter: %w", err))
+		}
+		metricsReporters = append(metricsReporters, prometheusReporter)
 	}
 
 	if config.Metrics.Statsd.Enabled {
@@ -181,31 +196,35 @@ func NewBuilder(isFrontend bool,
 		logger.Log.Fatalf("error creating serializer: %s", err.Error())
 	}
 
-	return &Builder{
-		acceptors:         []acceptor.Acceptor{},
-		postBuildHooks:    make([]func(app Pitaya), 0),
-		dependencyDieChan: dependencyDieChan,
-		Config:            config,
-		DieChan:           dieChan,
-		PacketDecoder:     codec.NewPomeloPacketDecoder(),
-		PacketEncoder:     codec.NewPomeloPacketEncoder(),
-		MessageEncoder:    message.NewMessagesEncoder(config.Handler.Messages.Compression),
-		Serializer:        serializer,
-		Router:            router.New(),
-		RPCClient:         rpcClient,
-		RPCServer:         rpcServer,
-		IdempotencyStore:  nil,
-		MetricsReporters:  metricsReporters,
-		Server:            server,
-		ServerMode:        serverMode,
-		Groups:            gsi,
-		RemoteHooks:       pipeline.NewRemoteHooks(),
-		HandlerHooks:      handlerHooks,
-		ServiceDiscovery:  serviceDiscovery,
-		SessionPool:       sessionPool,
-		Worker:            worker,
-		Redis:             redisClient,
+	builder := &Builder{
+		acceptors:          []acceptor.Acceptor{},
+		postBuildHooks:     make([]func(app Pitaya), 0),
+		dependencyDieChan:  dependencyDieChan,
+		Config:             config,
+		DieChan:            dieChan,
+		PacketDecoder:      codec.NewPomeloPacketDecoder(),
+		PacketEncoder:      codec.NewPomeloPacketEncoder(),
+		MessageEncoder:     message.NewMessagesEncoder(config.Handler.Messages.Compression),
+		Serializer:         serializer,
+		Router:             router.New(),
+		RPCClient:          rpcClient,
+		RPCServer:          rpcServer,
+		IdempotencyStore:   nil,
+		MetricsReporters:   metricsReporters,
+		Server:             server,
+		ServerMode:         serverMode,
+		Groups:             gsi,
+		RemoteHooks:        pipeline.NewRemoteHooks(),
+		HandlerHooks:       handlerHooks,
+		ServiceDiscovery:   serviceDiscovery,
+		SessionPool:        sessionPool,
+		Worker:             worker,
+		Redis:              redisClient,
+		prometheusReporter: prometheusReporter,
+		prometheusExporter: prometheusExporter,
 	}
+	builder.provenance = captureBuilderProvenance(builder)
+	return builder
 }
 
 // AddAcceptor adds a new acceptor to app
@@ -224,109 +243,138 @@ func (builder *Builder) AddPostBuildHook(hook func(app Pitaya)) {
 
 // Build returns a valid App instance
 func (builder *Builder) Build() Pitaya {
-	validateBuilderConfig(builder.Config, builder.ServerMode)
-	for index, reporter := range builder.MetricsReporters {
+	builder.beginBuild()
+	resolved := builder.resolveDependencies()
+	if err := resolved.validateGraph(); err != nil {
+		panic(fmt.Errorf("invalid builder dependency graph: %w", err))
+	}
+	validateBuilderConfig(resolved.config, resolved.serverMode)
+	for index, reporter := range resolved.metricsReporters {
 		if reporter == nil {
 			panic(fmt.Errorf("nil metrics reporter at index %d", index))
 		}
 	}
-	trustedProxies, err := netutil.ParseTrustedProxies(builder.Config.Acceptor.TrustedProxyCIDRs)
+	if resolved.serverMode == Standalone {
+		if resolved.serviceDiscovery != nil || resolved.rpcClient != nil || resolved.rpcServer != nil {
+			panic("Standalone mode can't have RPC or service discovery instances")
+		}
+	} else if resolved.serverMode == Cluster {
+		if resolved.serviceDiscovery == nil || resolved.rpcClient == nil || resolved.rpcServer == nil {
+			panic("Cluster mode must have RPC and service discovery instances")
+		}
+	}
+	trustedProxies, err := netutil.ParseTrustedProxies(resolved.config.Acceptor.TrustedProxyCIDRs)
 	if err != nil {
 		panic(fmt.Errorf("invalid pitaya.acceptor.trustedproxycidrs: %w", err))
 	}
 	// 根据配置初始化zap
-	logger.InitLogMgr(builder.Config.Log.Development, builder.Config.Log.Level)
-	if builder.conf != nil {
-		builder.conf.AddLoader(logger.Manager.ReloadFactory("pitaya.log", func() {
+	logger.InitLogMgr(resolved.config.Log.Development, resolved.config.Log.Level)
+	warnIgnoredHandlerConfiguration(resolved.config)
+	if resolved.conf != nil {
+		resolved.conf.AddLoader(logger.Manager.ReloadFactory("pitaya.log", func() {
 			logger.ResetGlobalVar()
 		}))
 	}
 	handlerPool := service.NewHandlerPool()
 	var remoteService *service.RemoteService
-	if builder.ServerMode == Standalone {
-		if builder.ServiceDiscovery != nil || builder.RPCClient != nil || builder.RPCServer != nil {
-			panic("Standalone mode can't have RPC or service discovery instances")
-		}
-	} else {
-		if !(builder.ServiceDiscovery != nil && builder.RPCClient != nil && builder.RPCServer != nil) {
-			panic("Cluster mode must have RPC and service discovery instances")
-		}
-
-		builder.Router.SetServiceDiscovery(builder.ServiceDiscovery)
-		idempotencyStore := builder.resolveRPCIdempotencyStore()
+	if resolved.serverMode == Cluster {
+		resolved.router.SetServiceDiscovery(resolved.serviceDiscovery)
+		idempotencyStore := resolved.resolveRPCIdempotencyStore()
 
 		remoteService = service.NewRemoteServiceWithOptions(
-			builder.RPCClient,
-			builder.RPCServer,
-			builder.ServiceDiscovery,
-			builder.PacketEncoder,
-			builder.Serializer,
-			builder.Router,
-			builder.MessageEncoder,
-			builder.Server,
-			builder.SessionPool,
-			builder.RemoteHooks,
-			builder.HandlerHooks,
+			resolved.rpcClient,
+			resolved.rpcServer,
+			resolved.serviceDiscovery,
+			resolved.packetEncoder,
+			resolved.serializer,
+			resolved.router,
+			resolved.messageEncoder,
+			resolved.server,
+			resolved.sessionPool,
+			resolved.remoteHooks,
+			resolved.handlerHooks,
 			handlerPool,
-			service.WithFanoutConcurrency(builder.Config.Cluster.RPC.FanoutConcurrency),
+			service.WithFanoutConcurrency(resolved.config.Cluster.RPC.FanoutConcurrency),
 			service.WithIdempotencyStore(idempotencyStore),
 		)
 
-		builder.RPCServer.SetPitayaServer(remoteService)
+		resolved.rpcServer.SetPitayaServer(remoteService)
 	}
 
-	agentFactory := agent.NewAgentFactoryWithTrustedProxies(builder.dependencyDieChan,
-		builder.PacketDecoder,
-		builder.PacketEncoder,
-		builder.Serializer,
-		builder.Config.Heartbeat.Interval,
-		builder.MessageEncoder,
-		builder.Config.Buffer.Agent.Messages,
-		builder.SessionPool,
-		builder.MetricsReporters,
-		builder.Server.ID,
+	agentFactory := agent.NewAgentFactoryWithTrustedProxies(resolved.dependencyDieChan,
+		resolved.packetDecoder,
+		resolved.packetEncoder,
+		resolved.serializer,
+		resolved.config.Heartbeat.Interval,
+		resolved.messageEncoder,
+		resolved.config.Buffer.Agent.Messages,
+		resolved.sessionPool,
+		resolved.metricsReporters,
+		resolved.server.ID,
 		trustedProxies,
 	)
 
 	handlerService := service.NewHandlerService(
-		builder.PacketDecoder,
-		builder.Serializer,
-		builder.Config.Buffer.Handler.LocalProcess,
-		builder.Config.Buffer.Handler.RemoteProcess,
-		builder.Server,
+		resolved.packetDecoder,
+		resolved.serializer,
+		0,
+		0,
+		resolved.server,
 		remoteService,
 		agentFactory,
-		builder.MetricsReporters,
-		builder.HandlerHooks,
+		resolved.metricsReporters,
+		resolved.handlerHooks,
 		handlerPool,
 	)
 
 	app := newApp(
-		builder.ServerMode,
-		builder.Serializer,
-		builder.acceptors,
-		builder.DieChan,
-		builder.dependencyDieChan,
-		builder.Router,
-		builder.Server,
-		builder.RPCClient,
-		builder.RPCServer,
-		builder.Worker,
-		builder.ServiceDiscovery,
+		resolved.serverMode,
+		resolved.serializer,
+		resolved.acceptors,
+		resolved.dieChan,
+		resolved.dependencyDieChan,
+		resolved.router,
+		resolved.server,
+		resolved.rpcClient,
+		resolved.rpcServer,
+		resolved.worker,
+		resolved.serviceDiscovery,
 		remoteService,
 		handlerService,
-		builder.Groups,
-		builder.SessionPool,
-		builder.MetricsReporters,
-		builder.Config,
+		resolved.groups,
+		resolved.sessionPool,
+		resolved.metricsReporters,
+		resolved.prometheusExporter,
+		resolved.config,
 	)
 
-	for _, postBuildHook := range builder.postBuildHooks {
+	for _, postBuildHook := range resolved.postBuildHooks {
 		postBuildHook(app)
 	}
 
-	app.conf = builder.conf
+	app.conf = resolved.conf
 	return app
+}
+
+func warnIgnoredHandlerConfiguration(pitayaConfig config.PitayaConfig) {
+	defaults := config.NewDefaultPitayaConfig()
+	if pitayaConfig.Buffer.Handler.LocalProcess == defaults.Buffer.Handler.LocalProcess &&
+		pitayaConfig.Buffer.Handler.RemoteProcess == defaults.Buffer.Handler.RemoteProcess &&
+		pitayaConfig.Concurrency.Handler.Dispatch == defaults.Concurrency.Handler.Dispatch {
+		return
+	}
+	logger.Zap.Warn(
+		"deprecated handler buffer and dispatch configuration is ignored",
+		zap.Int("pitaya.buffer.handler.localprocess", pitayaConfig.Buffer.Handler.LocalProcess),
+		zap.Int("pitaya.buffer.handler.remoteprocess", pitayaConfig.Buffer.Handler.RemoteProcess),
+		zap.Int("pitaya.concurrency.handler.dispatch", pitayaConfig.Concurrency.Handler.Dispatch),
+		zap.Strings("actual_capacity_owners", []string{
+			"pitaya.buffer.agent.messages",
+			"pitaya.gopools.<pool>.taskbuffer",
+			"pitaya.cluster.rpc.server.nats.buffer.messages",
+			"pitaya.cluster.rpc.server.nats.buffer.push",
+		}),
+	)
 }
 
 func validateBuilderConfig(pitayaConfig config.PitayaConfig, serverMode ServerMode) {
@@ -344,16 +392,16 @@ func validateBuilderConfig(pitayaConfig config.PitayaConfig, serverMode ServerMo
 	}
 }
 
-func (builder *Builder) resolveRPCIdempotencyStore() service.IdempotencyStore {
-	if builder.IdempotencyStore != nil {
-		return builder.IdempotencyStore
+func (resolved resolvedDependencies) resolveRPCIdempotencyStore() service.IdempotencyStore {
+	if resolved.idempotencyStore != nil {
+		return resolved.idempotencyStore
 	}
-	idempotencyConfig := builder.Config.Cluster.RPC.Idempotency
+	idempotencyConfig := resolved.config.Cluster.RPC.Idempotency
 	if !idempotencyConfig.Enabled {
 		return nil
 	}
 	store, err := service.NewRedisIdempotencyStore(
-		builder.Redis,
+		resolved.redis,
 		service.RedisIdempotencyStoreOptions{
 			KeyPrefix:         idempotencyConfig.KeyPrefix,
 			ResultTTL:         idempotencyConfig.ResultTTL,
@@ -377,16 +425,6 @@ func NewDefaultApp(isFrontend bool, serverType string, serverMode ServerMode, se
 
 func configureDefaultPipelines(handlerHooks *pipeline.HandlerHooks) {
 	handlerHooks.BeforeHandler.PushBack(defaultpipelines.StructValidatorInstance.Validate)
-}
-
-func addDefaultPrometheus(config config.MetricsConfig, customMetrics models.CustomMetricsSpec, reporters []metrics.Reporter, serverType string) []metrics.Reporter {
-	prometheus, err := CreatePrometheusReporter(serverType, config, customMetrics)
-	if err != nil {
-		logger.Zap.Error("failed to start prometheus metrics reporter, skipping", zap.Error(err))
-	} else {
-		reporters = append(reporters, prometheus)
-	}
-	return reporters
 }
 
 func addDefaultStatsd(config config.MetricsConfig, reporters []metrics.Reporter, serverType string) []metrics.Reporter {
