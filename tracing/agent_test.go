@@ -351,12 +351,15 @@ func TestAgentTLSFailuresSurfaceOnExport(t *testing.T) {
 func TestAgentRejectsInvalidTLSConfigurationWithoutState(t *testing.T) {
 	require.NoError(t, StopAgent())
 	err := StartAgent(context.Background(), Config{
-		Name: "invalid-tls",
+		Name:     "invalid-tls",
+		Endpoint: "127.0.0.1:4317",
 		TLS: config.TLSConfig{
 			Enabled:  true,
-			CertFile: "client.pem",
+			CertFile: "missing-client.pem",
+			KeyFile:  "missing-client-key.pem",
 		},
 	})
 	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to configure trace exporter TLS")
 	require.Nil(t, agentInstance)
 }

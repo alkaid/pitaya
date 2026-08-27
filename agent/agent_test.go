@@ -359,6 +359,7 @@ func TestAgentRemoteIPFromSocketAddress(t *testing.T) {
 			want: netip.MustParseAddr("2001:db8::13"),
 		},
 		{name: "invalid wrapped address", addr: &customMockAddr{network: "tcp", str: "invalid"}},
+		{name: "non-IP wrapped host", addr: &customMockAddr{network: "tcp", str: "not-an-ip:3010"}},
 		{name: "nil address"},
 	} {
 		t.Run(table.name, func(t *testing.T) {
@@ -373,6 +374,25 @@ func TestAgentRemoteIPFromSocketAddress(t *testing.T) {
 			assert.Equal(t, table.want, ag.RemoteIP())
 		})
 	}
+}
+
+func TestOutboundCompletionNilAndClosedQueuePathsAreNoOps(t *testing.T) {
+	var completion *outboundCompletion
+	assert.NotPanics(t, func() { completion.finish(nil) })
+
+	ag := &agentImpl{
+		chSend:      make(chan pendingWrite),
+		chStopWrite: make(chan struct{}),
+	}
+	close(ag.chSend)
+
+	ag.write()
+	select {
+	case <-ag.writerDone:
+	default:
+		t.Fatal("writer did not finish after its outbound queue closed")
+	}
+	assert.NotPanics(t, func() { ag.failQueuedWrites(brokenPipeError()) })
 }
 
 func TestAgentFactoryConstructorsPreserveDefaultAndTrustedPolicies(t *testing.T) {

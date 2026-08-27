@@ -145,3 +145,44 @@ func TestNatsUserSubscriptionRegistryReplacesRolledBackUIDForSameSession(t *test
 	assert.Same(t, newPush, entry.push)
 	assert.Same(t, newKick, entry.kick)
 }
+
+func TestNatsUserSubscriptionRegistryRejectsClosedAdmission(t *testing.T) {
+	registry := newNatsUserSubscriptionRegistry()
+	registry.closeAdmission()
+
+	reused, err := registry.acquire(21, "user", func(*natsUserSubscriptionEntry) (*nats.Subscription, *nats.Subscription, error) {
+		t.Fatal("closed registry invoked create")
+		return nil, nil, nil
+	}, func(*nats.Subscription) {})
+	assert.False(t, reused)
+	assert.ErrorIs(t, err, errNatsUserSubscriptionsClosed)
+	assert.True(t, registry.isActive(nil))
+}
+
+func TestNatsUserSubscriptionRegistryPropagatesCompletedReuseFailure(t *testing.T) {
+	registry := newNatsUserSubscriptionRegistry()
+	wantErr := errors.New("subscription create failed")
+	ready := make(chan struct{})
+	close(ready)
+	registry.entries[22] = &natsUserSubscriptionEntry{
+		sessionID: 22,
+		uid:       "user",
+		ready:     ready,
+		err:       wantErr,
+	}
+
+	reused, err := registry.acquire(22, "user", func(*natsUserSubscriptionEntry) (*nats.Subscription, *nats.Subscription, error) {
+		t.Fatal("completed failed entry invoked create")
+		return nil, nil, nil
+	}, func(*nats.Subscription) {})
+	assert.False(t, reused)
+	assert.ErrorIs(t, err, wantErr)
+
+	registry.entries[22].err = nil
+	reused, err = registry.acquire(22, "user", func(*natsUserSubscriptionEntry) (*nats.Subscription, *nats.Subscription, error) {
+		t.Fatal("inactive entry invoked create")
+		return nil, nil, nil
+	}, func(*nats.Subscription) {})
+	assert.False(t, reused)
+	assert.ErrorIs(t, err, errNatsUserSubscriptionsClosed)
+}

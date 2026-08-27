@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/helpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -310,6 +311,48 @@ func TestPruneRejectsInvalidWholeBatchBeforeWriting(t *testing.T) {
 			},
 		},
 		{
+			name: "invalid assignment value",
+			mutate: func(_ *testing.T, snapshot Snapshot) []Snapshot {
+				snapshot.assignmentValue = []byte("not-json")
+				return []Snapshot{snapshot}
+			},
+		},
+		{
+			name: "snapshot identity mismatch",
+			mutate: func(_ *testing.T, snapshot Snapshot) []Snapshot {
+				snapshot.ServerType = "connector"
+				return []Snapshot{snapshot}
+			},
+		},
+		{
+			name: "invalid registration key",
+			mutate: func(_ *testing.T, snapshot Snapshot) []Snapshot {
+				snapshot.RegistrationKey += "-changed"
+				return []Snapshot{snapshot}
+			},
+		},
+		{
+			name: "invalid missing registration evidence",
+			mutate: func(_ *testing.T, snapshot Snapshot) []Snapshot {
+				snapshot.RegistrationVersion = 1
+				return []Snapshot{snapshot}
+			},
+		},
+		{
+			name: "invalid replacement registration evidence",
+			mutate: func(_ *testing.T, snapshot Snapshot) []Snapshot {
+				snapshot.StaleReason = StaleReasonReplaced
+				return []Snapshot{snapshot}
+			},
+		},
+		{
+			name: "missing stale reason",
+			mutate: func(_ *testing.T, snapshot Snapshot) []Snapshot {
+				snapshot.StaleReason = ""
+				return []Snapshot{snapshot}
+			},
+		},
+		{
 			name: "duplicate key",
 			mutate: func(_ *testing.T, snapshot Snapshot) []Snapshot {
 				return []Snapshot{snapshot, snapshot}
@@ -390,4 +433,206 @@ func TestInventoryPaginationLimitAndKeyValidation(t *testing.T) {
 	_, err = NamespacePrefix("tenant")
 	assert.Error(t, err)
 	assert.Error(t, ValidateAssignmentKey("ABC"))
+}
+
+func TestInventoryBoundaryValidationAndDefaults(t *testing.T) {
+	ctx, cli := ownerctlTestEtcd(t)
+	const prefix = "tenant/"
+
+	_, err := InventoryAll(ctx, nil, prefix, 1, 1)
+	assert.ErrorContains(t, err, "etcd client is required")
+	_, err = InventoryAll(ctx, cli, "tenant", 1, 1)
+	assert.ErrorContains(t, err, "must end with /")
+	_, err = InventoryAll(ctx, cli, prefix, 0, 1)
+	assert.ErrorContains(t, err, "limit must be positive")
+
+	for _, pageSize := range []int{0, 2} {
+		inventory, inventoryErr := InventoryAll(ctx, cli, prefix, 1, pageSize)
+		require.NoError(t, inventoryErr)
+		assert.Empty(t, inventory.Assignments)
+		assert.Equal(t, map[Status]int{StatusLive: 0, StatusStale: 0, StatusCorrupt: 0}, inventory.Counts)
+	}
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = InventoryAll(canceled, cli, prefix, 1, 1)
+	assert.ErrorContains(t, err, "read assignment inventory")
+
+	_, err = InventoryKeys(ctx, nil, prefix, nil, 1)
+	assert.ErrorContains(t, err, "etcd client is required")
+	_, err = InventoryKeys(ctx, cli, prefix, nil, 0)
+	assert.ErrorIs(t, err, ErrLimitExceeded)
+	valid, err := FullAssignmentKey(prefix, testOpaque("missing"))
+	require.NoError(t, err)
+	_, err = InventoryKeys(ctx, cli, prefix, []string{valid, valid + "0"}, 1)
+	assert.ErrorIs(t, err, ErrLimitExceeded)
+
+	inventory, err := InventoryKeys(ctx, cli, prefix, []string{valid}, 1)
+	require.NoError(t, err)
+	assert.Empty(t, inventory.Assignments)
+	assert.Equal(t, map[Status]int{StatusLive: 0, StatusStale: 0, StatusCorrupt: 0}, inventory.Counts)
+	_, err = InventoryKeys(canceled, cli, prefix, []string{valid}, 1)
+	assert.ErrorContains(t, err, "read assignment")
+}
+
+func TestClassifyCorruptAssignmentMetadata(t *testing.T) {
+	ctx, cli := ownerctlTestEtcd(t)
+	const prefix = "tenant/"
+	opaque := testOpaque("metadata")
+	key, err := FullAssignmentKey(prefix, opaque)
+	require.NoError(t, err)
+
+	validRecord := Record{
+		Version:       RecordVersion,
+		ServerType:    "room",
+		AssignmentKey: opaque,
+		ServerID:      "owner",
+		OwnerEpoch:    1,
+	}
+
+	tests := []struct {
+		name           string
+		key            string
+		record         Record
+		wantDiagnostic string
+	}{
+		{name: "invalid full key", key: "other/key", record: validRecord, wantDiagnostic: "outside"},
+		{
+			name: "record identity mismatch",
+			key:  key,
+			record: Record{
+				Version:       RecordVersion,
+				ServerType:    "room",
+				AssignmentKey: testOpaque("different"),
+				ServerID:      "owner",
+				OwnerEpoch:    1,
+			},
+			wantDiagnostic: "identity does not match",
+		},
+		{
+			name: "invalid registration identity",
+			key:  key,
+			record: Record{
+				Version:       RecordVersion,
+				ServerType:    "room/invalid",
+				AssignmentKey: opaque,
+				ServerID:      "owner",
+				OwnerEpoch:    1,
+			},
+			wantDiagnostic: "invalid owner registration identity",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			payload, encodeErr := Encode(test.record)
+			require.NoError(t, encodeErr)
+			snapshot, classifyErr := classify(ctx, cli, prefix, test.key, payload, 7)
+			require.NoError(t, classifyErr)
+			assert.Equal(t, StatusCorrupt, snapshot.Status)
+			assert.Contains(t, snapshot.Diagnostic, test.wantDiagnostic)
+			assert.Positive(t, snapshot.ValidationDuration)
+		})
+	}
+}
+
+func TestPruneBoundaryValidationAndCanceledTransaction(t *testing.T) {
+	ctx, cli := ownerctlTestEtcd(t)
+	const prefix = "tenant/"
+	key := putAssignment(t, ctx, cli, prefix, "prune-canceled", Record{
+		ServerType: "room", ServerID: "missing", OwnerEpoch: 99,
+	})
+	inventory, err := InventoryKeys(ctx, cli, prefix, []string{key}, 1)
+	require.NoError(t, err)
+	require.Len(t, inventory.Assignments, 1)
+
+	_, err = Prune(ctx, nil, prefix, inventory.Assignments, true)
+	assert.ErrorContains(t, err, "etcd client is required")
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	results, err := Prune(canceled, cli, prefix, inventory.Assignments, true)
+	assert.Empty(t, results)
+	assert.ErrorContains(t, err, "delete assignment")
+}
+
+func TestRecordCodecAndKeyHelpers(t *testing.T) {
+	const prefix = "tenant/"
+	opaque := testOpaque("codec")
+	record := Record{
+		Version:       RecordVersion,
+		ServerType:    "room",
+		AssignmentKey: opaque,
+		ServerID:      "owner",
+		OwnerEpoch:    42,
+	}
+	payload, err := Encode(record)
+	require.NoError(t, err)
+	decoded, err := Decode(payload)
+	require.NoError(t, err)
+	assert.Equal(t, record, decoded)
+
+	_, err = Decode(append(payload, []byte("{}")...))
+	assert.ErrorIs(t, err, constants.ErrStatefulOwnerAssignmentCorrupt)
+	invalidPayload, err := Encode(Record{Version: RecordVersion})
+	require.NoError(t, err)
+	_, err = Decode(invalidPayload)
+	assert.ErrorIs(t, err, constants.ErrStatefulOwnerAssignmentCorrupt)
+
+	relative, err := AssignmentRelativeKey(opaque)
+	require.NoError(t, err)
+	assert.Equal(t, AssignmentRelativePrefix+opaque, relative)
+	_, err = AssignmentRelativeKey("not-a-key")
+	assert.Error(t, err)
+	registration, err := RegistrationRelativeKey("room", "owner")
+	require.NoError(t, err)
+	assert.Equal(t, "servers/room/owner", registration)
+	_, err = RegistrationRelativeKey("room/invalid", "owner")
+	assert.Error(t, err)
+
+	namespace, err := NamespacePrefix("")
+	require.NoError(t, err)
+	assert.Empty(t, namespace)
+	_, err = NamespacePrefix(" tenant/")
+	assert.Error(t, err)
+	assignmentPrefix, err := AssignmentPrefix(prefix)
+	require.NoError(t, err)
+	assert.Equal(t, prefix+AssignmentRelativePrefix, assignmentPrefix)
+	_, err = AssignmentPrefix("tenant")
+	assert.Error(t, err)
+
+	fullKey, err := FullAssignmentKey(prefix, opaque)
+	require.NoError(t, err)
+	assert.Equal(t, assignmentPrefix+opaque, fullKey)
+	_, err = FullAssignmentKey("tenant", opaque)
+	assert.Error(t, err)
+	_, err = FullAssignmentKey(prefix, "not-a-key")
+	assert.Error(t, err)
+	parsed, err := ParseFullAssignmentKey(prefix, fullKey)
+	require.NoError(t, err)
+	assert.Equal(t, opaque, parsed)
+	_, err = ParseFullAssignmentKey("tenant", fullKey)
+	assert.Error(t, err)
+
+	registrationKey, err := FullRegistrationKey(prefix, record)
+	require.NoError(t, err)
+	assert.Equal(t, prefix+registration, registrationKey)
+	_, err = FullRegistrationKey("tenant", record)
+	assert.Error(t, err)
+	record.ServerID = "invalid/id"
+	_, err = FullRegistrationKey(prefix, record)
+	assert.Error(t, err)
+}
+
+func TestSortSnapshots(t *testing.T) {
+	snapshots := []Snapshot{
+		{AssignmentKey: "tenant/stateful-owners/v1/c"},
+		{AssignmentKey: "tenant/stateful-owners/v1/a"},
+		{AssignmentKey: "tenant/stateful-owners/v1/b"},
+	}
+	SortSnapshots(snapshots)
+	assert.Equal(t, []string{
+		"tenant/stateful-owners/v1/a",
+		"tenant/stateful-owners/v1/b",
+		"tenant/stateful-owners/v1/c",
+	}, []string{snapshots[0].AssignmentKey, snapshots[1].AssignmentKey, snapshots[2].AssignmentKey})
 }

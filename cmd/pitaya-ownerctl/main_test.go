@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,9 +98,12 @@ func TestRunPruneListRejectsLiveAssignment(t *testing.T) {
 			extra = append(extra, "--apply")
 		}
 		t.Run(name, func(t *testing.T) {
-			_, stderr, code := runOwnerctl(t, endpoint, prefix, "prune-list", extra...)
+			result, stderr, code := runOwnerctl(t, endpoint, prefix, "prune-list", extra...)
 			assert.Equal(t, 1, code)
 			assert.Contains(t, stderr, "only stale assignments may be pruned")
+			assert.Contains(t, result.Error, "only stale assignments may be pruned")
+			require.Len(t, result.Assignments, 1)
+			assert.Equal(t, liveKey, result.Assignments[0].AssignmentKey)
 			ownerctlRequireKey(t, ctx, cli, liveKey, true)
 		})
 	}
@@ -150,6 +154,7 @@ func TestRunRejectsInvalidEnvironment(t *testing.T) {
 		value string
 		want  string
 	}{
+		{name: "PITAYA_OWNERCTL_DIAL_TIMEOUT", value: "later", want: "must be a duration"},
 		{name: "PITAYA_OWNERCTL_TIMEOUT", value: "soon", want: "must be a duration"},
 		{name: "PITAYA_OWNERCTL_TLS", value: "sometimes", want: "must be a boolean"},
 	}
@@ -160,6 +165,225 @@ func TestRunRejectsInvalidEnvironment(t *testing.T) {
 			assert.Equal(t, 2, run([]string{"inventory"}, &stdout, &stderr))
 			assert.Contains(t, stderr.String(), test.want)
 		})
+	}
+}
+
+func TestRunCommandLineValidation(t *testing.T) {
+	clearOwnerctlEnv(t)
+	tests := []struct {
+		name     string
+		args     []string
+		wantCode int
+		wantText string
+	}{
+		{name: "missing operation", wantCode: 2, wantText: "usage: pitaya-ownerctl"},
+		{name: "unknown operation", args: []string{"remove"}, wantCode: 2, wantText: "unknown operation"},
+		{name: "subcommand help", args: []string{"inventory", "--help"}, wantCode: 0, wantText: "Usage of pitaya-ownerctl inventory"},
+		{name: "invalid flag value", args: []string{"inventory", "--timeout", "later"}, wantCode: 2, wantText: "invalid value"},
+		{name: "unexpected argument", args: []string{"inventory", "extra"}, wantCode: 2, wantText: "unexpected arguments"},
+		{name: "zero timeout", args: []string{"inventory", "--timeout", "0s"}, wantCode: 2, wantText: "must be positive"},
+		{name: "zero dial timeout", args: []string{"inventory", "--dial-timeout", "0s"}, wantCode: 2, wantText: "must be positive"},
+		{name: "zero limit", args: []string{"inventory", "--limit", "0"}, wantCode: 2, wantText: "limit and page-size"},
+		{name: "zero page size", args: []string{"inventory", "--page-size", "0"}, wantCode: 2, wantText: "limit and page-size"},
+		{name: "invalid format", args: []string{"inventory", "--format", "yaml"}, wantCode: 2, wantText: "format must be"},
+		{name: "invalid prefix", args: []string{"inventory", "--prefix", "tenant"}, wantCode: 2, wantText: "must end with /"},
+		{name: "missing prune list input", args: []string{"prune-list"}, wantCode: 2, wantText: "requires --input"},
+		{name: "empty endpoint", args: []string{"inventory", "--endpoints", "localhost:2379,"}, wantCode: 2, wantText: "empty values"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			assert.Equal(t, test.wantCode, run(test.args, &stdout, &stderr))
+			assert.Contains(t, stdout.String()+stderr.String(), test.wantText)
+		})
+	}
+}
+
+func TestRunReportsTLSConfigurationFailure(t *testing.T) {
+	clearOwnerctlEnv(t)
+	missingCA := filepath.Join(t.TempDir(), "missing-ca.pem")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"inventory", "--tls", "--ca-file", missingCA}, &stdout, &stderr)
+	assert.Equal(t, 1, code)
+	assert.Empty(t, stdout.String())
+	assert.Contains(t, stderr.String(), "connect to etcd")
+}
+
+func TestParseFlagsEnvironmentAndClientEndpoints(t *testing.T) {
+	clearOwnerctlEnv(t)
+	t.Setenv("PITAYA_OWNERCTL_DIAL_TIMEOUT", "2s")
+	t.Setenv("PITAYA_OWNERCTL_TIMEOUT", "3s")
+	t.Setenv("PITAYA_OWNERCTL_TLS", "true")
+	t.Setenv("PITAYA_OWNERCTL_ENDPOINTS", " first:2379 , second:2379 ")
+	t.Setenv("PITAYA_OWNERCTL_PREFIX", "tenant/")
+	t.Setenv("PITAYA_OWNERCTL_USER", "owner")
+	t.Setenv("PITAYA_OWNERCTL_PASSWORD", "secret")
+	var stderr bytes.Buffer
+	cfg, err := parseFlags("prune-list", []string{
+		"--input", "keys.txt",
+		"--format", "json",
+		"--apply",
+		"--limit", "7",
+		"--page-size", "3",
+	}, &stderr)
+	require.NoError(t, err, stderr.String())
+	assert.Equal(t, " first:2379 , second:2379 ", cfg.endpoints)
+	assert.Equal(t, "tenant/", cfg.prefix)
+	assert.Equal(t, "owner", cfg.user)
+	assert.Equal(t, "secret", cfg.password)
+	assert.Equal(t, 2*time.Second, cfg.dialTimeout)
+	assert.Equal(t, 3*time.Second, cfg.timeout)
+	assert.True(t, cfg.tlsEnabled)
+	assert.True(t, cfg.apply)
+	assert.Equal(t, "keys.txt", cfg.input)
+	assert.Equal(t, 7, cfg.limit)
+	assert.Equal(t, 3, cfg.pageSize)
+
+	client, err := newClient(commandConfig{
+		endpoints:   cfg.endpoints,
+		dialTimeout: cfg.dialTimeout,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+	assert.Equal(t, []string{"first:2379", "second:2379"}, client.Endpoints())
+
+	assert.Equal(t, "fallback", envOr("PITAYA_OWNERCTL_UNSET", "fallback"))
+	t.Setenv("PITAYA_OWNERCTL_VALUE", "configured")
+	assert.Equal(t, "configured", envOr("PITAYA_OWNERCTL_VALUE", "fallback"))
+	duration, err := durationEnv("PITAYA_OWNERCTL_UNSET", time.Second)
+	require.NoError(t, err)
+	assert.Equal(t, time.Second, duration)
+	t.Setenv("PITAYA_OWNERCTL_DURATION", "4s")
+	duration, err = durationEnv("PITAYA_OWNERCTL_DURATION", time.Second)
+	require.NoError(t, err)
+	assert.Equal(t, 4*time.Second, duration)
+	enabled, err := boolEnv("PITAYA_OWNERCTL_UNSET")
+	require.NoError(t, err)
+	assert.False(t, enabled)
+	t.Setenv("PITAYA_OWNERCTL_BOOL", "true")
+	enabled, err = boolEnv("PITAYA_OWNERCTL_BOOL")
+	require.NoError(t, err)
+	assert.True(t, enabled)
+}
+
+func TestReadKeyListBoundaries(t *testing.T) {
+	writeInput := func(t *testing.T, contents string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "keys.txt")
+		require.NoError(t, os.WriteFile(path, []byte(contents), 0o600))
+		return path
+	}
+
+	t.Run("comments blanks and trim", func(t *testing.T) {
+		path := writeInput(t, "\n# reviewed\n  first-key  \nsecond-key\n")
+		keys, err := readKeyList(path, 2)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"first-key", "second-key"}, keys)
+	})
+	t.Run("missing file", func(t *testing.T) {
+		_, err := readKeyList(filepath.Join(t.TempDir(), "missing"), 1)
+		assert.ErrorContains(t, err, "open input")
+	})
+	t.Run("embedded whitespace", func(t *testing.T) {
+		_, err := readKeyList(writeInput(t, "two keys\n"), 1)
+		assert.ErrorContains(t, err, "must contain one full assignment key")
+	})
+	t.Run("limit", func(t *testing.T) {
+		_, err := readKeyList(writeInput(t, "one\ntwo\n"), 1)
+		assert.ErrorIs(t, err, statefulowner.ErrLimitExceeded)
+	})
+	t.Run("scanner error", func(t *testing.T) {
+		_, err := readKeyList(writeInput(t, strings.Repeat("x", 70*1024)), 1)
+		assert.ErrorContains(t, err, "read input")
+	})
+}
+
+type reportErrorWriter struct {
+	err error
+}
+
+func (w reportErrorWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+func TestReportTableMetricsAndWriterErrors(t *testing.T) {
+	assignments := []statefulowner.Snapshot{
+		{
+			AssignmentKey:        "tenant/stateful-owners/v1/b",
+			ServerType:           "room",
+			OwnerID:              "owner-b",
+			OwnerEpoch:           2,
+			RegistrationRevision: 20,
+			Status:               statefulowner.StatusStale,
+			StaleReason:          statefulowner.StaleReasonMissing,
+			ValidationDuration:   2 * time.Millisecond,
+		},
+		{
+			AssignmentKey:        "tenant/stateful-owners/v1/a",
+			ServerType:           "connector",
+			OwnerID:              "owner-a",
+			OwnerEpoch:           1,
+			RegistrationRevision: 10,
+			Status:               statefulowner.StatusLive,
+			Diagnostic:           "checked",
+			ValidationDuration:   time.Millisecond,
+		},
+		{
+			AssignmentKey:      "tenant/stateful-owners/v1/c",
+			Status:             statefulowner.StatusCorrupt,
+			ValidationDuration: 3 * time.Millisecond,
+		},
+	}
+	cleanup := []statefulowner.CleanupResult{
+		{AssignmentKey: assignments[0].AssignmentKey, Status: statefulowner.CleanupConflict},
+		{AssignmentKey: assignments[1].AssignmentKey, Status: statefulowner.CleanupDeleted},
+	}
+	metrics := buildOwnerMetrics(assignments, cleanup)
+	require.Len(t, metrics.InventoryCounts, 3)
+	assert.Equal(t, []string{"connector", "room", "unknown"}, []string{
+		metrics.InventoryCounts[0].ServerType,
+		metrics.InventoryCounts[1].ServerType,
+		metrics.InventoryCounts[2].ServerType,
+	})
+	require.Len(t, metrics.ValidationLatency, 3)
+	assert.Equal(t, "connector", metrics.ValidationLatency[0].ServerType)
+	assert.Equal(t, "room", metrics.ValidationLatency[1].ServerType)
+	assert.Equal(t, "unknown", metrics.ValidationLatency[2].ServerType)
+	require.Len(t, metrics.CleanupResults, 2)
+	assert.Equal(t, "connector", metrics.CleanupResults[0].ServerType)
+	assert.Equal(t, "room", metrics.CleanupResults[1].ServerType)
+
+	result := report{Assignments: assignments, Cleanup: cleanup, Metrics: metrics}
+	var table bytes.Buffer
+	require.NoError(t, writeReport(&table, "table", result))
+	assert.Contains(t, table.String(), "STATUS")
+	assert.Contains(t, table.String(), "registration_missing, conflict")
+	assert.Contains(t, table.String(), "checked, deleted")
+
+	writeErr := errors.New("output unavailable")
+	assert.ErrorIs(t, writeReport(reportErrorWriter{err: writeErr}, "table", result), writeErr)
+	var stderr bytes.Buffer
+	assert.Equal(t, 1, finishReport(reportErrorWriter{err: writeErr}, &stderr, "json", "inventory", report{}, nil))
+	assert.Contains(t, stderr.String(), "write report: output unavailable")
+}
+
+func clearOwnerctlEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		"PITAYA_OWNERCTL_ENDPOINTS",
+		"PITAYA_OWNERCTL_USER",
+		"PITAYA_OWNERCTL_PASSWORD",
+		"PITAYA_OWNERCTL_PREFIX",
+		"PITAYA_OWNERCTL_DIAL_TIMEOUT",
+		"PITAYA_OWNERCTL_TIMEOUT",
+		"PITAYA_OWNERCTL_TLS",
+		"PITAYA_OWNERCTL_CA_FILE",
+		"PITAYA_OWNERCTL_CERT_FILE",
+		"PITAYA_OWNERCTL_KEY_FILE",
+		"PITAYA_OWNERCTL_SERVER_NAME",
+	} {
+		t.Setenv(name, "")
 	}
 }
 

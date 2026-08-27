@@ -142,6 +142,60 @@ func TestFrontendBindBroadcastRunsAfterLocalUIDCommit(t *testing.T) {
 	require.NoError(t, sess.Bind(context.Background(), uid, nil, nil))
 }
 
+func TestBackendBindSkipsAfterBindBroadcast(t *testing.T) {
+	pool := session.NewSessionPool()
+	server := cluster.NewServer("backend-1", "backend", false)
+	remoteService := service.NewRemoteService(nil, nil, nil, nil, nil, nil, nil, server, pool, nil, nil, nil)
+	NewSys(pool, server, nil, nil, remoteService).Init()
+
+	sess, isNew := pool.NewSession(nil, true)
+	require.True(t, isNew)
+
+	require.NoError(t, sess.Bind(context.Background(), "backend-user", nil, nil))
+	assert.Same(t, sess, pool.GetSessionByUID("backend-user"))
+}
+
+func TestFrontendBindTreatsForkAndNotifyErrorsAsNonFatal(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	pool := session.NewSessionPool()
+	pool.SetClusterCache(&standaloneSessionCache{loaded: map[string]string{}})
+	server := cluster.NewServer("frontend-1", "connector", true)
+	discovery := clustermocks.NewMockServiceDiscovery(ctrl)
+	forkErr := errors.New("fork unavailable")
+	discovery.EXPECT().GetServersByType(server.Type).Return(nil, forkErr)
+	discovery.EXPECT().GetServerTypes().Return(map[string]*cluster.Server{
+		"invalid": {ID: "invalid", Type: "bad.type"},
+	})
+	remoteService := service.NewRemoteService(nil, nil, discovery, nil, nil, nil, nil, server, pool, nil, nil, nil)
+	NewSys(pool, server, discovery, nil, remoteService).Init()
+
+	sess, isNew := pool.NewSession(nil, true)
+	require.True(t, isNew)
+
+	err := sess.Bind(context.Background(), "nonfatal-broadcast-errors", nil, map[string]string{"source": "test"})
+
+	require.NoError(t, err)
+	assert.Same(t, sess, pool.GetSessionByUID("nonfatal-broadcast-errors"))
+}
+
+func TestFrontendBindTreatsInvalidForkRouteAsNonFatal(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	pool := session.NewSessionPool()
+	pool.SetClusterCache(&standaloneSessionCache{loaded: map[string]string{}})
+	server := cluster.NewServer("frontend-1", "bad.type", true)
+	discovery := clustermocks.NewMockServiceDiscovery(ctrl)
+	remoteService := service.NewRemoteService(nil, nil, discovery, nil, nil, nil, nil, server, pool, nil, nil, nil)
+	NewSys(pool, server, discovery, nil, remoteService).Init()
+
+	sess, isNew := pool.NewSession(nil, true)
+	require.True(t, isNew)
+
+	err := sess.Bind(context.Background(), "invalid-fork-route", nil, nil)
+
+	require.NoError(t, err)
+	assert.Same(t, sess, pool.GetSessionByUID("invalid-fork-route"))
+}
+
 func TestFrontendBindBroadcastSkipsSessionClosedByEarlierAfterBindObserver(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	pool := session.NewSessionPool()

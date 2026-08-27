@@ -142,8 +142,10 @@ equal diff endpoints, and a policy baseline that is not an ancestor of the
 tested head.
 
 The root-module gate reads `scripts/coverage-baseline.json`. Its literal file
-list excludes generated code, mocks, examples, and test-only process or
-benchmark helpers. It fails when the aggregate or any included package drops
+list excludes generated code, mocks, examples, test-only process or benchmark
+helpers, and declaration-only catalogs for which Go cover emits no function
+blocks. Consumer behavior using those declarations remains covered. The gate
+fails when the aggregate or any included package drops
 below its exact baseline ratio, when the included package set changes, or when
 changed executable production lines are below 90% coverage. Base and head must
 be full commit object IDs. The policy and CI lane cover the Linux/amd64 build

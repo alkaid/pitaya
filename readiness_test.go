@@ -128,6 +128,15 @@ func TestReadinessReportsCompositeStateAndMetrics(t *testing.T) {
 	}
 }
 
+func TestReadinessAcceptsNilContext(t *testing.T) {
+	app := readyTestApp()
+
+	report := app.Readiness(nil)
+
+	require.True(t, report.Ready)
+	assert.Equal(t, ReadinessStatusReady, report.Checks[ReadinessLifecycle].Status)
+}
+
 func TestReadinessIdentifiesEachDegradedDependency(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -282,6 +291,20 @@ func TestReadinessMarksDependencyWithoutStatusCapabilityNotApplicable(t *testing
 
 	require.True(t, report.Ready)
 	assert.Equal(t, ReadinessStatusNotApplicable, report.Checks[ReadinessRPCClient].Status)
+}
+
+func TestModuleReadinessProbeTreatsTypedNilAsUnconfigured(t *testing.T) {
+	var dependency *readinessRPCClientStub
+
+	probe := moduleReadinessProbe(ReadinessRPCClient, dependency)
+
+	assert.Equal(t, ReadinessRPCClient, probe.name)
+	assert.False(t, probe.configured)
+	assert.Nil(t, probe.check)
+}
+
+func TestAppLifecycleStateStringReportsUnknownValues(t *testing.T) {
+	assert.Equal(t, "unknown", appLifecycleState(255).String())
 }
 
 func TestReadinessConcurrentCallsDoNotMutateDependencies(t *testing.T) {

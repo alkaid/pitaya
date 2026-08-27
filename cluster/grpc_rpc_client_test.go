@@ -138,6 +138,57 @@ func TestGRPCClientShutdownClosesConnectionsAndAdmission(t *testing.T) {
 	assert.False(t, found)
 }
 
+func TestGRPCClientClosedAdmissionRejectsEveryOperation(t *testing.T) {
+	client, err := getRPCClient(config.NewDefaultPitayaConfig().Cluster.RPC.Client.Grpc)
+	require.NoError(t, err)
+	require.NoError(t, client.Shutdown())
+
+	rt := route.NewRoute("room", "svc", "method")
+	responses, err := client.Publish(context.Background(), protos.RPCType_Sys, rt, nil, &message.Message{}, 0)
+	assert.Nil(t, responses)
+	assert.ErrorIs(t, err, constants.ErrRPCClientNotInitialized)
+	assert.ErrorIs(t, client.Fork(context.Background(), rt, nil, &message.Message{}), constants.ErrRPCClientNotInitialized)
+	assert.ErrorIs(t, client.Send("topic", nil), constants.ErrRPCClientNotInitialized)
+	assert.ErrorIs(t, client.BroadcastSessionBind("uid"), constants.ErrRPCClientNotInitialized)
+	assert.ErrorIs(t, client.SendKick("uid", "room", &protos.KickMsg{}), constants.ErrRPCClientNotInitialized)
+	assert.ErrorIs(t, client.SendPush("uid", nil, &protos.Push{}), constants.ErrRPCClientNotInitialized)
+	assert.ErrorIs(t, client.Init(), constants.ErrRPCClientNotInitialized)
+
+	client.RemoveServer(NewServer("late", "room", false))
+	_, found := client.clientMap.Load("late")
+	assert.False(t, found)
+}
+
+func TestGRPCClientBeginOperationNormalizesAndRejectsContext(t *testing.T) {
+	client, err := getRPCClient(config.NewDefaultPitayaConfig().Cluster.RPC.Client.Grpc)
+	require.NoError(t, err)
+
+	ctx, done, err := client.beginOperation(nil)
+	require.NoError(t, err)
+	require.NotNil(t, ctx)
+	done()
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	ctx, done, err = client.beginOperation(canceled)
+	assert.Nil(t, ctx)
+	assert.Nil(t, done)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestGRPCLowLevelClientReportsMissingStub(t *testing.T) {
+	client := &grpcClient{connected: true}
+
+	got, err := client.client()
+	assert.Nil(t, got)
+	assert.ErrorIs(t, err, constants.ErrNoConnectionToServer)
+	assert.ErrorIs(t, client.pushToUser(context.Background(), &protos.Push{}), constants.ErrNoConnectionToServer)
+	_, err = client.call(context.Background(), &protos.Request{})
+	assert.ErrorIs(t, err, constants.ErrNoConnectionToServer)
+	assert.ErrorIs(t, client.sessionBindRemote(context.Background(), &protos.BindMsg{}), constants.ErrNoConnectionToServer)
+	assert.ErrorIs(t, client.sendKick(context.Background(), &protos.KickMsg{}), constants.ErrNoConnectionToServer)
+}
+
 func TestGRPCClientShutdownCancelsAndJoinsAdmittedCall(t *testing.T) {
 	client, err := getRPCClient(config.NewDefaultPitayaConfig().Cluster.RPC.Client.Grpc)
 	require.NoError(t, err)

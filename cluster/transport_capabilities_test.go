@@ -33,3 +33,16 @@ func TestBuiltInRPCTransportCapabilities(t *testing.T) {
 		FullTransportCapabilities.MissingFrom(grpcCapabilities).String(),
 	)
 }
+
+func TestTransportCapabilitySetConstructionAndNilEndpoints(t *testing.T) {
+	set := NewTransportCapabilitySet(
+		TransportPointToPoint,
+		TransportUserDelivery,
+		TransportPointToPoint,
+	)
+	assert.True(t, set.Has(TransportPointToPoint))
+	assert.True(t, set.Has(TransportUserDelivery))
+	assert.False(t, set.Has(TransportFanout))
+	assert.Equal(t, "point-to-point,user-delivery", set.String())
+	assert.Equal(t, TransportCapabilitySet(0), RPCTransportCapabilities(nil, nil))
+}

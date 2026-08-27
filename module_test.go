@@ -21,12 +21,14 @@
 package pitaya
 
 import (
+	"context"
 	"errors"
 	"testing"
 
 	clustermocks "github.com/alkaid/pitaya/v2/cluster/mocks"
 	"github.com/alkaid/pitaya/v2/component"
 	"github.com/alkaid/pitaya/v2/config"
+	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/interfaces"
 	"github.com/alkaid/pitaya/v2/metrics"
 	"github.com/alkaid/pitaya/v2/service"
@@ -46,6 +48,24 @@ func (valueModule) Init() error     { return nil }
 func (valueModule) AfterInit()      {}
 func (valueModule) BeforeShutdown() {}
 func (valueModule) Shutdown() error { return nil }
+
+type startupCancelModule struct {
+	MyMod
+	cancel         context.CancelFunc
+	afterInitCount int
+}
+
+func (m *startupCancelModule) Init() error {
+	if err := m.MyMod.Init(); err != nil {
+		return err
+	}
+	m.cancel()
+	return nil
+}
+
+func (m *startupCancelModule) AfterInit() {
+	m.afterInitCount++
+}
 
 type LifecycleFaultModule struct {
 	MyMod
@@ -130,6 +150,16 @@ func TestRegisterModule(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestRegisterModuleBeforeRejectsAfterStartupBegins(t *testing.T) {
+	app := newRuntimeModuleTestApp(Standalone)
+	app.lifecycleState.Store(uint32(appStateStarting))
+
+	err := app.RegisterModuleBefore(&MyMod{name: "late"}, "late")
+
+	require.ErrorIs(t, err, constants.ErrAppConfigurationLocked)
+	assert.NotContains(t, app.modulesMap, "late")
+}
+
 func TestGetModule(t *testing.T) {
 	b := &MyMod{}
 
@@ -164,6 +194,52 @@ func TestStartupModules(t *testing.T) {
 	assert.Equal(t, true, app.modulesMap["mod3"].(*MyMod).running)
 	assert.Equal(t, true, app.modulesMap["mod4"].(*MyMod).running)
 	assert.Equal(t, []string{"mod3", "mod2", "mod1", "mod4"}, modulesOrder)
+}
+
+func TestStartModulesHonorsCancellationAtBothLifecyclePhases(t *testing.T) {
+	t.Run("before init", func(t *testing.T) {
+		startupCtx, cancelStartup := context.WithCancel(context.Background())
+		cancelStartup()
+		module := &LifecycleFaultModule{MyMod: MyMod{name: "not-started"}}
+		app := &App{
+			startupCtx:     startupCtx,
+			startupJournal: newStartupJournal(),
+			modulesArr: []moduleWrapper{
+				{name: "not-started", module: module},
+			},
+		}
+
+		err := app.startModules()
+
+		require.ErrorIs(t, err, context.Canceled)
+		assert.False(t, module.running)
+		assert.Zero(t, module.afterInitCount)
+		assert.Empty(t, app.startupJournal.modules)
+	})
+
+	t.Run("before after init", func(t *testing.T) {
+		startupCtx, cancelStartup := context.WithCancel(context.Background())
+		module := &startupCancelModule{
+			MyMod:  MyMod{name: "cancel-after-init"},
+			cancel: cancelStartup,
+		}
+		app := &App{
+			startupCtx:     startupCtx,
+			startupJournal: newStartupJournal(),
+			modulesArr: []moduleWrapper{
+				{name: "cancel-after-init", module: module},
+			},
+		}
+
+		err := app.startModules()
+
+		require.ErrorIs(t, err, context.Canceled)
+		assert.True(t, module.running)
+		assert.Zero(t, module.afterInitCount)
+		require.Len(t, app.startupJournal.modules, 1)
+		require.NoError(t, app.shutdownModules())
+		assert.False(t, module.running)
+	})
 }
 
 func TestShutdownModules(t *testing.T) {

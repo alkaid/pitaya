@@ -522,6 +522,83 @@ func TestNatsRPCServerOnSessionBind(t *testing.T) {
 	require.NoError(t, rpcServer.Shutdown())
 }
 
+func TestNatsRPCServerUserSubscriptionStatsAndBindValidation(t *testing.T) {
+	assert.Equal(t, NatsUserSubscriptionStats{}, (*NatsRPCServer)(nil).UserSubscriptionStats())
+
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	backend := getServer()
+	backend.Frontend = false
+	backendServer, err := NewNatsRPCServer(cfg, backend, nil, nil, nil)
+	require.NoError(t, err)
+	assert.NoError(t, backendServer.onSessionBind(context.Background(), nil, nil))
+
+	frontend := getServer()
+	frontend.Frontend = true
+	rpcServer, err := NewNatsRPCServer(cfg, frontend, nil, nil, nil)
+	require.NoError(t, err)
+	require.Error(t, rpcServer.onSessionBind(context.Background(), nil, nil))
+	rpcServer.onSessionClose(nil, nil, session.CloseReasonNormal)
+	rpcServer.drainUserSubscription(nil)
+	rpcServer.drainUserSubscription(&nats.Subscription{})
+
+	_, err = rpcServer.userSubscriptions.acquire(1, "user", func(*natsUserSubscriptionEntry) (*nats.Subscription, *nats.Subscription, error) {
+		return nil, nil, nil
+	}, func(*nats.Subscription) {})
+	require.NoError(t, err)
+	rpcServer.duplicateBindReuse.Store(2)
+	rpcServer.staleUserDeliveries.Store(3)
+	rpcServer.userPushDeliveries.Store(4)
+	rpcServer.inboundSubscriptions[&nats.Subscription{}] = &natsRPCInboundSubscription{}
+	assert.Equal(t, NatsUserSubscriptionStats{
+		ActivePairs:          1,
+		InboundSubscriptions: 1,
+		DuplicateBindReuse:   2,
+		StaleOwnerDrops:      3,
+		PushDeliveries:       4,
+	}, rpcServer.UserSubscriptionStats())
+}
+
+func TestNatsRPCServerBindSubscribeFailureRollsBackRegistry(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	frontend := getServer()
+	frontend.Frontend = true
+	ctrl := gomock.NewController(t)
+	sess := sessionmocks.NewMockSession(ctrl)
+	sess.EXPECT().UID().Return("user")
+	sess.EXPECT().ID().Return(int64(7))
+	rpcServer, err := NewNatsRPCServer(cfg, frontend, nil, nil, nil)
+	require.NoError(t, err)
+	natsServer := helpers.GetTestNatsServer(t)
+	defer natsServer.Shutdown()
+	conn, err := setupNatsConn(fmt.Sprintf("nats://%s", natsServer.Addr()), nil)
+	require.NoError(t, err)
+	conn.Close()
+	rpcServer.conn = conn
+
+	require.Error(t, rpcServer.onSessionBind(context.Background(), sess, nil))
+	assert.Equal(t, 0, rpcServer.userSubscriptions.activeCount())
+
+	rpcServer.userSubscriptions = nil
+	rpcServer.onSessionClose(sess, nil, session.CloseReasonNormal)
+}
+
+func TestNatsRPCServerStaleDeliveriesAreDrainedWithoutDispatch(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, nil, nil)
+	require.NoError(t, err)
+	rpcServer.userSubscriptions = nil
+	owner := &natsUserSubscriptionEntry{sessionID: 1, uid: "user"}
+	rpcServer.userPushCh <- natsUserPushDelivery{owner: owner, push: &protos.Push{Uid: "user"}}
+	rpcServer.userKickCh <- natsUserKickDelivery{owner: owner, kick: &protos.KickMsg{UserId: "user"}}
+	close(rpcServer.transportDraining)
+
+	rpcServer.processPushes()
+	rpcServer.processKick()
+	assert.Equal(t, uint64(2), rpcServer.staleUserDeliveries.Load())
+	assert.Empty(t, rpcServer.userPushCh)
+	assert.Empty(t, rpcServer.userKickCh)
+}
+
 func TestNatsRPCServerBindRetryReplacesUIDAfterLaterObserverFailure(t *testing.T) {
 	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
 	sv := getServer()
@@ -2425,7 +2502,7 @@ func TestNatsRPCServerReportMetrics(t *testing.T) {
 		metrics.UserSubscriptionDuplicateBindReuse,
 		metrics.UserMessageUIDMismatches,
 	} {
-		mockMetricsReporter.EXPECT().ReportGauge(metricName, gomock.Any(), float64(0))
+		mockMetricsReporter.EXPECT().ReportGauge(metricName, gomock.Any(), float64(0)).Return(errors.New("report failed"))
 	}
 	mockMetricsReporter.EXPECT().ReportGauge(metrics.ChannelCapacity, gomock.Any(), float64(99)).Times(3)
 	rpcServer.reportMetrics()

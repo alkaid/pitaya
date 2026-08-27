@@ -1748,6 +1748,160 @@ func TestSignalStopSerializesWithRunningPublication(t *testing.T) {
 	}
 }
 
+func TestBeginStartInitializesZeroValueLifecycleState(t *testing.T) {
+	app := &App{}
+
+	app.beginStart()
+	t.Cleanup(app.cancelStartup)
+
+	assert.Equal(t, appStateStarting, app.state())
+	assert.NotNil(t, app.startupCtx)
+	assert.NotNil(t, app.startDone)
+	assert.NotNil(t, app.lifecycleDone)
+	assert.NotNil(t, app.startupJournal)
+}
+
+func TestPublishRunningRejectsEveryPublishedStopSource(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*App, context.CancelFunc)
+	}{
+		{
+			name: "stop requested",
+			configure: func(app *App, _ context.CancelFunc) {
+				app.stopRequested = true
+			},
+		},
+		{
+			name: "startup canceled",
+			configure: func(_ *App, cancel context.CancelFunc) {
+				cancel()
+			},
+		},
+		{
+			name: "stop channel closed",
+			configure: func(app *App, _ context.CancelFunc) {
+				close(app.stopCh)
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			startupCtx, cancelStartup := context.WithCancel(context.Background())
+			t.Cleanup(cancelStartup)
+			app := &App{
+				startupCtx: startupCtx,
+				startDone:  make(chan struct{}),
+				stopCh:     make(chan struct{}),
+			}
+			test.configure(app, cancelStartup)
+
+			assert.False(t, app.publishRunning())
+			assert.Equal(t, appStateCreated, app.state())
+			select {
+			case <-app.startDone:
+				t.Fatal("failed running publication closed startDone")
+			default:
+			}
+		})
+	}
+}
+
+func TestPublishRunningCommitsStateBeforeStartingCallback(t *testing.T) {
+	startupCtx, cancelStartup := context.WithCancel(context.Background())
+	t.Cleanup(cancelStartup)
+	started := make(chan appLifecycleState, 1)
+	app := &App{
+		startupCtx: startupCtx,
+		startDone:  make(chan struct{}),
+		stopCh:     make(chan struct{}),
+	}
+	app.onStarted = func() { started <- app.state() }
+
+	require.True(t, app.publishRunning())
+	select {
+	case state := <-started:
+		assert.Equal(t, appStateRunning, state)
+	case <-time.After(time.Second):
+		t.Fatal("OnStarted callback did not run")
+	}
+	select {
+	case <-app.startDone:
+	default:
+		t.Fatal("successful running publication did not close startDone")
+	}
+
+	app.cancelBackground()
+	app.backgroundWG.Wait()
+}
+
+func TestFinishRuntimeShutdownHandlesCompletedTerminalPaths(t *testing.T) {
+	t.Run("already stopped", func(t *testing.T) {
+		lifecycleDone := make(chan struct{})
+		close(lifecycleDone)
+		app := &App{lifecycleDone: lifecycleDone}
+		app.lifecycleState.Store(uint32(appStateStopped))
+
+		app.finishRuntimeShutdown(nil, nil)
+
+		assert.Equal(t, appStateStopped, app.state())
+	})
+
+	t.Run("existing shutdown owner", func(t *testing.T) {
+		lifecycleDone := make(chan struct{})
+		close(lifecycleDone)
+		app := &App{
+			lifecycleDone:   lifecycleDone,
+			shutdownStarted: true,
+		}
+		app.lifecycleState.Store(uint32(appStateStopping))
+
+		app.finishRuntimeShutdown(nil, nil)
+
+		assert.True(t, app.shutdownStarted)
+		assert.Equal(t, appStateStopping, app.state())
+	})
+}
+
+func TestShutdownInitializesZeroValueCompletionChannels(t *testing.T) {
+	app := &App{
+		stopCh:  make(chan struct{}),
+		dieChan: make(chan bool, 1),
+	}
+
+	app.Shutdown()
+
+	assert.True(t, app.stopRequested)
+	assert.Equal(t, appStateStopped, app.state())
+	for name, channel := range map[string]<-chan struct{}{
+		"start":     app.startDone,
+		"lifecycle": app.lifecycleDone,
+		"stop":      app.stopCh,
+	} {
+		select {
+		case <-channel:
+		default:
+			t.Fatalf("%s completion channel is still open", name)
+		}
+	}
+	select {
+	case <-app.dieChan:
+	default:
+		t.Fatal("Shutdown did not preserve the legacy die signal")
+	}
+}
+
+func TestListenRejectsPreCanceledStartup(t *testing.T) {
+	startupCtx, cancelStartup := context.WithCancel(context.Background())
+	cancelStartup()
+	app := &App{startupCtx: startupCtx}
+
+	err := app.listen()
+
+	require.ErrorIs(t, err, context.Canceled)
+}
+
 func TestStartAndListenCluster(t *testing.T) {
 	es, cli := helpers.GetTestEtcd(t)
 	t.Cleanup(func() { es.Terminate(t) })

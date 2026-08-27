@@ -221,6 +221,22 @@ func TestStartupComponents(t *testing.T) {
 	assert.Equal(t, true, app.handlerComp[0].comp.(*MyComp).running)
 }
 
+func TestStartupComponentsHonorsCancellationBeforeInit(t *testing.T) {
+	app := newTestAppForComponents(nil)
+	comp := &MyComp{}
+	require.NoError(t, app.Register(comp))
+	startupCtx, cancelStartup := context.WithCancel(context.Background())
+	cancelStartup()
+	app.startupCtx = startupCtx
+
+	err := app.startupComponents()
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, comp.initCount)
+	assert.Zero(t, comp.afterInitCount)
+	assert.Empty(t, app.startupJournal.components)
+}
+
 func TestShutdownComponents(t *testing.T) {
 	app := newTestAppForComponents(nil)
 
