@@ -251,9 +251,9 @@ These configuration values configure service discovery for the default etcd serv
     - time.Duration
     - Interval between server syncs performed by the service discovery module
   * - pitaya.cluster.sd.etcd.shutdown.delay
-    - 10ms
+    - 300ms
     - time.Duration
-    - Time to wait to shutdown after deregistering from service discovery
+    - Time to wait after deregistering from service discovery before shutdown; must be between 0 and 5s
   * - pitaya.cluster.sd.etcd.servertypeblacklist
     - nil
     - []string

@@ -77,6 +77,17 @@ if rg -n '=>|github.com/topfreegames/pitaya/v2' "$tmpdir/cli-buildinfo"; then
 	exit 1
 fi
 
+go install "$root_module/cmd/pitaya-ownerctl@$root_version"
+"$GOBIN/pitaya-ownerctl" inventory -h >/dev/null
+go version -m "$GOBIN/pitaya-ownerctl" >"$tmpdir/ownerctl-buildinfo"
+awk -v path="$root_module" -v version="$root_version" \
+	'$1 == "mod" && $2 == path && $3 == version { found = 1 } END { exit !found }' \
+	"$tmpdir/ownerctl-buildinfo"
+if rg -n '=>|github.com/topfreegames/pitaya/v2' "$tmpdir/ownerctl-buildinfo"; then
+	echo "installed ownerctl contains a replacement or upstream Pitaya" >&2
+	exit 1
+fi
+
 go run go.k6.io/xk6/cmd/xk6@v1.4.7 build v1.8.0 \
 	--build-flags=-trimpath \
 	--build-flags="-ldflags=-s -w" \
@@ -120,4 +131,4 @@ rg -q -F 'k6/x/pitaya' "$tmpdir/docker-k6-version"
 docker run --rm -v "$tmpdir/smoke.js:/scripts/smoke.js:ro" \
 	-e K6_NO_USAGE_REPORT=true "$image" run --quiet /scripts/smoke.js
 
-echo "versioned CLI, xk6, and Docker distribution verification passed"
+echo "versioned CLI, ownerctl, xk6, and Docker distribution verification passed"

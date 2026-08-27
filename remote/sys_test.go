@@ -33,6 +33,7 @@ import (
 	clustermocks "github.com/alkaid/pitaya/v2/cluster/mocks"
 	"github.com/alkaid/pitaya/v2/co"
 	"github.com/alkaid/pitaya/v2/constants"
+	networkentitymocks "github.com/alkaid/pitaya/v2/networkentity/mocks"
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/service"
 	"github.com/alkaid/pitaya/v2/session"
@@ -112,6 +113,117 @@ func TestStandaloneFrontendBindSkipsClusterBroadcast(t *testing.T) {
 	assert.Equal(t, customData, sess.GetData())
 	require.NotNil(t, cache.writes)
 	assert.Equal(t, "1", cache.writes["o"])
+}
+
+func TestFrontendBindBroadcastRunsAfterLocalUIDCommit(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	pool := session.NewSessionPool()
+	pool.SetClusterCache(&standaloneSessionCache{loaded: map[string]string{}})
+	server := cluster.NewServer("frontend-1", "connector", true)
+	discovery := clustermocks.NewMockServiceDiscovery(ctrl)
+	remoteService := service.NewRemoteService(nil, nil, discovery, nil, nil, nil, nil, server, pool, nil, nil, nil)
+	NewSys(pool, server, discovery, nil, remoteService).Init()
+
+	sess, isNew := pool.NewSession(nil, true)
+	require.True(t, isNew)
+	const uid = "user-after-commit"
+	assertCommitted := func() {
+		assert.Same(t, sess, pool.GetSessionByUID(uid))
+	}
+	discovery.EXPECT().GetServersByType(server.Type).DoAndReturn(func(string) (map[string]*cluster.Server, error) {
+		assertCommitted()
+		return map[string]*cluster.Server{}, nil
+	})
+	discovery.EXPECT().GetServerTypes().DoAndReturn(func() map[string]*cluster.Server {
+		assertCommitted()
+		return map[string]*cluster.Server{}
+	})
+
+	require.NoError(t, sess.Bind(context.Background(), uid, nil, nil))
+}
+
+func TestFrontendBindBroadcastSkipsSessionClosedByEarlierAfterBindObserver(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	pool := session.NewSessionPool()
+	pool.SetClusterCache(&standaloneSessionCache{loaded: map[string]string{}})
+	pool.OnAfterSessionBind(func(_ context.Context, s session.Session, _ map[string]string) error {
+		s.Close(nil)
+		return nil
+	})
+
+	server := cluster.NewServer("frontend-1", "connector", true)
+	discovery := clustermocks.NewMockServiceDiscovery(ctrl)
+	remoteService := service.NewRemoteService(nil, nil, discovery, nil, nil, nil, nil, server, pool, nil, nil, nil)
+	NewSys(pool, server, discovery, nil, remoteService).Init()
+
+	entity := networkentitymocks.NewMockNetworkEntity(ctrl)
+	entity.EXPECT().Close(nil).Return(nil)
+	sess, isNew := pool.NewSession(entity, true)
+	require.True(t, isNew)
+
+	err := sess.Bind(context.Background(), "closed-before-broadcast", nil, nil)
+
+	require.ErrorIs(t, err, constants.ErrCloseClosedSession)
+	assert.Nil(t, pool.GetSessionByUID("closed-before-broadcast"))
+}
+
+func TestFrontendBindObserverSkipsOnlyCurrentSession(t *testing.T) {
+	tests := []struct {
+		name      string
+		same      bool
+		wantKicks int
+	}{
+		{name: "same session retry", same: true, wantKicks: 0},
+		{name: "replacement session", same: false, wantKicks: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			uid := uuid.New().String()
+			current := mocks.NewMockSession(ctrl)
+			current.EXPECT().UID().Return(uid).AnyTimes()
+			current.EXPECT().ID().Return(int64(7)).AnyTimes()
+			current.EXPECT().GetData().Return(nil)
+			current.EXPECT().InitialFromCluster().Return(nil)
+			current.EXPECT().FlushFrontendData().Return(nil)
+
+			previous := session.Session(current)
+			if !test.same {
+				previous = mocks.NewMockSession(ctrl)
+			}
+			var kicks int
+			previous.(*mocks.MockSession).EXPECT().Kick(
+				gomock.Any(),
+				nil,
+				session.CloseReasonKickRebind,
+			).DoAndReturn(func(context.Context, map[string]string, ...session.CloseReason) error {
+				kicks++
+				return nil
+			}).AnyTimes()
+
+			var bindObserver session.OnSessionBindFunc
+			pool := mocks.NewMockSessionPool(ctrl)
+			pool.EXPECT().OnSessionBind(gomock.Any()).Do(func(observer session.OnSessionBindFunc) {
+				bindObserver = observer
+			})
+			pool.EXPECT().OnSessionClose(gomock.Any())
+			pool.EXPECT().GetSessionByUID(uid).Return(previous)
+			var coordinator session.BackendCoordinator
+			NewSys(
+				&backendCoordinatorPool{SessionPool: pool, coordinator: &coordinator},
+				cluster.NewServer("frontend-1", "connector", true),
+				nil,
+				nil,
+				nil,
+			).Init()
+			require.NotNil(t, bindObserver)
+
+			err := bindObserver(context.Background(), current, nil)
+
+			require.NoError(t, err)
+			assert.Equal(t, test.wantKicks, kicks)
+		})
+	}
 }
 
 func TestBindSession(t *testing.T) {
@@ -421,6 +533,7 @@ func TestBindBackendRemoteRPCSuccessStopsSourceCoordinator(t *testing.T) {
 	var coordinator session.BackendCoordinator
 	sessionPool := mocks.NewMockSessionPool(ctrl)
 	sessionPool.EXPECT().OnSessionBind(gomock.Any())
+	sessionPool.EXPECT().OnAfterSessionBind(gomock.Any())
 	sessionPool.EXPECT().OnSessionClose(gomock.Any())
 	serviceDiscovery := clustermocks.NewMockServiceDiscovery(ctrl)
 	rpcClient := clustermocks.NewMockRPCClient(ctrl)

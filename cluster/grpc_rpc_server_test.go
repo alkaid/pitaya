@@ -111,6 +111,7 @@ func TestNewGRPCServer(t *testing.T) {
 	gs, err := NewGRPCServer(config.NewDefaultPitayaConfig().Cluster.RPC.Server.Grpc, sv, []metrics.Reporter{})
 	assert.NoError(t, err)
 	assert.NotNil(t, gs)
+	assert.False(t, gs.IsRunning())
 }
 
 func TestNewGRPCServerRejectsInvalidPort(t *testing.T) {
@@ -149,6 +150,7 @@ func TestGRPCServerInit(t *testing.T) {
 	err = gs.Init()
 	assert.NoError(t, err)
 	assert.NotNil(t, gs)
+	assert.True(t, gs.IsRunning())
 
 	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", c.Port))
 	assert.NoError(t, err)
@@ -157,6 +159,7 @@ func TestGRPCServerInit(t *testing.T) {
 	require.NoError(t, conn.Close())
 
 	gs.BeforeShutdown()
+	assert.False(t, gs.IsRunning())
 	assert.NoError(t, gs.Shutdown(), "Shutdown must be idempotent after the admission barrier")
 }
 

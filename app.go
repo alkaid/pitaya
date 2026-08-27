@@ -80,8 +80,35 @@ const (
 	Standalone
 )
 
-// Pitaya App interface
+// Lifecycle is the runtime control surface used by process owners.
+type Lifecycle interface {
+	Start()
+	Shutdown()
+	IsRunning() bool
+}
+
+// RPCInvoker is the point-to-point application RPC surface.
+type RPCInvoker interface {
+	RPC(ctx context.Context, routeStr string, reply proto.Message, arg proto.Message, uid string) error
+	RPCTo(ctx context.Context, serverID, routeStr string, reply proto.Message, arg proto.Message) error
+}
+
+// UserSessionLookup is the application session lookup surface.
+type UserSessionLookup interface {
+	GetSessionFromCtx(ctx context.Context) session.SessPublic
+	GetSessionByUID(ctx context.Context, uid string) (session.SessPublic, error)
+	GetLocalSessionByUid(ctx context.Context, uid string) session.SessPublic
+}
+
+// Pitaya is the legacy aggregate application interface.
+//
+// Deprecated: depend on Lifecycle, RPCInvoker, UserSessionLookup,
+// ReadinessProvider, or a consumer-owned interface instead.
 type Pitaya interface {
+	Lifecycle
+	RPCInvoker
+	UserSessionLookup
+
 	GetDieChan() chan bool
 	SetHeartbeatTime(interval time.Duration)
 	GetServerID() string
@@ -131,25 +158,14 @@ type Pitaya interface {
 	// PushAfterRemoteHook 添加remote执行后的hook
 	//  @param afterFunc
 	PushAfterRemoteHook(afterFunc pipeline.AfterHandlerTempl)
-	GetSessionFromCtx(ctx context.Context) session.SessPublic
-	// GetSessionByUID 根据uid获取session,尝试顺序 sessionPool>context>cache cluster
-	//  数据不存在时返回 [constants.ErrSessionNotFound]
-	// @param ctx
-	// @param uid
-	// @return session.SessPublic
-	// @return error
-	GetSessionByUID(ctx context.Context, uid string) (session.SessPublic, error)
 	// OnStarted 设置 Start 后的回调,内部会启一个goroutine执行
 	//  @param fun
-	OnStarted(fun func())
-	Start()
+	OnStarted(fun func()) error
 	SetDictionary(dict map[string]uint16) error
 	AddRoute(serverType string, routingFunction router.RoutingFunc) error
-	Shutdown()
 	StartWorker()
 	RegisterRPCJob(rpcJob worker.RPCJob) error
 	Documentation(getPtrNames bool) (map[string]interface{}, error)
-	IsRunning() bool
 	// SetSessionCache 自定义session缓存设施
 	//  @param cache
 	SetSessionCache(cache session.CacheInterface)
@@ -226,23 +242,6 @@ type Pitaya interface {
 	//  @param uid
 	//  @return error
 	Publish(ctx context.Context, routeStr string, arg proto.Message, uid string) error
-	// RPC 根据route调用remote,会阻塞等待 reply 。如果uid不为空且目标服务器是stateful,则会路由到持有session引用的服
-	//  @param ctx
-	//  @param routeStr
-	//  @param reply
-	//  @param arg
-	//  @param uid 若不为空会携带session数据
-	//  @return error
-	RPC(ctx context.Context, routeStr string, reply proto.Message, arg proto.Message, uid string) error
-	// RPCTo 根据route调用remote,会阻塞等待 reply
-	//
-	// @param ctx
-	// @param serverID
-	// @param routeStr
-	// @param reply
-	// @param arg
-	// @return error
-	RPCTo(ctx context.Context, serverID, routeStr string, reply proto.Message, arg proto.Message) error
 	// RpcRaw RPC 的[]byte形式调用
 	//
 	// @param ctx
@@ -292,11 +291,11 @@ type Pitaya interface {
 	// Register 注册handle(终端api响应)
 	//  @param c
 	//  @param options
-	Register(c component.Component, options ...component.Option)
+	Register(c component.Component, options ...component.Option) error
 	// RegisterRemote 注册remote(远端rpc响应)
 	//  @param c
 	//  @param options
-	RegisterRemote(c component.Component, options ...component.Option)
+	RegisterRemote(c component.Component, options ...component.Option) error
 	// RegisterSubscribe 注册subscribe(publish的远端响应)
 	//
 	// 若要使用消费组,请使用 component.WithSubscriberGroup
@@ -305,7 +304,7 @@ type Pitaya interface {
 	//  @param c
 	//  @param options
 	//
-	RegisterSubscribe(c component.Component, options ...component.Option)
+	RegisterSubscribe(c component.Component, options ...component.Option) error
 	// LazyRegister 延迟注册handle(终端api响应)
 	//  @param c 注意系统不会回调该component的生命周期函数
 	//  @param options
@@ -346,12 +345,6 @@ type Pitaya interface {
 	//  @return error session不存在时返回 [constants.ErrSessionNotFound]
 	KickBackend(ctx context.Context, uid string, targetServerType string, callback map[string]string) error
 
-	// GetLocalSessionByUid 获取本地已绑定的session,若没有返回空. 可用于判断uid是否绑定到了该服务器
-	//
-	// @param ctx
-	// @param uid
-	// @return session.SessPublic
-	GetLocalSessionByUid(ctx context.Context, uid string) session.SessPublic
 	// OnSessionClose 设置本地session关闭后的回调
 	//
 	// @receiver app
@@ -368,65 +361,93 @@ type Pitaya interface {
 	OnAfterKickBackend(f session.OnSessionKickBackendFunc)
 }
 
+var (
+	_ Lifecycle         = (*App)(nil)
+	_ RPCInvoker        = (*App)(nil)
+	_ UserSessionLookup = (*App)(nil)
+	_ ReadinessProvider = (*App)(nil)
+	_ Pitaya            = (*App)(nil)
+)
+
 // App is the base app struct
 type App struct {
-	acceptors           []acceptor.Acceptor
-	config              config.PitayaConfig
-	dieChan             chan bool
-	dependencyDieChan   <-chan bool
-	heartbeat           time.Duration
-	router              *router.Router
-	rpcClient           cluster.RPCClient
-	rpcServer           cluster.RPCServer
-	metricsReporters    []metrics.Reporter
-	metricsReporterMgr  metrics.Reporter
-	prometheusExporter  *metrics.PrometheusExporter
-	running             atomic.Bool
-	configurationLocked atomic.Bool
-	serializer          serialize.Serializer
-	server              *cluster.Server
-	serverMode          ServerMode
-	serviceDiscovery    cluster.ServiceDiscovery
-	startAt             time.Time
-	worker              *worker.Worker
-	remoteService       *service.RemoteService
-	handlerService      *service.HandlerService
-	handlerComp         []regComp
-	remoteComp          []regComp
-	modulesMap          map[string]interfaces.Module
-	modulesArr          []moduleWrapper
-	sessionModulesArr   []sessionModuleWrapper
-	groups              groups.GroupService
-	sessionPool         session.SessionPool
-	redis               redis.Cmdable
-	conf                *config.Config
-	onStarted           func()
-	stopCh              chan struct{}
-	stopOnce            sync.Once
-	acceptCtx           context.Context
-	cancelAccept        context.CancelFunc
-	connectionCtx       context.Context
-	cancelConnections   context.CancelFunc
-	backgroundCtx       context.Context
-	cancelBackground    context.CancelFunc
-	acceptorWG          sync.WaitGroup
-	dispatcherWG        sync.WaitGroup
-	backgroundWG        sync.WaitGroup
-	acceptorsStopped    bool
-	dispatchersStopped  bool
-	handlerWG           sync.WaitGroup
-	stopAcceptorsOnce   sync.Once
-	stopConnectionsOnce sync.Once
-	stopBackgroundOnce  sync.Once
-	beforeModulesOnce   sync.Once
-	beforeModulesErr    error
-	drainTasksOnce      sync.Once
-	forceSessionsOnce   sync.Once
-	connectionsMu       sync.Mutex
-	connections         map[*trackedPlayerConn]struct{}
-	connectionsStopped  bool
-	startupJournal      *startupJournal
+	acceptors               []acceptor.Acceptor
+	config                  config.PitayaConfig
+	dieChan                 chan bool
+	dependencyDieChan       <-chan bool
+	heartbeat               time.Duration
+	router                  *router.Router
+	rpcClient               cluster.RPCClient
+	rpcServer               cluster.RPCServer
+	metricsReporters        []metrics.Reporter
+	metricsReporterMgr      metrics.Reporter
+	prometheusExporter      *metrics.PrometheusExporter
+	readinessReportInFlight atomic.Bool
+	lifecycleState          atomic.Uint32
+	onStartedActive         atomic.Bool
+	configurationMu         sync.Mutex
+	stopRequested           bool
+	startupCtx              context.Context
+	cancelStartup           context.CancelFunc
+	startDone               chan struct{}
+	lifecycleDone           chan struct{}
+	startDoneOnce           sync.Once
+	lifecycleDoneOnce       sync.Once
+	shutdownStarted         bool
+	serializer              serialize.Serializer
+	server                  *cluster.Server
+	serverMode              ServerMode
+	serviceDiscovery        cluster.ServiceDiscovery
+	startAt                 time.Time
+	worker                  *worker.Worker
+	remoteService           *service.RemoteService
+	handlerService          *service.HandlerService
+	handlerComp             []regComp
+	remoteComp              []regComp
+	modulesMap              map[string]interfaces.Module
+	modulesArr              []moduleWrapper
+	sessionModulesArr       []sessionModuleWrapper
+	groups                  groups.GroupService
+	sessionPool             session.SessionPool
+	redis                   redis.Cmdable
+	conf                    *config.Config
+	onStarted               func()
+	stopCh                  chan struct{}
+	stopOnce                sync.Once
+	acceptCtx               context.Context
+	cancelAccept            context.CancelFunc
+	connectionCtx           context.Context
+	cancelConnections       context.CancelFunc
+	backgroundCtx           context.Context
+	cancelBackground        context.CancelFunc
+	acceptorWG              sync.WaitGroup
+	dispatcherWG            sync.WaitGroup
+	backgroundWG            sync.WaitGroup
+	acceptorsStopped        bool
+	dispatchersStopped      bool
+	handlerWG               sync.WaitGroup
+	stopAcceptorsOnce       sync.Once
+	stopConnectionsOnce     sync.Once
+	stopBackgroundOnce      sync.Once
+	beforeModulesOnce       sync.Once
+	beforeModulesErr        error
+	drainTasksOnce          sync.Once
+	forceSessionsOnce       sync.Once
+	connectionsMu           sync.Mutex
+	connections             map[*trackedPlayerConn]struct{}
+	connectionsStopped      bool
+	startupJournal          *startupJournal
 }
+
+type appLifecycleState uint32
+
+const (
+	appStateCreated appLifecycleState = iota
+	appStateStarting
+	appStateRunning
+	appStateStopping
+	appStateStopped
+)
 
 type trackedPlayerConn struct {
 	acceptor.PlayerConn
@@ -522,6 +543,8 @@ func newApp(
 		connections:        make(map[*trackedPlayerConn]struct{}),
 		acceptorsStopped:   true,
 		dispatchersStopped: true,
+		startDone:          make(chan struct{}),
+		lifecycleDone:      make(chan struct{}),
 	}
 	if app.heartbeat == time.Duration(0) {
 		app.heartbeat = config.Heartbeat.Interval
@@ -646,7 +669,18 @@ func (app *App) PushAfterRemoteHook(afterFunc pipeline.AfterHandlerTempl) {
 // IsRunning is true only after modules are initialized and all acceptors are
 // ready. It becomes false before listeners are stopped during shutdown.
 func (app *App) IsRunning() bool {
-	return app.running.Load()
+	return app.state() == appStateRunning
+}
+
+func (app *App) state() appLifecycleState {
+	return appLifecycleState(app.lifecycleState.Load())
+}
+
+func (app *App) configurationAdmissionLocked() error {
+	if app.state() != appStateCreated {
+		return constants.ErrAppConfigurationLocked
+	}
+	return nil
 }
 
 func (app *App) SetSessionCache(cache session.CacheInterface) {
@@ -753,9 +787,11 @@ func (app *App) startBackgroundTasks() {
 	}
 
 	if app.onStarted != nil {
+		app.onStartedActive.Store(true)
 		app.backgroundWG.Add(1)
 		go func() {
 			defer app.backgroundWG.Done()
+			defer app.onStartedActive.Store(false)
 			defer func() {
 				if recovered := recover(); recovered != nil {
 					util.LogRecoveredPanic(logger.Zap, "onStarted callback panicked", recovered)
@@ -766,43 +802,37 @@ func (app *App) startBackgroundTasks() {
 	}
 }
 
-func (app *App) OnStarted(fun func()) {
+func (app *App) OnStarted(fun func()) error {
+	app.configurationMu.Lock()
+	defer app.configurationMu.Unlock()
+	if err := app.configurationAdmissionLocked(); err != nil {
+		return err
+	}
 	app.onStarted = fun
+	return nil
 }
 
 // Start starts the app. It panics if a required runtime task cannot be admitted.
 func (app *App) Start() {
-	// Runtime configuration is immutable once startup begins. Readiness may turn
-	// false during drain while handlers still read routes and the dictionary.
-	app.configurationLocked.Store(true)
-	app.startupJournal = newStartupJournal()
+	app.beginStart()
 
 	if err := app.validateStartConfiguration(); err != nil {
-		panic(fmt.Errorf("start app: %w", err))
+		app.finishFailedStart(err)
+		return
 	}
 
 	if err := app.listen(); err != nil {
-		panic(app.rollbackStartup(err))
+		app.finishFailedStart(err)
+		return
 	}
-	app.startBackgroundTasks()
-
-	defer func() {
-		app.startupJournal.stopTicker()
-		app.running.Store(false)
-	}()
+	if !app.publishRunning() {
+		app.finishFailedStart(context.Canceled)
+		return
+	}
 
 	sg := make(chan os.Signal, 1)
 	signal.Notify(sg, syscall.SIGINT, syscall.SIGQUIT, syscall.SIGKILL, syscall.SIGTERM)
 	defer signal.Stop(sg)
-
-	maxSessionCount := func() int64 {
-		count := app.sessionPool.GetSessionCount()
-		mc := app.maxModuleSessionCount()
-		if mc > count {
-			count = mc
-		}
-		return count
-	}
 
 	// Stop accepting traffic before draining sessions or tearing down modules.
 	var shutdownSignal os.Signal
@@ -820,10 +850,111 @@ func (app *App) Start() {
 		logger.Zap.Warn("the app will shutdown in a few seconds")
 	case shutdownSignal = <-sg:
 		logger.Sugar.Warn("got signal: ", shutdownSignal, ", shutting down...")
-		app.signalStop()
 	}
 
-	app.running.Store(false)
+	app.finishRuntimeShutdown(shutdownSignal, sg)
+}
+
+func (app *App) beginStart() {
+	app.configurationMu.Lock()
+	defer app.configurationMu.Unlock()
+	if app.state() != appStateCreated {
+		panic(constants.ErrAppAlreadyStarted)
+	}
+	if app.startDone == nil {
+		app.startDone = make(chan struct{})
+	}
+	if app.lifecycleDone == nil {
+		app.lifecycleDone = make(chan struct{})
+	}
+	app.startupCtx, app.cancelStartup = context.WithCancel(context.Background())
+	app.startupJournal = newStartupJournal()
+	app.lifecycleState.Store(uint32(appStateStarting))
+}
+
+func (app *App) publishRunning() bool {
+	app.configurationMu.Lock()
+	defer app.configurationMu.Unlock()
+	if app.stopRequested || app.startupCtx.Err() != nil {
+		return false
+	}
+	select {
+	case <-app.stopCh:
+		return false
+	default:
+	}
+	app.lifecycleState.Store(uint32(appStateRunning))
+	app.startBackgroundTasks()
+	app.startDoneOnce.Do(func() { close(app.startDone) })
+	return true
+}
+
+func (app *App) finishFailedStart(startErr error) {
+	rollbackErr := app.rollbackStartup(startErr)
+
+	app.configurationMu.Lock()
+	stoppedByRequest := app.stopRequested
+	if app.cancelStartup != nil {
+		app.cancelStartup()
+	}
+	app.startupJournal.stopTicker()
+	app.lifecycleState.Store(uint32(appStateStopped))
+	app.startDoneOnce.Do(func() { close(app.startDone) })
+	app.lifecycleDoneOnce.Do(func() { close(app.lifecycleDone) })
+	app.configurationMu.Unlock()
+
+	if !stoppedByRequest || !errors.Is(startErr, context.Canceled) {
+		panic(rollbackErr)
+	}
+}
+
+func (app *App) finishRuntimeShutdown(shutdownSignal os.Signal, signalChannel <-chan os.Signal) {
+	app.configurationMu.Lock()
+	if app.state() == appStateRunning {
+		app.lifecycleState.Store(uint32(appStateStopping))
+	}
+	if app.state() != appStateStopping {
+		done := app.lifecycleDone
+		app.configurationMu.Unlock()
+		if done != nil {
+			<-done
+		}
+		return
+	}
+	if app.shutdownStarted {
+		done := app.lifecycleDone
+		app.configurationMu.Unlock()
+		<-done
+		return
+	}
+	app.shutdownStarted = true
+	app.configurationMu.Unlock()
+	app.signalStop()
+
+	defer func() {
+		app.configurationMu.Lock()
+		if app.cancelStartup != nil {
+			app.cancelStartup()
+		}
+		app.startupJournal.stopTicker()
+		app.lifecycleState.Store(uint32(appStateStopped))
+		app.lifecycleDoneOnce.Do(func() { close(app.lifecycleDone) })
+		app.configurationMu.Unlock()
+	}()
+
+	app.shutdownRuntime(shutdownSignal, signalChannel)
+}
+
+func (app *App) shutdownRuntime(shutdownSignal os.Signal, signalChannel <-chan os.Signal) {
+	maxSessionCount := func() int64 {
+		count := app.sessionPool.GetSessionCount()
+		mc := app.maxModuleSessionCount()
+		if mc > count {
+			count = mc
+		}
+		return count
+	}
+
 	acceptorErr := app.stopAcceptors()
 
 	if app.config.Session.Drain.Enabled && shutdownSignal == syscall.SIGTERM {
@@ -838,7 +969,7 @@ func (app *App) Start() {
 				break loop
 			}
 			select {
-			case nextSignal := <-sg:
+			case nextSignal := <-signalChannel:
 				logger.Sugar.Warn("got signal: ", nextSignal)
 				if nextSignal == syscall.SIGINT {
 					logger.Log.Warnf("Bypassing session draing due to SIGINT. %d sessions will be immediately terminated", maxSessionCount())
@@ -881,7 +1012,6 @@ func (app *App) validateStartConfiguration() error {
 }
 
 func (app *App) rollbackStartup(startErr error) error {
-	app.running.Store(false)
 	journal := app.ensureStartupJournal()
 	journal.stopTicker()
 
@@ -906,11 +1036,17 @@ func (app *App) rollbackStartup(startErr error) error {
 }
 
 func (app *App) listen() error {
+	if err := app.startupCancellationError(); err != nil {
+		return err
+	}
 	preparedModules, err := app.prepareRuntimeModules()
 	if err != nil {
 		return fmt.Errorf("prepare runtime modules: %w", err)
 	}
 	if err := app.startupComponents(); err != nil {
+		return err
+	}
+	if err := app.startupCancellationError(); err != nil {
 		return err
 	}
 	// create global ticker instance, timer precision could be customized
@@ -921,7 +1057,13 @@ func (app *App) listen() error {
 	if err := app.commitRuntimeModules(preparedModules); err != nil {
 		return fmt.Errorf("commit runtime modules: %w", err)
 	}
+	if err := app.startupCancellationError(); err != nil {
+		return err
+	}
 	if err := app.startModules(); err != nil {
+		return err
+	}
+	if err := app.startupCancellationError(); err != nil {
 		return err
 	}
 
@@ -931,9 +1073,20 @@ func (app *App) listen() error {
 		return err
 	}
 
-	app.running.Store(true)
 	logger.Zap.Info("all modules started!")
 	return nil
+}
+
+func (app *App) startupCancellationError() error {
+	if app.startupCtx == nil {
+		return nil
+	}
+	select {
+	case <-app.startupCtx.Done():
+		return app.startupCtx.Err()
+	default:
+		return nil
+	}
 }
 
 const (
@@ -1032,6 +1185,9 @@ func (app *App) startRuntimeTasks() error {
 		if readyErr != nil {
 			return fmt.Errorf("start acceptor %T: %w", a, readyErr)
 		}
+		if !a.IsRunning() {
+			return fmt.Errorf("start acceptor %T: stopped after reporting readiness", a)
+		}
 
 		logger.Sugar.Infof("Acceptor %s on addr %s is now accepting connections", reflect.TypeOf(a), a.GetAddr())
 	}
@@ -1099,6 +1255,11 @@ func (app *App) untrackConnection(conn *trackedPlayerConn) {
 }
 
 func (app *App) signalStop() {
+	// Serialize stop publication with publishRunning so an acceptor or
+	// dependency exit cannot close stopCh between its final check and the
+	// Running transition.
+	app.configurationMu.Lock()
+	defer app.configurationMu.Unlock()
 	app.stopOnce.Do(func() {
 		close(app.stopCh)
 	})
@@ -1283,8 +1444,10 @@ func minDuration(a, b time.Duration) time.Duration {
 
 // SetDictionary sets routes map
 func (app *App) SetDictionary(dict map[string]uint16) error {
-	if app.configurationLocked.Load() {
-		return constants.ErrChangeDictionaryWhileRunning
+	app.configurationMu.Lock()
+	defer app.configurationMu.Unlock()
+	if err := app.configurationAdmissionLocked(); err != nil {
+		return err
 	}
 	return message.SetDictionary(dict)
 }
@@ -1294,10 +1457,12 @@ func (app *App) AddRoute(
 	serverType string,
 	routingFunction router.RoutingFunc,
 ) error {
+	app.configurationMu.Lock()
+	defer app.configurationMu.Unlock()
+	if err := app.configurationAdmissionLocked(); err != nil {
+		return err
+	}
 	if app.router != nil {
-		if app.configurationLocked.Load() {
-			return constants.ErrChangeRouteWhileRunning
-		}
 		app.router.AddRoute(serverType, routingFunction)
 	} else {
 		return constants.ErrRouterNotInitialized
@@ -1307,10 +1472,49 @@ func (app *App) AddRoute(
 
 // Shutdown send a signal to let 'pitaya' shutdown itself.
 func (app *App) Shutdown() {
+	app.configurationMu.Lock()
+	if app.startDone == nil {
+		app.startDone = make(chan struct{})
+	}
+	if app.lifecycleDone == nil {
+		app.lifecycleDone = make(chan struct{})
+	}
+	state := app.state()
+	switch state {
+	case appStateCreated:
+		app.stopRequested = true
+		app.lifecycleState.Store(uint32(appStateStopped))
+		app.startDoneOnce.Do(func() { close(app.startDone) })
+		app.lifecycleDoneOnce.Do(func() { close(app.lifecycleDone) })
+	case appStateStarting:
+		app.stopRequested = true
+		if app.cancelStartup != nil {
+			app.cancelStartup()
+		}
+	case appStateRunning:
+		app.lifecycleState.Store(uint32(appStateStopping))
+	}
+	startDone := app.startDone
+	lifecycleDone := app.lifecycleDone
+	app.configurationMu.Unlock()
+
 	app.signalStop()
 	// Preserve the legacy event for callers observing GetDieChan without using
 	// it as the App's cancellation primitive.
 	signalLegacyDie(app.dieChan)
+
+	switch state {
+	case appStateStarting:
+		<-startDone
+		<-lifecycleDone
+	case appStateRunning, appStateStopping:
+		// A callback cannot synchronously tear down while it is itself part of
+		// backgroundWG. Start observes stopCh and becomes the teardown owner.
+		if app.onStartedActive.Load() {
+			return
+		}
+		app.finishRuntimeShutdown(nil, nil)
+	}
 }
 
 func signalLegacyDie(dieChan chan bool) {

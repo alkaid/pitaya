@@ -34,19 +34,37 @@ type regComp struct {
 }
 
 // Register register a component with options
-func (app *App) Register(c component.Component, options ...component.Option) {
+func (app *App) Register(c component.Component, options ...component.Option) error {
+	app.configurationMu.Lock()
+	defer app.configurationMu.Unlock()
+	if err := app.configurationAdmissionLocked(); err != nil {
+		return err
+	}
 	app.handlerComp = append(app.handlerComp, regComp{c, options})
+	return nil
 }
 
 // RegisterRemote register a remote component with options
-func (app *App) RegisterRemote(c component.Component, options ...component.Option) {
+func (app *App) RegisterRemote(c component.Component, options ...component.Option) error {
+	app.configurationMu.Lock()
+	defer app.configurationMu.Unlock()
+	if err := app.configurationAdmissionLocked(); err != nil {
+		return err
+	}
 	app.remoteComp = append(app.remoteComp, regComp{c, options})
+	return nil
 }
 
 // RegisterSubscribe register a remote component with options
-func (app *App) RegisterSubscribe(c component.Component, options ...component.Option) {
+func (app *App) RegisterSubscribe(c component.Component, options ...component.Option) error {
+	app.configurationMu.Lock()
+	defer app.configurationMu.Unlock()
+	if err := app.configurationAdmissionLocked(); err != nil {
+		return err
+	}
 	options = append(options, component.WithSubscriber())
 	app.remoteComp = append(app.remoteComp, regComp{c, options})
+	return nil
 }
 
 func (app *App) LazyRegister(c component.Component, options ...component.Option) error {
@@ -193,6 +211,9 @@ func (app *App) startupComponents() error {
 	for groupIndex, group := range [][]regComp{app.handlerComp, app.remoteComp} {
 		components := uniqueComponents(group, &seen)
 		for _, comp := range components {
+			if err := app.startupCancellationError(); err != nil {
+				return err
+			}
 			name := componentLifecycleName(comp)
 			if err := callLifecycleHook("component", name, "Init", comp.Init); err != nil {
 				return err
@@ -200,6 +221,9 @@ func (app *App) startupComponents() error {
 			journal.recordComponent(groupIndex, comp, name)
 		}
 		for _, comp := range components {
+			if err := app.startupCancellationError(); err != nil {
+				return err
+			}
 			name := componentLifecycleName(comp)
 			if err := callLifecycleHook("component", name, "AfterInit", comp.AfterInit); err != nil {
 				return err

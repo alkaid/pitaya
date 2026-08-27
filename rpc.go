@@ -119,7 +119,8 @@ func (app *App) doSendRPC(ctx context.Context, serverID, routeStr string, reply 
 		return constants.ErrRPCServerNotInitialized
 	}
 
-	if reflect.TypeOf(reply).Kind() != reflect.Ptr {
+	replyValue := reflect.ValueOf(reply)
+	if !replyValue.IsValid() || replyValue.Kind() != reflect.Ptr || replyValue.IsNil() {
 		return constants.ErrReplyShouldBePtr
 	}
 

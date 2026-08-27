@@ -29,6 +29,7 @@ import (
 
 	"github.com/alkaid/pitaya/v2/constants"
 	pcontext "github.com/alkaid/pitaya/v2/context"
+	rpccontext "github.com/alkaid/pitaya/v2/internal/rpccontext"
 	"github.com/alkaid/pitaya/v2/session"
 )
 
@@ -136,7 +137,7 @@ func ResolveStatefulServer(
 	target *Server,
 	sess session.Session,
 ) (*Server, error) {
-	if target == nil || target.Frontend || sess == nil {
+	if target == nil || target.Frontend || sess == nil || rpccontext.RPCFanoutFromContext(ctx) {
 		return target, nil
 	}
 	resolver, ok := discovery.(StatefulOwnerResolver)

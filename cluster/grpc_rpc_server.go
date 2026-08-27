@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alkaid/pitaya/v2/config"
@@ -53,6 +54,7 @@ type GRPCServer struct {
 	gracefulStopTimeout time.Duration
 	rpcMu               sync.Mutex
 	rpcWG               sync.WaitGroup
+	running             atomic.Bool
 	stopping            bool
 }
 
@@ -78,10 +80,20 @@ func (gs *GRPCServer) Init() error {
 		return err
 	}
 	gs.listener = lis
-	gs.grpcSv = grpc.NewServer(grpc.UnaryInterceptor(gs.requestContextInterceptor))
-	protos.RegisterPitayaServer(gs.grpcSv, gs.pitayaServer)
-	go gs.grpcSv.Serve(lis)
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(gs.requestContextInterceptor))
+	gs.grpcSv = grpcServer
+	protos.RegisterPitayaServer(grpcServer, gs.pitayaServer)
+	gs.running.Store(true)
+	go func() {
+		defer gs.running.Store(false)
+		_ = grpcServer.Serve(lis)
+	}()
 	return nil
+}
+
+// IsRunning reports whether the gRPC server is currently accepting traffic.
+func (gs *GRPCServer) IsRunning() bool {
+	return gs.running.Load()
 }
 
 func (gs *GRPCServer) requestContextInterceptor(
@@ -163,6 +175,7 @@ func (gs *GRPCServer) Shutdown() error {
 }
 
 func (gs *GRPCServer) stop() {
+	gs.running.Store(false)
 	gs.stopOnce.Do(func() {
 		if gs.grpcSv == nil {
 			return

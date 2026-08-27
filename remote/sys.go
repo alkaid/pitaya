@@ -70,7 +70,7 @@ func (sys *Sys) Init() {
 		// 剔除旧的session数据,若有
 		var err error
 		oldSession := sys.sessionPool.GetSessionByUID(s.UID())
-		if oldSession != nil {
+		if oldSession != nil && oldSession != s {
 			err = oldSession.Kick(ctx, nil, session.CloseReasonKickRebind)
 			if err != nil {
 				return err
@@ -98,44 +98,57 @@ func (sys *Sys) Init() {
 			logW.Error("session binding error", zap.Error(err))
 			return err
 		}
-		if sys.remote == nil {
-			return nil
-		}
-		// 通知所有server已经成功绑定
-		var r *route.Route
-		msg := &protos.BindMsg{
-			Uid:      s.UID(),
-			Fid:      sys.server.ID,
-			Sid:      s.ID(),
-			Metadata: callback,
-		}
-		// 广播逻辑从 modules.UniqueSession 移到此处,原广播方法改用新的Fork方法
-		// err = sys.rpcClient.BroadcastSessionBind(s.UID())
-		r, err = route.Decode(sys.server.Type + "." + constants.SessionBoundForkRoute)
-		if err != nil {
-			// 不可能走到该分支
-			logW.Error("session binding error", zap.Error(err))
-			return err
-		}
-		// 通知所有frontend实例
-		_, err = sys.remote.Fork(ctx, true, r, msg, s)
-		if err != nil {
-			logW.Warn("session bind fork error", zap.Error(err))
-			// 非致命异常 继续
-		}
-		// 通知所有其他服务
-		r, err = route.Decode(constants.SessionBoundRoute)
-		if err != nil {
-			logW.Warn("session bind notify error", zap.Error(err))
-			// 非致命异常 继续
-		}
-		err = sys.remote.NotifyAll(ctx, r, msg, s)
-		if err != nil {
-			logW.Warn("session bind notify error", zap.Error(err))
-			// 非致命异常 继续
-		}
 		return nil
 	})
+	if sys.remote != nil {
+		// Publish the bind only after every pre-bind observer (including the
+		// frontend NATS subscriptions) and the local UID registration succeeded.
+		sys.sessionPool.OnAfterSessionBind(func(ctx context.Context, s session.Session, callback map[string]string) error {
+			if !sys.server.Frontend {
+				return nil
+			}
+			uid := s.UID()
+			if sys.sessionPool.GetSessionByUID(uid) != s {
+				return nil
+			}
+			logW := logger.Zap.With(zap.Int64("sid", s.ID()), zap.String("uid", uid))
+			var (
+				r   *route.Route
+				err error
+			)
+			msg := &protos.BindMsg{
+				Uid:      uid,
+				Fid:      sys.server.ID,
+				Sid:      s.ID(),
+				Metadata: callback,
+			}
+			// 广播逻辑从 modules.UniqueSession 移到此处,原广播方法改用新的Fork方法
+			// err = sys.rpcClient.BroadcastSessionBind(s.UID())
+			r, err = route.Decode(sys.server.Type + "." + constants.SessionBoundForkRoute)
+			if err != nil {
+				logW.Error("session binding error", zap.Error(err))
+				return nil
+			}
+			// 通知所有frontend实例
+			_, err = sys.remote.Fork(ctx, true, r, msg, s)
+			if err != nil {
+				logW.Warn("session bind fork error", zap.Error(err))
+				// 非致命异常 继续
+			}
+			// 通知所有其他服务
+			r, err = route.Decode(constants.SessionBoundRoute)
+			if err != nil {
+				logW.Warn("session bind notify error", zap.Error(err))
+				return nil
+			}
+			err = sys.remote.NotifyAll(ctx, r, msg, s)
+			if err != nil {
+				logW.Warn("session bind notify error", zap.Error(err))
+				// 非致命异常 继续
+			}
+			return nil
+		})
+	}
 	// 网关本地session关闭回调,通知其他服务器
 	sys.sessionPool.OnSessionClose(func(s session.Session, callback map[string]string, reason session.CloseReason) {
 		if !sys.server.Frontend {

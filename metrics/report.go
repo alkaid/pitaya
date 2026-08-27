@@ -118,6 +118,17 @@ func ReportNumberOfConnectedClients(reporters []Reporter, number int64) {
 	}
 }
 
+// ReportAppReadiness reports a fixed dependency readiness value.
+func ReportAppReadiness(reporters []Reporter, dependency string, ready bool) {
+	value := float64(0)
+	if ready {
+		value = 1
+	}
+	for _, reporter := range reporters {
+		reportGauge(reporter, AppReadiness, map[string]string{"dependency": dependency}, value)
+	}
+}
+
 // ReportSysMetrics reports sys metrics
 func ReportSysMetrics(reporters []Reporter, period time.Duration) {
 	ReportSysMetricsContext(context.Background(), reporters, period)

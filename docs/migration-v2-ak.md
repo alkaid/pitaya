@@ -48,7 +48,7 @@ import pitaya "github.com/alkaid/pitaya/v2"
 
 ## 公共 Go API
 
-### 运行期注册返回错误
+### 注册 API 返回错误
 
 四个运行期注册方法现在直接返回 `error`：
 
@@ -64,6 +64,29 @@ RegisterRemoteInterceptor(string, *component.Interceptor) error
 重复 service、保留 handler service 名、非法 handler/remote 签名、nil interceptor、nil interceptor function、空白/带点号的 interceptor service 名都会同步返回错误，不再只写日志或在调用时 panic。Standalone 或不完整测试 App 缺少对应能力时分别返回可用 `errors.Is` 匹配的 `service.ErrHandlerServiceUnavailable` 或 `service.ErrRemoteServiceUnavailable`。
 
 handler 与 interceptor 的热注册改为注册侧串行、读侧不可变快照。一次 handler service 注册只发布一个包含全部 method 的新快照；注册返回后开始的 lookup 一定可见，在途调用可以继续使用已取得的旧 handler。`HandlerPool.GetHandlers` 返回 map 复制品，修改该 map 不再影响运行期 registry。
+
+四个预启动配置方法也改为返回 `error`：
+
+```go
+Register(component.Component, ...component.Option) error
+RegisterRemote(component.Component, ...component.Option) error
+RegisterSubscribe(component.Component, ...component.Option) error
+OnStarted(func()) error
+```
+
+它们只在 App 仍处于 `Created` 状态时接纳配置；`Start` 一旦开始，后续调用统一返回可用 `errors.Is` 匹配的 `constants.ErrAppConfigurationLocked`。旧调用语句仍可编译并忽略返回值，但升级时应全部检查错误。保存精确函数值、自定义实现 `pitaya.Pitaya` 或生成 mock 的代码必须同步新签名。
+
+App 现在是一次性生命周期：`Created -> Starting -> Running -> Stopping -> Stopped`。并发或二次 `Start` 会 panic `constants.ErrAppAlreadyStarted`；启动失败或 Shutdown 后不能重新启动原实例，应重新构造 App。并发和重复 `Shutdown` 通常会加入同一次关闭过程。唯一例外是任一 `OnStarted` callback 仍活跃时：`Shutdown` 只发停止信号并立即返回，由 `Start` 在 callback 退出后完成 teardown；需要同步等待的外部调用方应等待 `Start` 返回。完整规则见 [`app-lifecycle.md`](app-lifecycle.md)。
+
+### 窄应用接口与 Builder 返回值
+
+新代码应按实际依赖使用 `Lifecycle`、`RPCInvoker`、`UserSessionLookup` 或 `ReadinessProvider`，也可以在消费方定义更窄接口。`Pitaya` 继续作为 deprecated 的兼容聚合接口保留，但其注册方法已经发生上述签名变化，不应理解为 method set 完全冻结。
+
+`Builder.BuildApp()` 返回具体 `*App`。`Builder.Build()` 仍返回 `Pitaya`，用于现有调用方渐进迁移；两者都消费同一个 single-use Builder，不能各调用一次。
+
+Cluster transport 现在声明静态 capability：point-to-point、fanout、user delivery 和 broker subscription。完整 Cluster Builder 要求 RPC client/server 同时提供四项能力；NATS 提供完整集合。保留的 gRPC transport 只声明 point-to-point，不能注入完整 Cluster App，只用于直接构造的兼容场景。本次没有引入动态 transport 插件框架，也没有为 gRPC 补齐 NATS 语义。
+
+`App.RPC`/`RPCTo` 的 reply 必须是非 nil pointer。nil interface、typed nil pointer 和非 pointer 都返回 `constants.ErrReplyShouldBePtr`，不再在反射检查中 panic。
 
 ### 有状态任务接纳
 
@@ -129,10 +152,12 @@ func (e *keyedExecutor) Execute(ctx context.Context, task component.Task) error 
 	return taskErr
 }
 
-app.Register(
+if err := app.Register(
 	&Handler{},
 	component.WithTaskExecutor(&keyedExecutor{pool: pool, key: requestKey}),
-)
+); err != nil {
+	return err
+}
 ```
 
 `Execute` 可能被并发调用，executor 自有的可变状态必须同步。每次调用最多执行 task 一次；一旦调用，就要在 `Execute` 返回前完成。拒绝接纳时返回明确错误，不得保留 task 并在返回后执行。
@@ -325,6 +350,10 @@ Start -> HandshakeValidated -> Working -> Closed
 
 客户端 dial 和 Pitaya 握手都有 5 秒有界超时。握手首包不是 `Handshake`、响应 JSON/压缩体非法、ACK 写失败或服务端停滞时，`ConnectTo` 返回错误并关闭、清除本次连接；失败的连接不会启动 heartbeat、消息 reader 或 disconnect callback。服务端返回零或负 heartbeat 时客户端不启动 ticker。
 
+每次成功连接现在拥有不可变 generation，reader、packet、heartbeat、pending request、inflight slot 和关闭信号都绑定到该 generation。旧连接延迟退出时只能关闭和清理自身，不会消费或断开刚建立的新连接；编码、写入失败、超时和断连都会归还本代 pending/slot。依赖跨重连保留 pending request 的代码需要改为在上层重试。
+
+fresh `ProtoClient.ConnectTo` 会先用短连接加载 route dictionary，再建立最终连接，不再因内部确定性二次连接返回 `client: already connected`。重连时 reader 同样绑定 generation；旧 reader 退出不会停止新连接的 push/response 消费。
+
 TCP/TLS/WS 输入按 4 byte header 中声明的长度精确读取，不再以一次 `Read`、短读或 1024 byte 整数倍推断 packet 边界。合法的任意 header/payload 分段和粘连 frame 保持原 wire format；截断 header/body、非法 packet type 或畸形 Data message 会作为协议错误受控断连。message 解码失败不会向 `MsgChannel` 投递 nil，也不会把原始 payload 写入日志。
 
 ### 消息和错误载荷解码
@@ -359,8 +388,10 @@ WS Upgrade 的 header timeout、idle timeout 和 header 上限分别为 5 秒、
 
 - `sys` component 和 route namespace 经过 trim 后按大小写不敏感方式保留给内部 remote。应用占用该名称时必须重命名。
 - 带 timestamp 的 heartbeat acknowledgement 使用 `HeartbeatAck`，不再错误发送 `HandshakeAck`。
-- session close 和 kick cleanup 幂等。订阅 slice 采用复制语义，不要依赖重复 close side effect 或 live slice mutation。
+- session close 和 kick cleanup 幂等。NATS 用户订阅由 RPC server 按 session ID 持有，不再存放在 Session 中；不要依赖 session subscription slice 或重复 close side effect。
 - 已关闭 session 的 `Bind` 和 `StoreSessionLocal` 返回 `ErrCloseClosedSession`；bind callback 重入 `Bind` 返回 `ErrSessionAlreadyBound`。
+- TCP、TLS 和 PROXY protocol 连接的 `Session.RemoteIP()` 现在使用解析后的 socket peer；IPv4、IPv6 和 PROXY 地址都不再返回空值。自定义 `net.Addr` 无法解析时仍返回 zero address。
+- `Agent.Push`、`ResponseMID` 和 heartbeat send 在关闭竞态中未能入队时返回可用 `errors.Is` 匹配的 `constants.ErrBrokenPipe`，不再把丢弃的数据报告为成功。成功仍只表示已进入本地发送队列，不表示 peer 已收到。
 - `WithForkMethods` 对每个 subscriber method 独立计算。需要 fanout 的方法必须全部显式列出。
 - `util/net.SourceIPs` 和 `GetClientIP` 只返回 socket peer。需要 forwarded header 时，先用 `ParseTrustedProxies` 编译 CIDR，再调用 `GetClientIPWithTrustedProxies`。禁止把 `0.0.0.0/0` 或 `::/0` 设为 trusted proxy。
 - CLI file mode 的命令错误现在返回非零退出码，并保留 request 关联。依赖旧零退出码的脚本需要修正。
@@ -384,6 +415,8 @@ topology listener 与 leader listener 使用各自的 FIFO lane。同一 lane �
 `Init` 等待初始 topology callback 和首个已确认的非空 leader 状态，但 leader listener 自身在独立 lane 异步执行。`SyncServers` 会等待本次同步接纳的 topology callback，`SDListener` 不能同步调用它，否则会等待自己所在的 lane。
 
 正常关闭顺序必须是 `BeforeShutdown -> Shutdown`。两者一进入就会立即使本地 owner epoch 失效，带旧 epoch 的新 RPC 会在 callback drain 或 lease revoke 完成前 fail-closed。`BeforeShutdown` 随后停止新 callback 接纳、取消 Flush、等待已接纳 callback drain，再 revoke lease。callback 不能同步调用 `BeforeShutdown`；callback 内可以调用 `Shutdown`，但这不等价于立即 revoke，注册可能继续存在到 lease TTL，默认最长约 60 秒。
+
+`pitaya.cluster.sd.etcd.shutdown.delay` 默认值是 `300ms`，合法范围是 `0` 到 `5s`。超过 5 秒会在配置校验时失败，避免单个 delay 吃掉 App 的共享关闭预算。
 
 leader 候选会增加一次有界的线性 etcd read，用于核对当前 key、revision、value 和 lease。这增加启动及选主切换的 quorum RTT，不进入请求、Flush、keepalive 或普通 topology 热路径。部署仍要求每个活跃进程的 server ID 唯一；同 ID 多进程隔离不属于兼容承诺。
 
@@ -409,6 +442,8 @@ NATS RPC server 会在 protobuf 解引用前拒绝以下输入，并继续处理
 
 user push/kick subscription 解码失败后会立即丢弃消息并计入 `dropped_messages`，不再向下游投递零值 protobuf。诊断日志只包含 channel kind、payload 长度、累计 malformed 数和 decode error，不包含 payload。空 protobuf 在 wire 上仍是合法零值对象；只有 `proto.Unmarshal` 失败的 payload 属于本条拒绝规则。
 
+用户 subject 捕获的 UID 必须与 `Push.Uid` 或 `KickMsg.UserId` 完全相同。发送端拒绝参数/payload 不一致，消费端也会再次校验并丢弃不一致消息；旧代码不能再借 Alice 的 subject 投递 Bob 的 payload。同一 session 对同一 UID 的重复 `Bind` 复用一对 push/kick subscription；创建第二项失败会回收第一项，session close 会移除整对。callback 在入队前和消费前都会校验当前 session owner，replacement 后的 stale callback 不会向新 owner 重复投递。
+
 `NatsRPCServer.BeforeShutdown` 和 `Shutdown` 共享幂等的停止屏障。正常关闭会先冻结 subscription admission，对全部 server-owned 入站订阅执行 Drain，并等待每个订阅进入 closed 状态及异步 push/kick callback 返回。确认 NATS 不再写本地 channel 后，message、binding、push 和 kick consumer 会完整消费已经交付到本地缓冲的消息；message pump 最后关闭私有的 request dispatcher channel，使 dispatcher 追平全部任务接纳。
 
 本地 consumer 全部退出后，server 才关闭 RPC task admission、取消关停前已接纳 task 的 context 并等待 task 完成，最后 Drain NATS 连接并等待 terminal callback。业务 callback 必须监听 context 并及时返回，否则会耗尽下文的 30 秒 runtime quiescence 预算。subscription Drain 或 Unsubscribe 异常，或者 NATS connection 在 Shutdown 前或过程中已经关闭时，会退回快速取消路径。该路径不再等待底层不会发送的 subscription closed 状态，会冻结新的 push/kick callback、取消本地 consumer，并等待已经进入的 callback 退出；它不能承诺本地缓冲零丢失。依赖旧版 Shutdown 很快返回的应用需要重新分配关闭预算。
@@ -420,6 +455,8 @@ user push/kick subscription 解码失败后会立即丢弃消息并计入 `dropp
 ## 应用启动和关闭
 
 App 先初始化 components、stateful pools、RPC 和 service discovery modules，再启动所有 Acceptor。全部 Acceptor 都报告 ready 后才启动 connection reader、进入 running 并执行 `onStarted`。首个 listener ready 不再表示业务流量已经开始处理；bind、TLS 或 ready 失败由 `App.Start` panic 传播。
+
+`App.Readiness(ctx)` 提供组合 readiness，固定检查 lifecycle、RPC client、RPC server、service discovery 和 Redis；未配置项为 `not_applicable`，调用会在父 context deadline 与 250ms 中较早者返回，并同步更新 `pitaya_app_readiness{dependency=...}`。自定义 RPC/discovery 实现若不提供 `IsRunning()` 或 `Running()` 状态能力，也会标记为 `not_applicable`，框架不会猜测其健康状态或增加通用主动探针。框架不额外启动 health HTTP server，应用应在现有探针入口返回该报告。详见 [`readiness.md`](readiness.md)。
 
 启动现在使用显式事务账本。框架会在任何 `Component.Init` 前预检完整的 handler/remote 注册批次和 framework module 名称；重复 service、保留名、非法签名、Standalone 上的 remote 注册、缺失 remote capability，以及与 `rpcServer`、`rpcClient`、`serviceDiscovery`、`uniqueSession`、`configLoader`、`statefulGoPool` 冲突的 module 名都会使 `App.Start` panic。此时 component/module Init 和 Acceptor Serve 均未发生，`IsRunning()` 保持 false。旧版本依赖“记录注册错误后继续提供部分路由”的部署必须改为修正注册，不能再把该状态当作降级启动。
 
@@ -584,7 +621,9 @@ NATS server 的 `pitaya.cluster.rpc.server.nats.services` 默认值从 30 改为
 
 session backend map/generation/mutex、remote fanout worker、etcd callback queue 分别收拢到单一 owner 对象。公共 facade 保持不变，但依赖未导出字段、反射或 callback queue 时序的测试不再受支持。
 
-`Session.GetOnCloseCallbacks()`、`GetSubscriptions()` 和 `GetDataEncoded()` 现在返回防御性副本。修改 getter 返回的 slice 不再改变 Session 内部状态；应使用对应 setter 或受支持的 Session API。过去依赖共享 backing array 的代码虽然可能继续编译，但行为已经改变。
+`Session.GetOnCloseCallbacks()` 和 `GetDataEncoded()` 现在返回防御性副本。修改 getter 返回的 slice 不再改变 Session 内部状态；应使用对应 setter 或受支持的 Session API。过去依赖共享 backing array 的代码虽然可能继续编译，但行为已经改变。
+
+`Session` 的 `GetSubscriptions` 和 `SetSubscriptions` 已删除；`SessPublic` 原本就不包含这两个方法。NATS subscription 是 transport 资源，改由 `NatsRPCServer` 的 session-keyed registry 创建、复用和回收。自定义 Session、fake 和生成 mock 必须删除这两个方法；应用不应直接管理 NATS subscription 生命周期。
 
 Linux/amd64 仍是唯一完整 runtime 和 release-verification 平台。Darwin/amd64 与 Windows/amd64 新增 `CGO_ENABLED=0` compile-only CI；这只证明 root、CLI 和 xk6 当前可交叉编译，不代表外部服务、signal、Docker 或生产运行支持。
 
@@ -598,6 +637,12 @@ Linux/amd64 仍是唯一完整 runtime 和 release-verification 平台。Darwin/
 
 `CreatePrometheusReporter` 和 `metrics.GetPrometheusReporter` 仅作为 deprecated 兼容入口保留。它们仍在返回前完成同步 bind 并立即可抓取，但进程内所有调用共享同一个 reporter/exporter owner。调用方必须在全部共享引用停止上报后统一调用新增的 `ShutdownPrometheusReporter`（或 `metrics.ShutdownPrometheusReporter`）；该关闭是进程级、幂等操作，不能按单个 consumer 分别管理。默认 Builder 不使用这个 singleton。
 
+### Composite readiness 与 OTLP exporter
+
+`App.Readiness(context.Context)` 返回结构化 `ReadinessReport`，取代只看 `IsRunning()` 的依赖健康判断。未配置项不阻断 overall readiness；已配置但未运行或 Redis ping 失败的依赖会标记为 `not_ready`。这是一项主动检查，调用频率应由应用现有 health endpoint 控制。
+
+`tracing.Config` 新增 `TLS config.TLSConfig` 和 `Headers map[string]string`。默认仍使用明文 OTLP/gRPC；启用 TLS 后可配置 CA 和 server name，成对提供 client cert/key 时使用 mTLS。headers 作为 OTLP metadata 发送，框架不会记录其值。错误的证书路径、证书对或 TLS 配置会让 `StartAgent` 返回错误；迁移示例见 [`tracing.md`](tracing.md)。
+
 ### StatsD duration 与限流日志
 
 Reporter 接口中两个内建 duration 指标 `response_time_ns` 和 `handler_delay_ns` 继续使用纳秒，Prometheus 的名称和值也不变。StatsD adapter 现在只对这两个精确常量除以 1,000,000 后调用 `TimeInMilliseconds`：200ms 的 wire 值从错误的 200,000,000 修正为 200。现有 StatsD dashboard、SLO 和告警阈值若按旧错误值配置，升级时必须除以 1,000,000。指标名暂不改动，避免同时产生新旧 series。
@@ -607,6 +652,12 @@ Reporter 接口中两个内建 duration 指标 `response_time_ns` 和 `handler_d
 连接限流的预期拒绝不再以 ERROR 记录完整消息。新日志为 Debug，只包含 `message_length`、`limit`、`interval` 和固定的 rate-limit error；`exceeded_rate_limiting` counter 仍是告警和容量分析的主信号。依赖拒绝日志 payload 或 ERROR 数量的日志消费者必须迁移，原始业务、认证或用户数据不会再进入该日志路径。
 
 ## 验证工具迁移
+
+### Stateful owner inventory 与清理
+
+新增 `make build-ownerctl` 和一次性命令 `pitaya-ownerctl`。`inventory` 以固定 etcd revision 分页读取 assignment，并把记录分类为 `live`、`stale` 或 `corrupt`；`prune-stale` 和 `prune-list` 默认 dry-run，只有显式 `--apply` 才执行 CAS 删除。
+
+apply 前会先验证完整批次；live/corrupt 记录会阻止删除。每个删除事务同时比较 assignment 的 revision/value 和 registration evidence，期间 owner 恢复或 generation 变化会报告 conflict。没有 live-owner 强删选项。JSON/table、TLS、认证、limit、page size 和超时用法见 [`stateful-owner-operations.md`](stateful-owner-operations.md)。
 
 ### Redis integration
 
@@ -671,7 +722,7 @@ GitHub 两个变量的更新不是原子事务。轮换时先停用 controller�
 
 ### NATS 重连与压力门禁
 
-`make test-stress-nats` 和独立 nightly/manual workflow 默认保持 10,000 个 fresh TCP client，再用 1,000 个 fresh client 做同 UID replacement。它用于容量和 Session ownership 验证，不进入 `verify-fast` 或普通 release lane。缩小 workload 只能作为 smoke。
+`make test-stress-nats` 和独立 nightly/manual workflow 默认保持 10,000 个 fresh TCP client，再用 1,000 个 fresh client 做同 UID replacement，并执行 1,000 次同 session、同 UID 的 Bind retry。它用于容量和 Session ownership 验证，不进入 `verify-fast` 或普通 release lane。缩小 workload 只能作为 smoke。
 
 stress harness 为隔离测试 server 注入 NATS message buffer 16,384，用于吸收 cleanup 阶段最多 10,000 个 `SessionClosed` 通知。生产默认仍为 75，不要把测试值复制到线上配置。
 
@@ -679,7 +730,7 @@ stress harness 为隔离测试 server 注入 NATS message buffer 16,384，用于
 
 `client.ConnectToStress` 只在 `benchmark && stress` build tag 下存在，用于 fresh、未连接的 stress client，并允许 context 取消 TCP handshake。它不是生产 `ConnectTo` 的替代 API。
 
-成功时会原子发布 `<STRESS_OUT>` JSON 和相邻 `.log`，同一路径由 lock directory 串行化。run ID、配置、主机限制、MID/body/error、ownership、连接和关闭计数，以及 cleanup 后零存活都必须匹配。失败证据使用 `<STRESS_OUT>.failed-<project>*`，旧 JSON 或零匹配测试不能作为本次通过。
+成功时会原子发布 schema v2 的 `<STRESS_OUT>` JSON 和相邻 `.log`，同一路径由 lock directory 串行化。run ID、配置、主机限制、MID/body/error、ownership、连接和关闭计数，以及 cleanup 后零存活都必须匹配。v2 还要求 Bind retry 全部成功、NATS push 恰好一次投递、duplicate delivery 与 stale-owner drop 为零、active subscription pair/inbound subscription 在重试前后稳定并在 cleanup 后归零、cleanup 不超过 `STRESS_CLEANUP_MAX`，且 goroutine delta 不超过 `STRESS_GOROUTINE_DELTA_MAX`。失败证据使用 `<STRESS_OUT>.failed-<project>*`，旧 schema、缺失或 `null` 的必填计数、旧 JSON 或零匹配测试不能作为本次通过。
 
 ### 覆盖率工作流
 
@@ -725,4 +776,9 @@ root coverage gate 只识别有独立验证 lane 的 `pitaya-cli`、`tools` 和 
 16. 在精确框架提交上运行 `make test-consumer`、应用 compile/race/vet 和真实 NATS E2E。应用边界不得丢弃新增 admission error，应传播或记录结构化日志。
 17. 为 etcd `stateful-owners/v1/` prefix 配置 read/put/transaction ACL 和退役 key 清理策略，按实际 routing-key 基数与每请求 transaction 放大做容量验证；停止并 drain 用户状态流量后协调升级同一 stateful server type 的全部路由端和 backend。恢复前验证缺失/伪造 mode、跨 routing-key token 和旧 assignment epoch 均 fail-closed，并让业务存储按 `RPCStatefulOwnerInfo` 拒绝低 epoch 写入。
 18. 使用生产 Redis ACL 回归 Worker enqueue、fetch、确认、retry 和 scheduled job；确认允许 `EVAL` 及脚本内的 `ZSCORE`、`LPUSH`、`ZREM`，并验证关停时成功 job 不会在重启后重放。
-19. 只有在 fork tag 发布，并且无 `replace` 的 consumer 能从公共 Go proxy 下载该 exact tag 后，才发布应用升级。
+19. 检查 `Register`、`RegisterRemote`、`RegisterSubscribe` 和 `OnStarted` 的返回值；确认启动后配置被拒绝，且每次重启都构造新的 App。
+20. 从自定义 Session/mock 删除 subscription getter/setter；在 NATS staging 验证重复 Bind 只投递一次、replacement 后 stale owner 不投递、close 后 subscription 归零。
+21. 把生产 health endpoint 接到 `App.Readiness`，并分别验证依赖未启动、运行中和关闭后的结果；按部署要求配置 OTLP TLS/mTLS 和 metadata headers。
+22. 使用 `pitaya-ownerctl inventory` 保留升级前证据；只对业务确认退役且显示 stale 的 assignment 执行 dry-run 后 apply，不尝试删除 live/corrupt 项。
+23. 在目标容量环境运行默认 schema v2 `make test-stress-nats`，保留 JSON/log，并检查 Bind retry、单次 push、subscription cleanup、cleanup duration 与 goroutine delta。
+24. 只有在 fork tag 发布，并且无 `replace` 的 consumer 能从公共 Go proxy 下载该 exact tag 后，才发布应用升级。

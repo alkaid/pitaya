@@ -120,29 +120,25 @@ func TestMalformedDataPacketDisconnectsOnceWithoutDelivery(t *testing.T) {
 			t.Cleanup(func() { _ = peerConn.Close() })
 
 			c := New()
-			c.conn = clientConn
-			c.closeChan = make(chan struct{})
-			c.packetChan = make(chan *packet.Packet, 1)
-			c.IncomingMsgChan = make(chan *message.Message, 1)
-			c.Connected = true
+			gen := installTestGeneration(c, clientConn, false, 0)
 			var callbacks atomic.Int64
 			c.OnDisconnected(func(reason CloseReason) {
 				assert.Equal(t, CloseReasonError, reason)
 				callbacks.Add(1)
 			})
 
-			go c.handlePackets()
-			c.packetChan <- &packet.Packet{Type: packet.Data, Data: payload}
+			go c.handlePackets(gen)
+			gen.packetChan <- &packet.Packet{Type: packet.Data, Data: payload}
 
 			select {
-			case <-c.closeChan:
+			case <-gen.closeCh:
 			case <-time.After(time.Second):
 				t.Fatal("malformed packet did not disconnect the client")
 			}
 			require.Eventually(t, func() bool { return callbacks.Load() == 1 }, time.Second, time.Millisecond)
 			assert.False(t, c.ConnectedStatus())
 			select {
-			case delivered := <-c.IncomingMsgChan:
+			case delivered := <-gen.incomingChan:
 				t.Fatalf("malformed packet delivered message %#v", delivered)
 			default:
 			}
@@ -157,22 +153,17 @@ func TestZeroHeartbeatDoesNotStartInvalidTicker(t *testing.T) {
 	clientConn, peerConn := net.Pipe()
 	t.Cleanup(func() { _ = peerConn.Close() })
 	c := New()
-	c.conn = clientConn
-	c.closeChan = make(chan struct{})
-	c.packetChan = make(chan *packet.Packet, 1)
-	c.IncomingMsgChan = make(chan *message.Message, 1)
-
-	require.NotPanics(t, func() { c.startConnectionLoops(0) })
+	gen := installTestGeneration(c, clientConn, true, 0)
+	require.NotNil(t, gen)
 	c.Disconnect(CloseReasonManual)
+	waitForGenerationLoops(t, gen)
 }
 
 func TestDisconnectCallbackCanReadStateAndRunsOnce(t *testing.T) {
 	clientConn, peerConn := net.Pipe()
 	t.Cleanup(func() { _ = peerConn.Close() })
 	c := New()
-	c.conn = clientConn
-	c.closeChan = make(chan struct{})
-	c.Connected = true
+	installTestGeneration(c, clientConn, false, 0)
 
 	callbackDone := make(chan struct{})
 	var callbacks atomic.Int64

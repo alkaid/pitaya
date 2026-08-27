@@ -22,6 +22,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 func getRPCClient(c config.GRPCClientConfig) (*GRPCClient, error) {
@@ -89,6 +91,103 @@ func TestGRPCClientUnsupportedOperationsAndLifecycle(t *testing.T) {
 	g.AfterInit()
 	g.BeforeShutdown()
 	assert.NoError(t, g.Shutdown())
+}
+
+func TestGRPCClientShutdownClosesConnectionsAndAdmission(t *testing.T) {
+	client, err := getRPCClient(config.NewDefaultPitayaConfig().Cluster.RPC.Client.Grpc)
+	require.NoError(t, err)
+	require.NoError(t, client.Init())
+
+	conn, err := grpc.NewClient(
+		"passthrough:///127.0.0.1:1",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	require.NoError(t, err)
+	target := NewServer("shutdown-target", "room", false)
+	client.clientMap.Store(target.ID, &grpcClient{
+		conn:      conn,
+		cli:       protos.NewPitayaClient(conn),
+		connected: true,
+	})
+
+	require.NoError(t, client.Shutdown())
+	require.NoError(t, client.Shutdown())
+	assert.False(t, client.IsRunning())
+	assert.Equal(t, connectivity.Shutdown, conn.GetState())
+	_, found := client.clientMap.Load(target.ID)
+	assert.False(t, found)
+
+	_, err = client.Call(
+		context.Background(),
+		protos.RPCType_Sys,
+		route.NewRoute("room", "svc", "method"),
+		nil,
+		&message.Message{Type: message.Notify},
+		target,
+	)
+	assert.ErrorIs(t, err, constants.ErrRPCClientNotInitialized)
+	client.AddServer(&Server{
+		ID:   "late",
+		Type: "room",
+		Metadata: map[string]string{
+			constants.GRPCHostKey: "127.0.0.1",
+			constants.GRPCPortKey: "1",
+		},
+	})
+	_, found = client.clientMap.Load("late")
+	assert.False(t, found)
+}
+
+func TestGRPCClientShutdownCancelsAndJoinsAdmittedCall(t *testing.T) {
+	client, err := getRPCClient(config.NewDefaultPitayaConfig().Cluster.RPC.Client.Grpc)
+	require.NoError(t, err)
+	require.NoError(t, client.Init())
+
+	ctrl := gomock.NewController(t)
+	mockPitayaClient := protosmocks.NewMockPitayaClient(ctrl)
+	target := NewServer("blocking-target", "room", false)
+	callStarted := make(chan struct{})
+	mockPitayaClient.EXPECT().Call(gomock.Any(), gomock.Any()).DoAndReturn(
+		func(ctx context.Context, _ *protos.Request, _ ...grpc.CallOption) (*protos.Response, error) {
+			close(callStarted)
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	)
+	client.clientMap.Store(target.ID, &grpcClient{cli: mockPitayaClient, connected: true})
+
+	callDone := make(chan error, 1)
+	go func() {
+		_, callErr := client.Call(
+			context.Background(),
+			protos.RPCType_Sys,
+			route.NewRoute("room", "svc", "method"),
+			nil,
+			&message.Message{Type: message.Notify},
+			target,
+		)
+		callDone <- callErr
+	}()
+	select {
+	case <-callStarted:
+	case <-time.After(time.Second):
+		t.Fatal("gRPC call was not admitted")
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- client.Shutdown() }()
+	select {
+	case callErr := <-callDone:
+		assert.ErrorIs(t, callErr, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not cancel admitted gRPC call")
+	}
+	select {
+	case shutdownErr := <-shutdownDone:
+		require.NoError(t, shutdownErr)
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not join admitted gRPC call")
+	}
 }
 
 func TestCall(t *testing.T) {

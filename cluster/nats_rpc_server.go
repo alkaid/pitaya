@@ -66,6 +66,16 @@ type natsRPCInboundSubscription struct {
 	doneOnce sync.Once
 }
 
+type natsUserPushDelivery struct {
+	owner *natsUserSubscriptionEntry
+	push  *protos.Push
+}
+
+type natsUserKickDelivery struct {
+	owner *natsUserSubscriptionEntry
+	kick  *protos.KickMsg
+}
+
 func (s *natsRPCInboundSubscription) complete() {
 	s.doneOnce.Do(func() { close(s.done) })
 }
@@ -91,14 +101,19 @@ type NatsRPCServer struct {
 	unhandledReqCh         chan *protos.Request
 	responses              []*protos.Response
 	requests               []*protos.Request
-	userPushCh             chan *protos.Push
-	userKickCh             chan *protos.KickMsg
+	userPushCh             chan natsUserPushDelivery
+	userKickCh             chan natsUserKickDelivery
 	sub                    *nats.Subscription
 	broadcastSubs          []*nats.Subscription          // 广播订阅
 	publishSubs            map[string]*nats.Subscription // publish订阅:topic->sub
 	preparePubSubTopics    map[string]string             // publish预备订阅:topic->group
 	dropped                int
 	malformedRequests      atomic.Uint64
+	userUIDMismatches      atomic.Uint64
+	staleUserDeliveries    atomic.Uint64
+	userCreateRollbacks    atomic.Uint64
+	duplicateBindReuse     atomic.Uint64
+	userPushDeliveries     atomic.Uint64
 	pitayaServer           protos.PitayaServer
 	metricsReporters       []metrics.Reporter
 	sessionPool            session.SessionPool
@@ -128,6 +143,35 @@ type NatsRPCServer struct {
 	inboundCallbacksClosed bool
 	transportDraining      chan struct{}
 	transportDrainOnce     sync.Once
+	userSubscriptions      *natsUserSubscriptionRegistry
+}
+
+// NatsUserSubscriptionStats is a low-cardinality runtime snapshot used by
+// operational diagnostics and the repository stress gate.
+type NatsUserSubscriptionStats struct {
+	ActivePairs          int
+	InboundSubscriptions int
+	DuplicateBindReuse   uint64
+	StaleOwnerDrops      uint64
+	PushDeliveries       uint64
+}
+
+func (ns *NatsRPCServer) UserSubscriptionStats() NatsUserSubscriptionStats {
+	if ns == nil {
+		return NatsUserSubscriptionStats{}
+	}
+	stats := NatsUserSubscriptionStats{
+		DuplicateBindReuse: ns.duplicateBindReuse.Load(),
+		StaleOwnerDrops:    ns.staleUserDeliveries.Load(),
+		PushDeliveries:     ns.userPushDeliveries.Load(),
+	}
+	if ns.userSubscriptions != nil {
+		stats.ActivePairs = ns.userSubscriptions.activeCount()
+	}
+	ns.inboundMu.Lock()
+	stats.InboundSubscriptions = len(ns.inboundSubscriptions)
+	ns.inboundMu.Unlock()
+	return stats
 }
 
 // NewNatsRPCServer ctor
@@ -159,6 +203,7 @@ func NewNatsRPCServer(
 		transportDraining:    make(chan struct{}),
 		lifecycleCtx:         lifecycleCtx,
 		cancelLifecycle:      cancelLifecycle,
+		userSubscriptions:    newNatsUserSubscriptionRegistry(),
 	}
 	if err := ns.configure(config); err != nil {
 		return nil, err
@@ -186,8 +231,8 @@ func (ns *NatsRPCServer) configure(config config.NatsRPCServerConfig) error {
 	ns.bindingsChan = make(chan *nats.Msg, ns.messagesBufferSize)
 	// the reason this channel is buffered is that we can achieve more performance by not
 	// blocking producers on a massive push
-	ns.userPushCh = make(chan *protos.Push, ns.pushBufferSize)
-	ns.userKickCh = make(chan *protos.KickMsg, ns.messagesBufferSize)
+	ns.userPushCh = make(chan natsUserPushDelivery, ns.pushBufferSize)
+	ns.userKickCh = make(chan natsUserKickDelivery, ns.messagesBufferSize)
 	ns.responses = make([]*protos.Response, ns.service)
 	ns.requests = make([]*protos.Request, ns.service)
 	ns.reqTimeout = config.RequestTimeout
@@ -221,18 +266,53 @@ func GetForkTopic(svrType string) string {
 
 // onSessionBind should be called on each session bind
 func (ns *NatsRPCServer) onSessionBind(ctx context.Context, s session.Session, callback map[string]string) error {
-	if ns.server.Frontend {
-		subu, err := ns.subscribeToUserMessages(s.UID(), ns.server.Type)
-		if err != nil {
-			return err
-		}
-		subk, err := ns.subscribeToUserKickChannel(s.UID(), ns.server.Type)
-		if err != nil {
-			return err
-		}
-		s.SetSubscriptions([]*nats.Subscription{subu, subk})
+	if !ns.server.Frontend {
+		return nil
 	}
-	return nil
+	if s == nil {
+		return errors.New("cannot subscribe a nil session")
+	}
+	uid := s.UID()
+	reused, err := ns.userSubscriptions.acquire(
+		s.ID(),
+		uid,
+		func(owner *natsUserSubscriptionEntry) (*nats.Subscription, *nats.Subscription, error) {
+			push, subscribeErr := ns.subscribeToUserMessages(uid, ns.server.Type, owner)
+			if subscribeErr != nil {
+				return nil, nil, subscribeErr
+			}
+			kick, subscribeErr := ns.subscribeToUserKickChannel(uid, ns.server.Type, owner)
+			if subscribeErr != nil {
+				ns.userCreateRollbacks.Add(1)
+				return push, nil, subscribeErr
+			}
+			return push, kick, nil
+		},
+		ns.drainUserSubscription,
+	)
+	if reused {
+		ns.duplicateBindReuse.Add(1)
+	}
+	return err
+}
+
+func (ns *NatsRPCServer) onSessionClose(s session.Session, callback map[string]string, reason session.CloseReason) {
+	if s == nil || ns.userSubscriptions == nil {
+		return
+	}
+	ns.userSubscriptions.remove(s.ID(), ns.drainUserSubscription)
+}
+
+func (ns *NatsRPCServer) drainUserSubscription(sub *nats.Subscription) {
+	if sub == nil || !sub.IsValid() {
+		return
+	}
+	if err := sub.Drain(); err != nil {
+		logger.Zap.Warn("failed to drain nats user subscription", zap.String("subject", sub.Subject), zap.Error(err))
+		if unsubscribeErr := sub.Unsubscribe(); unsubscribeErr != nil && sub.IsValid() {
+			logger.Zap.Warn("failed to unsubscribe nats user subscription", zap.String("subject", sub.Subject), zap.Error(unsubscribeErr))
+		}
+	}
 }
 
 // SetPitayaServer sets the pitaya server
@@ -247,7 +327,11 @@ func (ns *NatsRPCServer) subscribeToBindingsChannel() error {
 	return err
 }
 
-func (ns *NatsRPCServer) subscribeToUserKickChannel(uid string, svType string) (*nats.Subscription, error) {
+func (ns *NatsRPCServer) subscribeToUserKickChannel(uid string, svType string, owners ...*natsUserSubscriptionEntry) (*nats.Subscription, error) {
+	var owner *natsUserSubscriptionEntry
+	if len(owners) > 0 {
+		owner = owners[0]
+	}
 	return ns.addInboundSubscription(func() (*nats.Subscription, error) {
 		return ns.conn.Subscribe(GetUserKickTopic(uid, svType), func(msg *nats.Msg) {
 			if !ns.beginInboundCallback() {
@@ -260,15 +344,26 @@ func (ns *NatsRPCServer) subscribeToUserKickChannel(uid string, svType string) (
 				ns.rejectMalformedUserMessage("kick", msg, err)
 				return
 			}
+			if kick.UserId != uid {
+				ns.rejectUserMessageUIDMismatch("kick", uid, kick.UserId)
+				return
+			}
+			if !ns.allowUserDelivery(owner) {
+				return
+			}
 			select {
-			case ns.userKickCh <- kick:
+			case ns.userKickCh <- natsUserKickDelivery{owner: owner, kick: kick}:
 			case <-ns.stopChan:
 			}
 		})
 	})
 }
 
-func (ns *NatsRPCServer) subscribeToUserMessages(uid string, svType string) (*nats.Subscription, error) {
+func (ns *NatsRPCServer) subscribeToUserMessages(uid string, svType string, owners ...*natsUserSubscriptionEntry) (*nats.Subscription, error) {
+	var owner *natsUserSubscriptionEntry
+	if len(owners) > 0 {
+		owner = owners[0]
+	}
 	return ns.addInboundSubscription(func() (*nats.Subscription, error) {
 		return ns.conn.Subscribe(GetUserMessagesTopic(uid, svType), func(msg *nats.Msg) {
 			if !ns.beginInboundCallback() {
@@ -281,9 +376,16 @@ func (ns *NatsRPCServer) subscribeToUserMessages(uid string, svType string) (*na
 				ns.rejectMalformedUserMessage("push", msg, err)
 				return
 			}
+			if push.Uid != uid {
+				ns.rejectUserMessageUIDMismatch("push", uid, push.Uid)
+				return
+			}
+			if !ns.allowUserDelivery(owner) {
+				return
+			}
 			logger.Zap.Debug("receive user's push", zap.String("uid", uid), zap.Int("remain", len(ns.userPushCh)))
 			select {
-			case ns.userPushCh <- push:
+			case ns.userPushCh <- natsUserPushDelivery{owner: owner, push: push}:
 			case <-ns.stopChan:
 			}
 		})
@@ -560,16 +662,43 @@ func (ns *NatsRPCServer) rejectMalformedUserMessage(kind string, msg *nats.Msg, 
 	)
 }
 
+func (ns *NatsRPCServer) rejectUserMessageUIDMismatch(kind, subjectUID, payloadUID string) {
+	count := ns.userUIDMismatches.Add(1)
+	logger.Zap.Warn(
+		"rejecting nats user message with mismatched uid",
+		zap.String("channel_kind", kind),
+		zap.String("subject_uid", subjectUID),
+		zap.String("payload_uid", payloadUID),
+		zap.Uint64("mismatch_count", count),
+	)
+}
+
+func (ns *NatsRPCServer) allowUserDelivery(owner *natsUserSubscriptionEntry) bool {
+	if owner == nil {
+		return true
+	}
+	if ns.userSubscriptions == nil || !ns.userSubscriptions.isActive(owner) || ns.sessionPool == nil {
+		ns.staleUserDeliveries.Add(1)
+		return false
+	}
+	current := ns.sessionPool.GetSessionByUID(owner.uid)
+	if current == nil || current.ID() != owner.sessionID {
+		ns.staleUserDeliveries.Add(1)
+		return false
+	}
+	return true
+}
+
 // GetUnhandledRequestsChannel gets the unhandled requests channel from nats rpc server
 func (ns *NatsRPCServer) GetUnhandledRequestsChannel() chan *protos.Request {
 	return ns.unhandledReqCh
 }
 
-func (ns *NatsRPCServer) getUserPushChannel() chan *protos.Push {
+func (ns *NatsRPCServer) getUserPushChannel() chan natsUserPushDelivery {
 	return ns.userPushCh
 }
 
-func (ns *NatsRPCServer) getUserKickChannel() chan *protos.KickMsg {
+func (ns *NatsRPCServer) getUserKickChannel() chan natsUserKickDelivery {
 	return ns.userKickCh
 }
 
@@ -723,17 +852,17 @@ func (ns *NatsRPCServer) processPushes() {
 			default:
 			}
 		}
-		var push *protos.Push
+		var delivery natsUserPushDelivery
 		var ok bool
 		if draining {
 			select {
-			case push, ok = <-ns.getUserPushChannel():
+			case delivery, ok = <-ns.getUserPushChannel():
 			default:
 				return
 			}
 		} else {
 			select {
-			case push, ok = <-ns.getUserPushChannel():
+			case delivery, ok = <-ns.getUserPushChannel():
 			case <-ns.transportDraining:
 				draining = true
 				continue
@@ -744,9 +873,14 @@ func (ns *NatsRPCServer) processPushes() {
 		if !ok {
 			return
 		}
-		_, err := ns.pitayaServer.PushToUser(ns.runtimeContext(), push)
+		if !ns.allowUserDelivery(delivery.owner) {
+			continue
+		}
+		_, err := ns.pitayaServer.PushToUser(ns.runtimeContext(), delivery.push)
 		if err != nil {
 			logger.Zap.Error("error sending push to user", zap.Error(err))
+		} else {
+			ns.userPushDeliveries.Add(1)
 		}
 	}
 }
@@ -761,17 +895,17 @@ func (ns *NatsRPCServer) processKick() {
 			default:
 			}
 		}
-		var kick *protos.KickMsg
+		var delivery natsUserKickDelivery
 		var ok bool
 		if draining {
 			select {
-			case kick, ok = <-ns.getUserKickChannel():
+			case delivery, ok = <-ns.getUserKickChannel():
 			default:
 				return
 			}
 		} else {
 			select {
-			case kick, ok = <-ns.getUserKickChannel():
+			case delivery, ok = <-ns.getUserKickChannel():
 			case <-ns.transportDraining:
 				draining = true
 				continue
@@ -782,8 +916,11 @@ func (ns *NatsRPCServer) processKick() {
 		if !ok {
 			return
 		}
-		logger.Log.Debugf("Sending kick to user %s: %v", kick.GetUserId())
-		_, err := ns.pitayaServer.KickUser(ns.runtimeContext(), kick)
+		if !ns.allowUserDelivery(delivery.owner) {
+			continue
+		}
+		logger.Log.Debugf("Sending kick to user %s: %v", delivery.kick.GetUserId())
+		_, err := ns.pitayaServer.KickUser(ns.runtimeContext(), delivery.kick)
 		if err != nil {
 			logger.Zap.Error("error sending kick to user", zap.Error(err))
 		}
@@ -922,6 +1059,7 @@ func (ns *NatsRPCServer) Init() error {
 	}
 
 	ns.sessionPool.OnSessionBind(ns.onSessionBind)
+	ns.sessionPool.OnSessionClose(ns.onSessionClose)
 	ns.running.Store(ns.conn.IsConnected() && !ns.stopping.Load())
 
 	return nil
@@ -1236,6 +1374,9 @@ func (ns *NatsRPCServer) stopAndWait() {
 	ns.shutdownOnce.Do(func() {
 		ns.stopping.Store(true)
 		ns.running.Store(false)
+		if ns.userSubscriptions != nil {
+			ns.userSubscriptions.closeAdmission()
+		}
 		subscriptions := ns.closeInboundSubscriptionAdmission()
 		graceful := ns.beginGracefulTransportDrain()
 		if graceful && ns.drainInboundSubscriptions(subscriptions) {
@@ -1333,9 +1474,28 @@ func (ns *NatsRPCServer) Subscribe(topic string, groups ...string) error {
 func (ns *NatsRPCServer) reportMetrics() {
 	if ns.metricsReporters != nil {
 		for _, mr := range ns.metricsReporters {
-			dropped := uint64(ns.dropped) + ns.malformedRequests.Load()
+			dropped := uint64(ns.dropped) + ns.malformedRequests.Load() + ns.userUIDMismatches.Load() + ns.staleUserDeliveries.Load()
 			if err := mr.ReportGauge(metrics.DroppedMessages, map[string]string{}, float64(dropped)); err != nil {
 				logger.Zap.Warn("failed to report dropped message", zap.Error(err))
+			}
+			activePairs := 0
+			if ns.userSubscriptions != nil {
+				activePairs = ns.userSubscriptions.activeCount()
+			}
+			userMetrics := []struct {
+				name  string
+				value float64
+			}{
+				{name: metrics.ActiveUserSubscriptionPairs, value: float64(activePairs)},
+				{name: metrics.UserSubscriptionStaleOwnerDrops, value: float64(ns.staleUserDeliveries.Load())},
+				{name: metrics.UserSubscriptionCreateRollbacks, value: float64(ns.userCreateRollbacks.Load())},
+				{name: metrics.UserSubscriptionDuplicateBindReuse, value: float64(ns.duplicateBindReuse.Load())},
+				{name: metrics.UserMessageUIDMismatches, value: float64(ns.userUIDMismatches.Load())},
+			}
+			for _, metric := range userMetrics {
+				if err := mr.ReportGauge(metric.name, map[string]string{}, metric.value); err != nil {
+					logger.Zap.Warn("failed to report nats user subscription metric", zap.String("metric", metric.name), zap.Error(err))
+				}
 			}
 
 			// subchan

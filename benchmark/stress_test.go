@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,16 +47,21 @@ import (
 )
 
 const (
-	stressReportSchema       = 1
+	stressReportSchema       = 2
 	stressBindRoute          = "connector.testsvc.teststressbindid"
 	stressRebindRoute        = "connector.testsvc.teststressrebindid"
+	stressRetryBindRoute     = "connector.testsvc.teststressretrybindid"
+	stressNATSPushRoute      = "connector.testsvc.teststressnatspush"
 	stressOwnershipRoute     = "connector.testsvc.testassertsessionownership"
 	stressSessionStatsRoute  = "connector.testsvc.testsessionstats"
+	stressSubscriptionRoute  = "connector.testsvc.teststresssubscriptionstats"
+	stressPushRoute          = "stress.subscription"
 	stressEchoRoute          = connectorRawRoute
 	stressProcessBudget      = 30 * time.Second
 	stressEnvironmentMargin  = 1024
 	stressMaximumClients     = 20000
 	stressMaximumReconnects  = 10000
+	stressMaximumBindRetries = 100000
 	stressMaximumConcurrency = 1024
 	stressMaximumNATSBuffer  = 65536
 	stressErrorSampleLimit   = 20
@@ -71,9 +77,12 @@ var (
 	stressRequestConcurrency   = flag.Int("stress-request-concurrency", 256, "concurrent request checks")
 	stressReconnects           = flag.Int("stress-reconnects", 1000, "fresh-client same-UID reconnects")
 	stressReconnectConcurrency = flag.Int("stress-reconnect-concurrency", 64, "concurrent reconnect checks")
+	stressBindRetries          = flag.Int("stress-bind-retries", 1000, "same-session same-UID Bind retries")
 	stressRequestTimeout       = flag.Duration("stress-request-timeout", 10*time.Second, "per-request and disconnect timeout")
 	stressInternalTimeout      = flag.Duration("stress-internal-timeout", 12*time.Minute, "workload deadline before test cleanup")
 	stressCleanupTimeout       = flag.Duration("stress-cleanup-timeout", 30*time.Second, "explicit client and server cleanup deadline")
+	stressCleanupMax           = flag.Duration("stress-cleanup-max", 30*time.Second, "maximum accepted cleanup duration")
+	stressGoroutineDeltaMax    = flag.Int("stress-goroutine-delta-max", 5, "maximum client-process goroutine delta after cleanup")
 	stressNATSMessagesBuffer   = flag.Int("stress-nats-messages-buffer", 16384, "NATS server message buffer in the declared stress profile")
 	stressSoftFileLimit        = flag.Int64("stress-soft-file-limit", 0, "observed soft open-file limit")
 	stressFileLimitUnlimited   = flag.Bool("stress-file-limit-unlimited", false, "observed soft open-file limit is unlimited")
@@ -87,9 +96,12 @@ type stressConfig struct {
 	RequestConcurrency   int    `json:"request_concurrency"`
 	Reconnects           int    `json:"reconnects"`
 	ReconnectConcurrency int    `json:"reconnect_concurrency"`
+	BindRetries          int    `json:"bind_retries"`
 	RequestTimeout       string `json:"request_timeout"`
 	InternalTimeout      string `json:"internal_timeout"`
 	CleanupTimeout       string `json:"cleanup_timeout"`
+	CleanupMax           string `json:"cleanup_max"`
+	GoroutineDeltaMax    int    `json:"goroutine_delta_max"`
 	NATSMessagesBuffer   int    `json:"nats_messages_buffer"`
 }
 
@@ -115,15 +127,33 @@ type stressCounts struct {
 	OldDisconnectsObserved      int64 `json:"old_disconnects_observed"`
 	ServerStatsResponses        int64 `json:"server_stats_responses"`
 	ServerStatsMilestones       int64 `json:"server_stats_milestones"`
+	SubscriptionStatsResponses  int64 `json:"subscription_stats_responses"`
+	SubscriptionStatsMilestones int64 `json:"subscription_stats_milestones"`
 	CleanupDisconnectsValidated int64 `json:"cleanup_disconnects_validated"`
 	LiveClientsAfterReconnects  int64 `json:"live_clients_after_reconnects"`
 	LiveClientsAfterCleanup     int64 `json:"live_clients_after_cleanup"`
+	BindRetriesExpected         int64 `json:"bind_retries_expected"`
+	BindRetriesAttempted        int64 `json:"bind_retries_attempted"`
+	BindRetriesSucceeded        int64 `json:"bind_retries_succeeded"`
+	DuplicateDeliveries         int64 `json:"duplicate_deliveries"`
+	ActivePairsStable           int64 `json:"active_subscription_pairs_stable"`
+	ActivePairsAfterCleanup     int64 `json:"active_subscription_pairs_after_cleanup"`
+	DuplicateBindReuse          int64 `json:"duplicate_bind_reuse"`
+	StaleOwnerDrops             int64 `json:"stale_owner_drops"`
+	PushDeliveries              int64 `json:"push_deliveries"`
+	InboundSubscriptionsBase    int64 `json:"inbound_subscriptions_baseline"`
+	InboundSubscriptionsStable  int64 `json:"inbound_subscriptions_stable"`
+	InboundSubscriptionsCleanup int64 `json:"inbound_subscriptions_after_cleanup"`
+	GoroutinesBaseline          int64 `json:"goroutines_baseline"`
+	GoroutinesAfterCleanup      int64 `json:"goroutines_after_cleanup"`
+	GoroutineDelta              int64 `json:"goroutine_delta"`
 }
 
 type stressDurations struct {
 	ConnectNanoseconds   int64 `json:"connect_nanoseconds"`
 	RequestNanoseconds   int64 `json:"request_nanoseconds"`
 	ReconnectNanoseconds int64 `json:"reconnect_nanoseconds"`
+	BindRetryNanoseconds int64 `json:"bind_retry_nanoseconds"`
 	CleanupNanoseconds   int64 `json:"cleanup_nanoseconds"`
 	TotalNanoseconds     int64 `json:"total_nanoseconds"`
 }
@@ -143,19 +173,34 @@ type stressReport struct {
 }
 
 type stressRuntimeCounts struct {
-	initialConnected    atomic.Int64
-	connections         atomic.Int64
-	peakConnected       atomic.Int64
-	initialRequests     atomic.Int64
-	reconnects          atomic.Int64
-	reconnectResponses  atomic.Int64
-	responses           atomic.Int64
-	oldDisconnects      atomic.Int64
-	serverStats         atomic.Int64
-	serverMilestones    atomic.Int64
-	cleanupDisconnects  atomic.Int64
-	liveConnected       atomic.Int64
-	liveAfterReconnects atomic.Int64
+	initialConnected     atomic.Int64
+	connections          atomic.Int64
+	peakConnected        atomic.Int64
+	initialRequests      atomic.Int64
+	reconnects           atomic.Int64
+	reconnectResponses   atomic.Int64
+	responses            atomic.Int64
+	oldDisconnects       atomic.Int64
+	serverStats          atomic.Int64
+	serverMilestones     atomic.Int64
+	subscriptionStats    atomic.Int64
+	subscriptionBarriers atomic.Int64
+	cleanupDisconnects   atomic.Int64
+	liveConnected        atomic.Int64
+	liveAfterReconnects  atomic.Int64
+	bindAttempts         atomic.Int64
+	bindSuccesses        atomic.Int64
+	duplicateDeliveries  atomic.Int64
+	activePairsStable    atomic.Int64
+	activePairsCleanup   atomic.Int64
+	duplicateBindReuse   atomic.Int64
+	staleOwnerDrops      atomic.Int64
+	pushDeliveries       atomic.Int64
+	inboundBaseline      atomic.Int64
+	inboundStable        atomic.Int64
+	inboundCleanup       atomic.Int64
+	goroutinesBaseline   atomic.Int64
+	goroutinesCleanup    atomic.Int64
 }
 
 func (c *stressRuntimeCounts) snapshot(configuredClients int) stressCounts {
@@ -171,9 +216,26 @@ func (c *stressRuntimeCounts) snapshot(configuredClients int) stressCounts {
 		OldDisconnectsObserved:      c.oldDisconnects.Load(),
 		ServerStatsResponses:        c.serverStats.Load(),
 		ServerStatsMilestones:       c.serverMilestones.Load(),
+		SubscriptionStatsResponses:  c.subscriptionStats.Load(),
+		SubscriptionStatsMilestones: c.subscriptionBarriers.Load(),
 		CleanupDisconnectsValidated: c.cleanupDisconnects.Load(),
 		LiveClientsAfterReconnects:  c.liveAfterReconnects.Load(),
 		LiveClientsAfterCleanup:     c.liveConnected.Load(),
+		BindRetriesExpected:         int64(*stressBindRetries),
+		BindRetriesAttempted:        c.bindAttempts.Load(),
+		BindRetriesSucceeded:        c.bindSuccesses.Load(),
+		DuplicateDeliveries:         c.duplicateDeliveries.Load(),
+		ActivePairsStable:           c.activePairsStable.Load(),
+		ActivePairsAfterCleanup:     c.activePairsCleanup.Load(),
+		DuplicateBindReuse:          c.duplicateBindReuse.Load(),
+		StaleOwnerDrops:             c.staleOwnerDrops.Load(),
+		PushDeliveries:              c.pushDeliveries.Load(),
+		InboundSubscriptionsBase:    c.inboundBaseline.Load(),
+		InboundSubscriptionsStable:  c.inboundStable.Load(),
+		InboundSubscriptionsCleanup: c.inboundCleanup.Load(),
+		GoroutinesBaseline:          c.goroutinesBaseline.Load(),
+		GoroutinesAfterCleanup:      c.goroutinesCleanup.Load(),
+		GoroutineDelta:              c.goroutinesCleanup.Load() - c.goroutinesBaseline.Load(),
 	}
 }
 
@@ -263,9 +325,12 @@ func currentStressConfig() stressConfig {
 		RequestConcurrency:   *stressRequestConcurrency,
 		Reconnects:           *stressReconnects,
 		ReconnectConcurrency: *stressReconnectConcurrency,
+		BindRetries:          *stressBindRetries,
 		RequestTimeout:       stressRequestTimeout.String(),
 		InternalTimeout:      stressInternalTimeout.String(),
 		CleanupTimeout:       stressCleanupTimeout.String(),
+		CleanupMax:           stressCleanupMax.String(),
+		GoroutineDeltaMax:    *stressGoroutineDeltaMax,
 		NATSMessagesBuffer:   *stressNATSMessagesBuffer,
 	}
 }
@@ -329,6 +394,7 @@ func TestNATSStress(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *stressInternalTimeout)
 	defer cancel()
+	counts.goroutinesBaseline.Store(int64(runtime.NumGoroutine()))
 	connections := make([]*stressConnection, config.Clients)
 	cleanupComplete := false
 	t.Cleanup(func() {
@@ -357,6 +423,13 @@ func TestNATSStress(t *testing.T) {
 	if err := waitForServerStats(ctx, connections[config.Clients-1].client, int64(config.Clients), 0, counts); err != nil {
 		failStress(t, report, fmt.Errorf("initial server session barrier: %w", err))
 	}
+	baselineSubscriptions, err := waitForSubscriptionStats(ctx, connections[config.Clients-1].client, func(stats stressSubscriptionStats) bool {
+		return stats.ActivePairs == 0
+	}, counts)
+	if err != nil {
+		failStress(t, report, fmt.Errorf("initial subscription barrier: %w", err))
+	}
+	counts.inboundBaseline.Store(baselineSubscriptions.InboundSubscriptions)
 
 	phaseStarted = time.Now()
 	failures = runStressWorkers(ctx, config.Clients, config.RequestConcurrency, func(workerCtx context.Context, index int) error {
@@ -388,6 +461,76 @@ func TestNATSStress(t *testing.T) {
 	if err := waitForServerStats(ctx, connections[config.Clients-1].client, int64(config.Clients), int64(config.Reconnects), counts); err != nil {
 		failStress(t, report, fmt.Errorf("post-reconnect server session barrier: %w", err))
 	}
+	beforeRetries, err := waitForSubscriptionStats(ctx, connections[0].client, func(stats stressSubscriptionStats) bool {
+		return stats.ActivePairs == int64(config.Reconnects) &&
+			stats.InboundSubscriptions == counts.inboundBaseline.Load()+int64(config.Reconnects*2)
+	}, counts)
+	if err != nil {
+		failStress(t, report, fmt.Errorf("pre-retry subscription barrier: %w", err))
+	}
+
+	phaseStarted = time.Now()
+	failures = runStressWorkers(ctx, config.Reconnects, min(config.RequestConcurrency, config.Reconnects), func(workerCtx context.Context, index int) error {
+		uid := fmt.Sprintf("stress-%s-%d", *stressRunID, index)
+		for attempt := index; attempt < config.BindRetries; attempt += config.Reconnects {
+			counts.bindAttempts.Add(1)
+			if _, err := sendStrictStressRequest(workerCtx, connections[index].client, stressRetryBindRoute, []byte(uid), []byte("ack"), *stressRequestTimeout); err != nil {
+				return fmt.Errorf("same-session Bind retry %d: %w", attempt, err)
+			}
+			counts.bindSuccesses.Add(1)
+			counts.responses.Add(1)
+		}
+		return nil
+	})
+	report.Durations.BindRetryNanoseconds = time.Since(phaseStarted).Nanoseconds()
+	if err := failures.err("same-session bind retry"); err != nil {
+		failStress(t, report, err)
+	}
+	afterRetries, err := waitForSubscriptionStats(ctx, connections[0].client, func(stats stressSubscriptionStats) bool {
+		return stats.ActivePairs == int64(config.Reconnects) &&
+			stats.DuplicateBindReuse >= beforeRetries.DuplicateBindReuse+int64(config.BindRetries)
+	}, counts)
+	if err != nil {
+		failStress(t, report, fmt.Errorf("post-retry subscription barrier: %w", err))
+	}
+	counts.activePairsStable.Store(afterRetries.ActivePairs)
+	counts.inboundStable.Store(afterRetries.InboundSubscriptions)
+	counts.duplicateBindReuse.Store(afterRetries.DuplicateBindReuse - beforeRetries.DuplicateBindReuse)
+	counts.staleOwnerDrops.Store(afterRetries.StaleOwnerDrops)
+
+	pushesBefore := afterRetries.PushDeliveries
+	failures = runStressWorkers(ctx, config.Reconnects, min(config.RequestConcurrency, config.Reconnects), func(workerCtx context.Context, index int) error {
+		uid := fmt.Sprintf("stress-%s-%d", *stressRunID, index)
+		token := fmt.Sprintf("push-%s-%d", *stressRunID, index)
+		if err := sendStressNATSPush(workerCtx, connections[index].client, uid, token, counts); err != nil {
+			return err
+		}
+		counts.responses.Add(1)
+		return nil
+	})
+	if err := failures.err("NATS user push"); err != nil {
+		failStress(t, report, err)
+	}
+	afterPushes, err := waitForSubscriptionStats(ctx, connections[0].client, func(stats stressSubscriptionStats) bool {
+		return stats.PushDeliveries >= pushesBefore+int64(config.Reconnects)
+	}, counts)
+	if err != nil {
+		failStress(t, report, fmt.Errorf("user push delivery barrier: %w", err))
+	}
+	afterPushes, err = confirmSubscriptionStatsStable(ctx, connections[0].client, afterPushes, counts)
+	if afterPushes.PushDeliveries >= pushesBefore {
+		deliveries := afterPushes.PushDeliveries - pushesBefore
+		counts.pushDeliveries.Store(deliveries)
+		if deliveries > int64(config.Reconnects) {
+			counts.duplicateDeliveries.Add(deliveries - int64(config.Reconnects))
+		}
+	}
+	if err != nil {
+		failStress(t, report, fmt.Errorf("user push stable window: %w", err))
+	}
+	if duplicates := counts.duplicateDeliveries.Load(); duplicates != 0 {
+		failStress(t, report, fmt.Errorf("duplicate NATS user deliveries = %d", duplicates))
+	}
 
 	cancel()
 	phaseStarted = time.Now()
@@ -395,6 +538,15 @@ func TestNATSStress(t *testing.T) {
 	err = cleanupStressConnections(cleanupCtx, connections, config.ConnectConcurrency, counts)
 	cleanupCancel()
 	report.Durations.CleanupNanoseconds = time.Since(phaseStarted).Nanoseconds()
+	if err != nil {
+		failStress(t, report, err)
+	}
+	if report.Durations.CleanupNanoseconds > stressCleanupMax.Nanoseconds() {
+		failStress(t, report, fmt.Errorf("cleanup duration %s exceeds %s", time.Duration(report.Durations.CleanupNanoseconds), *stressCleanupMax))
+	}
+	cleanupWaitCtx, cleanupWaitCancel := context.WithTimeout(context.Background(), *stressRequestTimeout)
+	err = waitForGoroutineBudget(cleanupWaitCtx, counts.goroutinesBaseline.Load(), int64(config.GoroutineDeltaMax), counts)
+	cleanupWaitCancel()
 	if err != nil {
 		failStress(t, report, err)
 	}
@@ -436,6 +588,10 @@ func validateStressConfig(config stressConfig, environment stressEnvironment, ou
 	if err != nil || cleanupTimeout <= requestTimeout {
 		return fmt.Errorf("stress cleanup timeout must exceed the request timeout: %q", config.CleanupTimeout)
 	}
+	cleanupMax, err := time.ParseDuration(config.CleanupMax)
+	if err != nil || cleanupMax <= 0 || cleanupMax > cleanupTimeout {
+		return fmt.Errorf("stress cleanup maximum must be positive and no greater than cleanup timeout: %q", config.CleanupMax)
+	}
 	if outerTimeout <= 0 || internalTimeout+cleanupTimeout+stressProcessBudget > outerTimeout {
 		return fmt.Errorf("test timeout %s must cover internal %s, cleanup %s, and process budget %s", outerTimeout, internalTimeout, cleanupTimeout, stressProcessBudget)
 	}
@@ -444,6 +600,12 @@ func validateStressConfig(config stressConfig, environment stressEnvironment, ou
 	}
 	if config.Reconnects < 1 || config.Reconnects > stressMaximumReconnects || config.Reconnects >= config.Clients {
 		return fmt.Errorf("stress reconnects must be between 1 and min(clients-1, %d): %d", stressMaximumReconnects, config.Reconnects)
+	}
+	if config.BindRetries < 1 || config.BindRetries > stressMaximumBindRetries {
+		return fmt.Errorf("stress bind retries must be between 1 and %d: %d", stressMaximumBindRetries, config.BindRetries)
+	}
+	if config.GoroutineDeltaMax < 0 || config.GoroutineDeltaMax > 1000 {
+		return fmt.Errorf("stress goroutine delta maximum must be between 0 and 1000: %d", config.GoroutineDeltaMax)
 	}
 	for name, value := range map[string]int{
 		"connect concurrency":   config.ConnectConcurrency,
@@ -716,6 +878,48 @@ func sendStrictStressRequest(ctx context.Context, connection *client.Client, rou
 	return append([]byte(nil), response.Data...), nil
 }
 
+func sendStressNATSPush(ctx context.Context, connection *client.Client, uid, token string, counts *stressRuntimeCounts) error {
+	id, err := connection.SendRequest(stressNATSPushRoute, []byte(uid+"|"+token))
+	if err != nil {
+		return fmt.Errorf("send NATS push request: %w", err)
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, *stressRequestTimeout)
+	defer cancel()
+	responseSeen := false
+	pushSeen := false
+	for !responseSeen || !pushSeen {
+		message, err := receiveStressResponse(requestCtx, connection)
+		if err != nil {
+			return fmt.Errorf("receive NATS push evidence: %w", err)
+		}
+		switch message.Type {
+		case pitayamessage.Response:
+			if responseSeen || message.ID != id {
+				return fmt.Errorf("NATS push response id = %d, want %d", message.ID, id)
+			}
+			if err := validateStressResponse(message); err != nil {
+				return err
+			}
+			if !bytes.Equal(message.Data, []byte("ack")) {
+				return fmt.Errorf("NATS push response = %q, want ack", message.Data)
+			}
+			responseSeen = true
+		case pitayamessage.Push:
+			if message.Route != stressPushRoute || !bytes.Equal(message.Data, []byte(token)) {
+				return fmt.Errorf("unexpected stress push route=%q data=%q", message.Route, message.Data)
+			}
+			if pushSeen {
+				counts.duplicateDeliveries.Add(1)
+				return fmt.Errorf("duplicate stress push %q", token)
+			}
+			pushSeen = true
+		default:
+			return fmt.Errorf("unexpected message type %v during NATS push check", message.Type)
+		}
+	}
+	return nil
+}
+
 func receiveStressResponse(ctx context.Context, connection *client.Client) (*pitayamessage.Message, error) {
 	select {
 	case response, ok := <-connection.IncomingMsgChan:
@@ -806,6 +1010,96 @@ func parseStressPair(name string, value []byte) (int64, int64, error) {
 	return first, second, nil
 }
 
+type stressSubscriptionStats struct {
+	ActivePairs          int64
+	InboundSubscriptions int64
+	DuplicateBindReuse   int64
+	StaleOwnerDrops      int64
+	PushDeliveries       int64
+}
+
+func parseStressSubscriptionStats(value []byte) (stressSubscriptionStats, error) {
+	parts := strings.Split(string(value), "|")
+	if len(parts) != 5 {
+		return stressSubscriptionStats{}, fmt.Errorf("subscription stats response %q is not a five-value record", value)
+	}
+	values := make([]int64, len(parts))
+	for index, part := range parts {
+		parsed, err := strconv.ParseInt(part, 10, 64)
+		if err != nil || parsed < 0 {
+			return stressSubscriptionStats{}, fmt.Errorf("subscription stats response %q contains an invalid value", value)
+		}
+		values[index] = parsed
+	}
+	return stressSubscriptionStats{
+		ActivePairs:          values[0],
+		InboundSubscriptions: values[1],
+		DuplicateBindReuse:   values[2],
+		StaleOwnerDrops:      values[3],
+		PushDeliveries:       values[4],
+	}, nil
+}
+
+func waitForSubscriptionStats(
+	ctx context.Context,
+	connection *client.Client,
+	ready func(stressSubscriptionStats) bool,
+	counts *stressRuntimeCounts,
+) (stressSubscriptionStats, error) {
+	for {
+		value, err := sendStrictStressRequest(ctx, connection, stressSubscriptionRoute, nil, nil, *stressRequestTimeout)
+		if err != nil {
+			return stressSubscriptionStats{}, err
+		}
+		counts.responses.Add(1)
+		counts.subscriptionStats.Add(1)
+		stats, err := parseStressSubscriptionStats(value)
+		if err != nil {
+			return stressSubscriptionStats{}, err
+		}
+		if ready(stats) {
+			counts.subscriptionBarriers.Add(1)
+			return stats, nil
+		}
+		timer := time.NewTimer(20 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return stressSubscriptionStats{}, fmt.Errorf("subscription stats did not reach the requested state: %w", ctx.Err())
+		case <-timer.C:
+		}
+	}
+}
+
+func confirmSubscriptionStatsStable(
+	ctx context.Context,
+	connection *client.Client,
+	want stressSubscriptionStats,
+	counts *stressRuntimeCounts,
+) (stressSubscriptionStats, error) {
+	timer := time.NewTimer(200 * time.Millisecond)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return stressSubscriptionStats{}, ctx.Err()
+	case <-timer.C:
+	}
+	value, err := sendStrictStressRequest(ctx, connection, stressSubscriptionRoute, nil, nil, *stressRequestTimeout)
+	if err != nil {
+		return stressSubscriptionStats{}, err
+	}
+	counts.responses.Add(1)
+	counts.subscriptionStats.Add(1)
+	actual, err := parseStressSubscriptionStats(value)
+	if err != nil {
+		return stressSubscriptionStats{}, err
+	}
+	if actual != want {
+		return actual, fmt.Errorf("subscription stats changed from %+v to %+v", want, actual)
+	}
+	return actual, nil
+}
+
 func waitForServerStats(ctx context.Context, connection *client.Client, wantSessions, wantUsers int64, counts *stressRuntimeCounts) error {
 	for {
 		value, err := sendStrictStressRequest(ctx, connection, stressSessionStatsRoute, nil, nil, *stressRequestTimeout)
@@ -859,6 +1153,15 @@ func cleanupStressConnections(ctx context.Context, connections []*stressConnecti
 	if err := waitForServerStats(ctx, probe.client, 1, 0, counts); err != nil {
 		return fmt.Errorf("server cleanup barrier: %w", err)
 	}
+	stats, err := waitForSubscriptionStats(ctx, probe.client, func(stats stressSubscriptionStats) bool {
+		return stats.ActivePairs == 0 && stats.InboundSubscriptions == counts.inboundBaseline.Load()
+	}, counts)
+	if err != nil {
+		return fmt.Errorf("subscription cleanup barrier: %w", err)
+	}
+	counts.activePairsCleanup.Store(stats.ActivePairs)
+	counts.inboundCleanup.Store(stats.InboundSubscriptions)
+	counts.staleOwnerDrops.Store(stats.StaleOwnerDrops)
 	if err := disconnectStressConnection(ctx, probe, counts); err != nil {
 		return fmt.Errorf("disconnect cleanup probe: %w", err)
 	}
@@ -867,6 +1170,23 @@ func cleanupStressConnections(ctx context.Context, connections []*stressConnecti
 		return fmt.Errorf("live clients after cleanup probe = %d, want 0", live)
 	}
 	return nil
+}
+
+func waitForGoroutineBudget(ctx context.Context, baseline, maximumDelta int64, counts *stressRuntimeCounts) error {
+	for {
+		current := int64(runtime.NumGoroutine())
+		counts.goroutinesCleanup.Store(current)
+		if current-baseline <= maximumDelta {
+			return nil
+		}
+		timer := time.NewTimer(20 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("goroutine delta = %d, maximum %d: %w", current-baseline, maximumDelta, ctx.Err())
+		case <-timer.C:
+		}
+	}
 }
 
 func disconnectStressConnection(ctx context.Context, connection *stressConnection, counts *stressRuntimeCounts) error {
@@ -959,12 +1279,11 @@ func validateStressReportFile(t *testing.T, path, runID string, config stressCon
 }
 
 func readStressReport(path string) (*stressReport, error) {
-	file, err := os.Open(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
-	decoder := json.NewDecoder(file)
+	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var report stressReport
 	if err := decoder.Decode(&report); err != nil {
@@ -977,7 +1296,51 @@ func readStressReport(path string) (*stressReport, error) {
 		}
 		return nil, fmt.Errorf("decode trailing report data: %w", err)
 	}
+	if err := requireJSONStructFields(data, reflect.TypeOf(report), "report"); err != nil {
+		return nil, err
+	}
 	return &report, nil
+}
+
+func requireJSONStructFields(data []byte, typ reflect.Type, path string) error {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(data, &object); err != nil {
+		return err
+	}
+	for index := 0; index < typ.NumField(); index++ {
+		field := typ.Field(index)
+		if !field.IsExported() {
+			continue
+		}
+		tag := strings.Split(field.Tag.Get("json"), ",")
+		name := tag[0]
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = field.Name
+		}
+		optional := false
+		for _, option := range tag[1:] {
+			optional = optional || option == "omitempty"
+		}
+		value, exists := object[name]
+		if !exists {
+			if optional {
+				continue
+			}
+			return fmt.Errorf("%s.%s is required", path, name)
+		}
+		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return fmt.Errorf("%s.%s must not be null", path, name)
+		}
+		if field.Type.Kind() == reflect.Struct && field.Type.PkgPath() == typ.PkgPath() {
+			if err := requireJSONStructFields(value, field.Type, path+"."+name); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func validateStressReport(report *stressReport, runID string, config stressConfig, environment stressEnvironment) error {
@@ -1005,7 +1368,11 @@ func validateStressReport(report *stressReport, runID string, config stressConfi
 	if report.Counts.ServerStatsResponses < 3 {
 		return fmt.Errorf("server stats responses = %d, want at least 3", report.Counts.ServerStatsResponses)
 	}
-	wantResponses := int64(config.Clients+config.Reconnects*5) + report.Counts.ServerStatsResponses
+	if report.Counts.SubscriptionStatsResponses < 6 {
+		return fmt.Errorf("subscription stats responses = %d, want at least 6", report.Counts.SubscriptionStatsResponses)
+	}
+	wantResponses := int64(config.Clients+config.Reconnects*6+config.BindRetries) +
+		report.Counts.ServerStatsResponses + report.Counts.SubscriptionStatsResponses
 	wantCounts := stressCounts{
 		ConfiguredClients:           int64(config.Clients),
 		InitialClientsConnected:     int64(config.Clients),
@@ -1017,9 +1384,26 @@ func validateStressReport(report *stressReport, runID string, config stressConfi
 		OldDisconnectsObserved:      int64(config.Reconnects),
 		ServerStatsResponses:        report.Counts.ServerStatsResponses,
 		ServerStatsMilestones:       3,
+		SubscriptionStatsResponses:  report.Counts.SubscriptionStatsResponses,
+		SubscriptionStatsMilestones: 5,
 		CleanupDisconnectsValidated: int64(config.Clients + 1),
 		LiveClientsAfterReconnects:  int64(config.Clients),
 		LiveClientsAfterCleanup:     0,
+		BindRetriesExpected:         int64(config.BindRetries),
+		BindRetriesAttempted:        int64(config.BindRetries),
+		BindRetriesSucceeded:        int64(config.BindRetries),
+		DuplicateDeliveries:         0,
+		ActivePairsStable:           int64(config.Reconnects),
+		ActivePairsAfterCleanup:     0,
+		DuplicateBindReuse:          int64(config.BindRetries),
+		StaleOwnerDrops:             0,
+		PushDeliveries:              int64(config.Reconnects),
+		InboundSubscriptionsBase:    report.Counts.InboundSubscriptionsBase,
+		InboundSubscriptionsStable:  report.Counts.InboundSubscriptionsStable,
+		InboundSubscriptionsCleanup: report.Counts.InboundSubscriptionsCleanup,
+		GoroutinesBaseline:          report.Counts.GoroutinesBaseline,
+		GoroutinesAfterCleanup:      report.Counts.GoroutinesAfterCleanup,
+		GoroutineDelta:              report.Counts.GoroutineDelta,
 	}
 	if report.Counts.ConfiguredClients != wantCounts.ConfiguredClients ||
 		report.Counts.InitialClientsConnected != wantCounts.InitialClientsConnected ||
@@ -1031,19 +1415,56 @@ func validateStressReport(report *stressReport, runID string, config stressConfi
 		report.Counts.OldDisconnectsObserved != wantCounts.OldDisconnectsObserved ||
 		report.Counts.ServerStatsResponses != wantCounts.ServerStatsResponses ||
 		report.Counts.ServerStatsMilestones != wantCounts.ServerStatsMilestones ||
+		report.Counts.SubscriptionStatsResponses != wantCounts.SubscriptionStatsResponses ||
+		report.Counts.SubscriptionStatsMilestones != wantCounts.SubscriptionStatsMilestones ||
 		report.Counts.CleanupDisconnectsValidated != wantCounts.CleanupDisconnectsValidated ||
 		report.Counts.LiveClientsAfterReconnects != wantCounts.LiveClientsAfterReconnects ||
-		report.Counts.LiveClientsAfterCleanup != wantCounts.LiveClientsAfterCleanup {
+		report.Counts.LiveClientsAfterCleanup != wantCounts.LiveClientsAfterCleanup ||
+		report.Counts.BindRetriesExpected != wantCounts.BindRetriesExpected ||
+		report.Counts.BindRetriesAttempted != wantCounts.BindRetriesAttempted ||
+		report.Counts.BindRetriesSucceeded != wantCounts.BindRetriesSucceeded ||
+		report.Counts.DuplicateDeliveries != wantCounts.DuplicateDeliveries ||
+		report.Counts.ActivePairsStable != wantCounts.ActivePairsStable ||
+		report.Counts.ActivePairsAfterCleanup != wantCounts.ActivePairsAfterCleanup ||
+		report.Counts.DuplicateBindReuse != wantCounts.DuplicateBindReuse ||
+		report.Counts.StaleOwnerDrops != wantCounts.StaleOwnerDrops ||
+		report.Counts.PushDeliveries != wantCounts.PushDeliveries {
 		return fmt.Errorf("counts = %+v, want %+v (excluding peak)", report.Counts, wantCounts)
+	}
+	if report.Counts.InboundSubscriptionsBase <= 0 ||
+		report.Counts.InboundSubscriptionsStable-report.Counts.InboundSubscriptionsBase != int64(config.Reconnects*2) ||
+		report.Counts.InboundSubscriptionsCleanup != report.Counts.InboundSubscriptionsBase {
+		return fmt.Errorf(
+			"inbound subscriptions baseline/stable/cleanup = %d/%d/%d, want baseline/+%d/baseline",
+			report.Counts.InboundSubscriptionsBase,
+			report.Counts.InboundSubscriptionsStable,
+			report.Counts.InboundSubscriptionsCleanup,
+			config.Reconnects*2,
+		)
+	}
+	if report.Counts.GoroutinesBaseline <= 0 || report.Counts.GoroutinesAfterCleanup <= 0 ||
+		report.Counts.GoroutineDelta != report.Counts.GoroutinesAfterCleanup-report.Counts.GoroutinesBaseline ||
+		report.Counts.GoroutineDelta > int64(config.GoroutineDeltaMax) {
+		return fmt.Errorf("invalid goroutine cleanup evidence: baseline=%d after=%d delta=%d max=%d",
+			report.Counts.GoroutinesBaseline,
+			report.Counts.GoroutinesAfterCleanup,
+			report.Counts.GoroutineDelta,
+			config.GoroutineDeltaMax,
+		)
 	}
 	maximumPeak := int64(config.Clients + config.ReconnectConcurrency)
 	if report.Counts.PeakClientsConnected < int64(config.Clients) || report.Counts.PeakClientsConnected > maximumPeak {
 		return fmt.Errorf("peak clients = %d, want between %d and %d", report.Counts.PeakClientsConnected, config.Clients, maximumPeak)
 	}
 	if report.Durations.ConnectNanoseconds <= 0 || report.Durations.RequestNanoseconds <= 0 ||
-		report.Durations.ReconnectNanoseconds <= 0 || report.Durations.CleanupNanoseconds <= 0 ||
+		report.Durations.ReconnectNanoseconds <= 0 || report.Durations.BindRetryNanoseconds <= 0 ||
+		report.Durations.CleanupNanoseconds <= 0 ||
 		report.Durations.TotalNanoseconds <= 0 {
 		return fmt.Errorf("report contains non-positive duration: %+v", report.Durations)
+	}
+	cleanupMax, err := time.ParseDuration(config.CleanupMax)
+	if err != nil || report.Durations.CleanupNanoseconds > cleanupMax.Nanoseconds() {
+		return fmt.Errorf("cleanup duration %s exceeds maximum %q", time.Duration(report.Durations.CleanupNanoseconds), config.CleanupMax)
 	}
 	return nil
 }
@@ -1055,9 +1476,12 @@ func TestStressReportValidation(t *testing.T) {
 		RequestConcurrency:   2,
 		Reconnects:           3,
 		ReconnectConcurrency: 2,
+		BindRetries:          7,
 		RequestTimeout:       "1s",
 		InternalTimeout:      "1m",
 		CleanupTimeout:       "10s",
+		CleanupMax:           "10s",
+		GoroutineDeltaMax:    5,
 		NATSMessagesBuffer:   4096,
 	}
 	environment := stressEnvironment{
@@ -1084,18 +1508,36 @@ func TestStressReportValidation(t *testing.T) {
 			InitialRequestsValidated:    10,
 			ReconnectsCompleted:         3,
 			ReconnectResponsesValidated: 15,
-			ResponsesValidated:          28,
+			ResponsesValidated:          44,
 			OldDisconnectsObserved:      3,
 			ServerStatsResponses:        3,
 			ServerStatsMilestones:       3,
+			SubscriptionStatsResponses:  6,
+			SubscriptionStatsMilestones: 5,
 			CleanupDisconnectsValidated: 11,
 			LiveClientsAfterReconnects:  10,
 			LiveClientsAfterCleanup:     0,
+			BindRetriesExpected:         7,
+			BindRetriesAttempted:        7,
+			BindRetriesSucceeded:        7,
+			DuplicateDeliveries:         0,
+			ActivePairsStable:           3,
+			ActivePairsAfterCleanup:     0,
+			DuplicateBindReuse:          7,
+			StaleOwnerDrops:             0,
+			PushDeliveries:              3,
+			InboundSubscriptionsBase:    5,
+			InboundSubscriptionsStable:  11,
+			InboundSubscriptionsCleanup: 5,
+			GoroutinesBaseline:          20,
+			GoroutinesAfterCleanup:      22,
+			GoroutineDelta:              2,
 		},
 		Durations: stressDurations{
 			ConnectNanoseconds:   1,
 			RequestNanoseconds:   1,
 			ReconnectNanoseconds: 1,
+			BindRetryNanoseconds: 1,
 			CleanupNanoseconds:   1,
 			TotalNanoseconds:     4,
 		},
@@ -1105,11 +1547,20 @@ func TestStressReportValidation(t *testing.T) {
 	}
 
 	tests := map[string]func(*stressReport){
-		"wrong run":       func(report *stressReport) { report.RunID = "stale" },
-		"failed":          func(report *stressReport) { report.Status = "failed" },
-		"wrong config":    func(report *stressReport) { report.Config.Clients++ },
-		"wrong count":     func(report *stressReport) { report.Counts.ResponsesValidated-- },
-		"impossible peak": func(report *stressReport) { report.Counts.PeakClientsConnected = 100 },
+		"wrong run":        func(report *stressReport) { report.RunID = "stale" },
+		"failed":           func(report *stressReport) { report.Status = "failed" },
+		"wrong config":     func(report *stressReport) { report.Config.Clients++ },
+		"wrong count":      func(report *stressReport) { report.Counts.ResponsesValidated-- },
+		"impossible peak":  func(report *stressReport) { report.Counts.PeakClientsConnected = 100 },
+		"old schema":       func(report *stressReport) { report.SchemaVersion-- },
+		"duplicate push":   func(report *stressReport) { report.Counts.DuplicateDeliveries++ },
+		"stale owner drop": func(report *stressReport) { report.Counts.StaleOwnerDrops++ },
+		"leaked pair":      func(report *stressReport) { report.Counts.ActivePairsAfterCleanup++ },
+		"leaked inbound":   func(report *stressReport) { report.Counts.InboundSubscriptionsCleanup++ },
+		"goroutine growth": func(report *stressReport) {
+			report.Counts.GoroutinesAfterCleanup += 10
+			report.Counts.GoroutineDelta += 10
+		},
 		"recorded error": func(report *stressReport) {
 			report.ErrorCount = 1
 			report.Errors = []string{"failed"}
@@ -1126,6 +1577,59 @@ func TestStressReportValidation(t *testing.T) {
 	}
 }
 
+func TestReadStressReportRequiresTypedZeroValuedSchemaFields(t *testing.T) {
+	encoded, err := json.Marshal(stressReport{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name        string
+		section     string
+		field       string
+		replace     bool
+		replacement any
+		want        string
+	}{
+		{name: "top-level missing", field: "error_count", want: "report.error_count is required"},
+		{name: "config missing", section: "config", field: "goroutine_delta_max", want: "report.config.goroutine_delta_max is required"},
+		{name: "environment missing", section: "environment", field: "soft_file_limit_unlimited", want: "report.environment.soft_file_limit_unlimited is required"},
+		{name: "count missing", section: "counts", field: "duplicate_deliveries", want: "report.counts.duplicate_deliveries is required"},
+		{name: "count null", section: "counts", field: "duplicate_deliveries", replace: true, replacement: nil, want: "report.counts.duplicate_deliveries must not be null"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var document map[string]any
+			if err := json.Unmarshal(encoded, &document); err != nil {
+				t.Fatal(err)
+			}
+			section := document
+			if test.section != "" {
+				var ok bool
+				section, ok = document[test.section].(map[string]any)
+				if !ok {
+					t.Fatalf("encoded report has no %s object", test.section)
+				}
+			}
+			if test.replace {
+				section[test.field] = test.replacement
+			} else {
+				delete(section, test.field)
+			}
+			candidate, err := json.Marshal(document)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(t.TempDir(), "invalid-field.json")
+			if err := os.WriteFile(path, candidate, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := readStressReport(path); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("schema field error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestStressConfigValidation(t *testing.T) {
 	config := stressConfig{
 		Clients:              10000,
@@ -1133,9 +1637,12 @@ func TestStressConfigValidation(t *testing.T) {
 		RequestConcurrency:   256,
 		Reconnects:           1000,
 		ReconnectConcurrency: 64,
+		BindRetries:          1000,
 		RequestTimeout:       "10s",
 		InternalTimeout:      "12m",
 		CleanupTimeout:       "30s",
+		CleanupMax:           "30s",
+		GoroutineDeltaMax:    5,
 		NATSMessagesBuffer:   4096,
 	}
 	environment := stressEnvironment{

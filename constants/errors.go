@@ -27,6 +27,8 @@ import (
 // Errors that can occur during message handling.
 var (
 	ErrBindingNotFound                    = errors.New("binding for this user was not found in etcd")
+	ErrAppAlreadyStarted                  = errors.New("app has already been started")
+	ErrAppConfigurationLocked             = errors.New("app configuration is locked after startup begins")
 	ErrBrokenPipe                         = errors.New("broken low-level pipe")
 	ErrBufferExceed                       = errors.New("session send buffer exceed")
 	ErrChangeDictionaryWhileRunning       = errors.New("you shouldn't change the dictionary while the app is already running")
@@ -35,6 +37,7 @@ var (
 	ErrCloseClosedSession                 = errors.New("close closed session")
 	ErrClosedGroup                        = errors.New("group closed")
 	ErrEmptyUID                           = errors.New("empty uid")
+	ErrNilUserMessage                     = errors.New("nil user message")
 	ErrEtcdGrantLeaseTimeout              = errors.New("timed out waiting for etcd lease grant")
 	ErrEtcdLeaseNotFound                  = errors.New("etcd lease not found in group")
 	ErrFrontSessionCantPushToFront        = errors.New("frontend session can't push to front")
@@ -88,6 +91,7 @@ var (
 	ErrRPCPublishRequiresTargetResolution = errors.New("RPC publish requires per-target resolution while owner fencing is active")
 	ErrRPCJobAlreadyRegistered            = errors.New("rpc job was already registered")
 	ErrWorkerStopped                      = errors.New("worker is stopped")
+	ErrUserMessageUIDMismatch             = errors.New("user message uid does not match subject uid")
 	ErrRPCLocal                           = errors.New("RPC must be to a different server type")
 	ErrRPCServerNotInitialized            = errors.New("RPC server is not running")
 	ErrReplyShouldBeNotNull               = errors.New("reply must not be null")

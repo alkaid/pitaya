@@ -37,5 +37,8 @@ cd examples/testing
 docker compose --project-name pitaya-example down --volumes
 ```
 
-The gRPC example is retained for compile and compatibility work. It is not a
-supported business-traffic deployment example; see {doc}`security`.
+The gRPC example is retained as source for compile and compatibility work. A
+full Cluster `Builder` rejects that transport because it provides only the
+point-to-point capability, not fanout, user delivery, or broker subscriptions.
+It is not a supported business-traffic deployment example; see
+{doc}`security`.

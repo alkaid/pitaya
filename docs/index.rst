@@ -13,9 +13,12 @@ Alkaid Pitaya documentation
    overview
    features
    builder
+   app-lifecycle
+   readiness
    handshake-validators
    communication
    actor-keyed-executor
+   stateful-owner-operations
    security
    testing
    migration-v2-ak

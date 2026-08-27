@@ -3,6 +3,8 @@ package main
 import (
 	"crypto/tls"
 	"errors"
+	"io"
+	stdlog "log"
 	"reflect"
 	"sync"
 	"testing"
@@ -73,5 +75,33 @@ func TestTryConnectTreatsAddressWithoutSchemeAsPlainTCP(t *testing.T) {
 	wantAttempts := []string{"tcp://127.0.0.1:3250"}
 	if got := recorder.recordedAttempts(); !reflect.DeepEqual(got, wantAttempts) {
 		t.Fatalf("connection attempts = %v, want %v", got, wantAttempts)
+	}
+}
+
+func TestProtoClientPreparationDefersServerInfoLoadToConnectTo(t *testing.T) {
+	previousClient := pClient
+	previousDocs := docsString
+	previousPushInfo := pushInfo
+	docsString = "sys.docs"
+	pushInfo = map[string]string{"fixture.push": "fixture.Output"}
+	t.Cleanup(func() {
+		pClient = previousClient
+		docsString = previousDocs
+		pushInfo = previousPushInfo
+	})
+
+	logger := stdlog.New(io.Discard, "", 0)
+	if err := protoClient(logger, "not-a-network-address"); err != nil {
+		t.Fatalf("protoClient preparation returned error: %v", err)
+	}
+	prepared, ok := pClient.(*client.ProtoClient)
+	if !ok {
+		t.Fatalf("prepared client type = %T, want *client.ProtoClient", pClient)
+	}
+	if prepared.ConnectedStatus() {
+		t.Fatal("protoClient preparation unexpectedly connected to the server")
+	}
+	if prepared.ExportInformation() != nil {
+		t.Fatal("server information was loaded before ConnectTo")
 	}
 }

@@ -59,7 +59,9 @@ type Builder struct {
 	provenance         *builderProvenance
 }
 
-// PitayaBuilder Builder interface
+// PitayaBuilder is the legacy builder interface.
+//
+// Deprecated: use *Builder and BuildApp to retain the concrete App type.
 type PitayaBuilder interface {
 	// AddPostBuildHook adds a post-build hook to the builder, a function receiving a Pitaya instance as parameter.
 	AddPostBuildHook(hook func(app Pitaya))
@@ -241,8 +243,13 @@ func (builder *Builder) AddPostBuildHook(hook func(app Pitaya)) {
 	builder.postBuildHooks = append(builder.postBuildHooks, hook)
 }
 
-// Build returns a valid App instance
+// Build returns a valid App through the legacy aggregate interface.
 func (builder *Builder) Build() Pitaya {
+	return builder.BuildApp()
+}
+
+// BuildApp returns a concrete App instance.
+func (builder *Builder) BuildApp() *App {
 	builder.beginBuild()
 	resolved := builder.resolveDependencies()
 	if err := resolved.validateGraph(); err != nil {
@@ -261,6 +268,9 @@ func (builder *Builder) Build() Pitaya {
 	} else if resolved.serverMode == Cluster {
 		if resolved.serviceDiscovery == nil || resolved.rpcClient == nil || resolved.rpcServer == nil {
 			panic("Cluster mode must have RPC and service discovery instances")
+		}
+		if err := resolved.validateTransportCapabilities(); err != nil {
+			panic(fmt.Errorf("invalid RPC transport capabilities: %w", err))
 		}
 	}
 	trustedProxies, err := netutil.ParseTrustedProxies(resolved.config.Acceptor.TrustedProxyCIDRs)

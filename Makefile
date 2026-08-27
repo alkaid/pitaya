@@ -1,11 +1,13 @@
 ifeq ($(OS), Windows_NT)
 	BIN := pitaya-cli.exe
+	OWNERCTL_BIN := pitaya-ownerctl.exe
 	XK6_BIN := k6.exe
 	MKFOLDER := if not exist "build" mkdir build
 	GREP_CMD := findstr /V
 	GOWORK_OFF := set "GOWORK=off" &&
 else
 	BIN := pitaya-cli
+	OWNERCTL_BIN := pitaya-ownerctl
 	XK6_BIN := k6
 	MKFOLDER := mkdir -p build
 	GREP_CMD := grep -v
@@ -135,6 +137,11 @@ build-cli:
 	@$(MKFOLDER)
 	@go build -o build/$(BIN) github.com/alkaid/pitaya/pitaya-cli/v2
 	@echo "build pitaya-cli at ./build/$(BIN)"
+
+build-ownerctl:
+	@$(MKFOLDER)
+	@go build -o build/$(OWNERCTL_BIN) ./cmd/pitaya-ownerctl
+	@echo "build pitaya-ownerctl at ./build/$(OWNERCTL_BIN)"
 
 build-k6-extension:
 	@$(MKFOLDER)
@@ -322,7 +329,7 @@ test-coverage-func coverage-func: test-coverage
 	@echo "\033[1;34m=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-\033[0m"
 	@go tool cover -func="$(COVERAGE_PROFILE)" | grep -Ev "100[.]0%"
 
-.PHONY: compile-core compile-root compile-cli compile-xk6 compile compile-platform test-unit test-race-root test-race-xk6 test-race test-integration vet verify-root module-verify tools-verify logrus-verify test-consumer test-distribution docs docs-lint verify-fast verify scan-deps test-e2e-nats e2e-test-nats e2e-test benchmark-test-nats benchmark-regression benchmark-gate-nats test-stress-nats benchmark-test-grpc test-fuzz-seeds test-fuzz-nightly test-fuzz-one test coverage coverage-stamped coverage-gate coverage-baseline init-toolchain check-protoc setup init-submodules setup-ci protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
+.PHONY: compile-core compile-root compile-cli compile-xk6 compile compile-platform test-unit test-race-root test-race-xk6 test-race test-integration vet verify-root module-verify tools-verify logrus-verify test-consumer test-distribution docs docs-lint verify-fast verify scan-deps test-e2e-nats e2e-test-nats e2e-test benchmark-test-nats benchmark-regression benchmark-gate-nats test-stress-nats benchmark-test-grpc test-fuzz-seeds test-fuzz-nightly test-fuzz-one test coverage coverage-stamped coverage-gate coverage-baseline init-toolchain check-protoc setup init-submodules setup-ci build-cli build-ownerctl protos-compile-demo protos-compile mocks agent-mock session-mock networkentity-mock pitaya-mock metrics-mock serializer-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 
 mocks: agent-mock session-mock networkentity-mock pitaya-mock serializer-mock metrics-mock acceptor-mock message-mock protos-client-mock cluster-mock discovery-mock worker-mock interfaces-mock codec-mock
 

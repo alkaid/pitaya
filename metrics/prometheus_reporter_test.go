@@ -279,6 +279,31 @@ func TestPrometheusReporterRegistersAndGathersStatefulPoolMetrics(t *testing.T) 
 	}
 }
 
+func TestPrometheusReporterRegistersAppReadiness(t *testing.T) {
+	reporter, registry, err := NewPrometheusReporter(
+		"frontend",
+		emptyMetricsConfig(),
+		models.CustomMetricsSpec{},
+	)
+	require.NoError(t, err)
+	require.NoError(t, reporter.ReportGauge(
+		AppReadiness,
+		map[string]string{"dependency": "lifecycle"},
+		1,
+	))
+
+	families, err := registry.Gather()
+	require.NoError(t, err)
+	for _, family := range families {
+		if family.GetName() == "pitaya_app_readiness" {
+			require.Len(t, family.Metric, 1)
+			require.Equal(t, float64(1), family.Metric[0].GetGauge().GetValue())
+			return
+		}
+	}
+	t.Fatal("pitaya_app_readiness was not registered")
+}
+
 func TestPrometheusReporterReturnsDuplicateRegistrationError(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	cfg := config.MetricsConfig{

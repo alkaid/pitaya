@@ -3532,6 +3532,15 @@ func TestEtcdSDRenewalDoesNotWaitForCallbackBackpressure(t *testing.T) {
 }
 
 func TestEtcdBeforeShutdown(t *testing.T) {
+	originalAfter := after
+	t.Cleanup(func() { after = originalAfter })
+	timerRequested := make(chan time.Duration, 1)
+	timerFired := make(chan time.Time)
+	after = func(delay time.Duration) <-chan time.Time {
+		timerRequested <- delay
+		return timerFired
+	}
+
 	for _, table := range etcdSDTables {
 		t.Run(table.server.ID, func(t *testing.T) {
 			config := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
@@ -3541,10 +3550,23 @@ func TestEtcdBeforeShutdown(t *testing.T) {
 			e.BeforeShutdown()
 			require.NoError(t, e.Init())
 			assert.True(t, e.Running())
-			e.BeforeShutdown()
+			leaseID := clientv3.LeaseID(e.lease.id.Load())
+			beforeShutdownDone := make(chan struct{})
+			go func() {
+				e.BeforeShutdown()
+				close(beforeShutdownDone)
+			}()
+			assert.Equal(t, config.Shutdown.Delay, <-timerRequested)
+			select {
+			case <-beforeShutdownDone:
+				t.Fatal("BeforeShutdown returned before its propagation delay elapsed")
+			default:
+			}
+			_, err := cli.Revoke(context.TODO(), leaseID)
+			assert.Error(t, err, "registration lease must be revoked before the propagation delay")
+			timerFired <- time.Now()
+			<-beforeShutdownDone
 			assert.True(t, e.Running())
-			_, err := cli.Revoke(context.TODO(), clientv3.LeaseID(e.lease.id.Load()))
-			assert.Error(t, err)
 		})
 	}
 }

@@ -28,7 +28,6 @@ import (
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/util"
-	nats "github.com/nats-io/nats.go"
 	"go.uber.org/zap"
 )
 
@@ -48,7 +47,6 @@ type sessionLifecycleOwner struct {
 	registeredUID    string
 	lastTime         int64
 	OnCloseCallbacks []func()
-	Subscriptions    []*nats.Subscription
 }
 
 // GetOnCloseCallbacks ...
@@ -58,31 +56,11 @@ func (s *sessionImpl) GetOnCloseCallbacks() []func() {
 	return append([]func(){}, s.OnCloseCallbacks...)
 }
 
-// GetSubscriptions ...
-func (s *sessionImpl) GetSubscriptions() []*nats.Subscription {
-	s.lifecycleMutex.RLock()
-	defer s.lifecycleMutex.RUnlock()
-	return append([]*nats.Subscription(nil), s.Subscriptions...)
-}
-
 // SetOnCloseCallbacks ...
 func (s *sessionImpl) SetOnCloseCallbacks(callbacks []func()) {
 	s.lifecycleMutex.Lock()
 	defer s.lifecycleMutex.Unlock()
 	s.OnCloseCallbacks = append([]func(){}, callbacks...)
-}
-
-// SetSubscriptions ...
-func (s *sessionImpl) SetSubscriptions(subscriptions []*nats.Subscription) {
-	s.lifecycleMutex.Lock()
-	if !s.closed {
-		s.Subscriptions = append([]*nats.Subscription(nil), subscriptions...)
-		s.lifecycleMutex.Unlock()
-		return
-	}
-	uid := s.identitySnapshot().uid
-	s.lifecycleMutex.Unlock()
-	s.drainSubscriptions(uid, subscriptions)
 }
 
 // UID returns uid that bind to current session
@@ -113,13 +91,12 @@ func (s *sessionImpl) Close(callback map[string]string, reason ...CloseReason) {
 }
 
 func (s *sessionImpl) closeOnce(callback map[string]string, reason ...CloseReason) error {
-	uid, subscriptions, ok := s.beginClose()
+	uid, ok := s.beginClose()
 	if !ok {
 		return nil
 	}
 	logger.Zap.Debug("session close", zap.Int64("id", s.ID()), zap.String("uid", uid))
 	s.pool.removeSessionLocal(uid, s.id, s)
-	s.drainSubscriptions(uid, subscriptions)
 	return s.entity.Close(callback, reason...)
 }
 
@@ -189,35 +166,19 @@ func (s *sessionImpl) isClosed() bool {
 	return s.closed
 }
 
-func (s *sessionImpl) beginClose() (string, []*nats.Subscription, bool) {
+func (s *sessionImpl) beginClose() (string, bool) {
 	s.lifecycleMutex.Lock()
 	defer s.lifecycleMutex.Unlock()
 	if s.closed {
-		return "", nil, false
+		return "", false
 	}
 	s.closed = true
 	identity := s.identitySnapshot()
 	identity.online = false
 	s.publishIdentityLocked(identity)
-	subscriptions := append([]*nats.Subscription(nil), s.Subscriptions...)
-	s.Subscriptions = nil
 	registeredUID := s.registeredUID
 	s.registeredUID = ""
-	return registeredUID, subscriptions, true
-}
-
-func (s *sessionImpl) drainSubscriptions(uid string, subscriptions []*nats.Subscription) {
-	if !s.GetIsFrontend() {
-		return
-	}
-	// TODO: this logic should be moved to nats rpc server
-	for _, sub := range subscriptions {
-		if err := sub.Drain(); err != nil {
-			logger.Zap.Error("error Drain to user's messages channel: , this can cause performance and leak issues", zap.Error(err))
-		} else {
-			logger.Zap.Debug("successfully Drain to user's messages channel", zap.String("uid", uid), zap.String("subject", sub.Subject))
-		}
-	}
+	return registeredUID, true
 }
 
 func (s *sessionImpl) setOnline(online bool) {

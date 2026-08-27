@@ -733,9 +733,11 @@ func (mr *MockPitayaMockRecorder) OnSessionClose(f any) *gomock.Call {
 }
 
 // OnStarted mocks base method.
-func (m *MockPitaya) OnStarted(fun func()) {
+func (m *MockPitaya) OnStarted(fun func()) error {
 	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "OnStarted", fun)
+	ret := m.ctrl.Call(m, "OnStarted", fun)
+	ret0, _ := ret[0].(error)
+	return ret0
 }
 
 // OnStarted indicates an expected call of OnStarted.
@@ -874,13 +876,15 @@ func (mr *MockPitayaMockRecorder) RangeUsers(f any) *gomock.Call {
 }
 
 // Register mocks base method.
-func (m *MockPitaya) Register(c component.Component, options ...component.Option) {
+func (m *MockPitaya) Register(c component.Component, options ...component.Option) error {
 	m.ctrl.T.Helper()
 	varargs := []any{c}
 	for _, a := range options {
 		varargs = append(varargs, a)
 	}
-	m.ctrl.Call(m, "Register", varargs...)
+	ret := m.ctrl.Call(m, "Register", varargs...)
+	ret0, _ := ret[0].(error)
+	return ret0
 }
 
 // Register indicates an expected call of Register.
@@ -961,13 +965,15 @@ func (mr *MockPitayaMockRecorder) RegisterRPCJob(rpcJob any) *gomock.Call {
 }
 
 // RegisterRemote mocks base method.
-func (m *MockPitaya) RegisterRemote(c component.Component, options ...component.Option) {
+func (m *MockPitaya) RegisterRemote(c component.Component, options ...component.Option) error {
 	m.ctrl.T.Helper()
 	varargs := []any{c}
 	for _, a := range options {
 		varargs = append(varargs, a)
 	}
-	m.ctrl.Call(m, "RegisterRemote", varargs...)
+	ret := m.ctrl.Call(m, "RegisterRemote", varargs...)
+	ret0, _ := ret[0].(error)
+	return ret0
 }
 
 // RegisterRemote indicates an expected call of RegisterRemote.
@@ -992,13 +998,15 @@ func (mr *MockPitayaMockRecorder) RegisterRemoteInterceptor(serviceName, interce
 }
 
 // RegisterSubscribe mocks base method.
-func (m *MockPitaya) RegisterSubscribe(c component.Component, options ...component.Option) {
+func (m *MockPitaya) RegisterSubscribe(c component.Component, options ...component.Option) error {
 	m.ctrl.T.Helper()
 	varargs := []any{c}
 	for _, a := range options {
 		varargs = append(varargs, a)
 	}
-	m.ctrl.Call(m, "RegisterSubscribe", varargs...)
+	ret := m.ctrl.Call(m, "RegisterSubscribe", varargs...)
+	ret0, _ := ret[0].(error)
+	return ret0
 }
 
 // RegisterSubscribe indicates an expected call of RegisterSubscribe.

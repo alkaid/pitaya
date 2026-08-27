@@ -23,10 +23,13 @@ package client
 import (
 	"bytes"
 	"compress/gzip"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -77,6 +80,18 @@ func testDescriptorProto() *descriptorpb.FileDescriptorProto {
 					},
 				},
 			},
+			{
+				Name: proto.String("CountOutput"),
+				Field: []*descriptorpb.FieldDescriptorProto{
+					{
+						Name:     proto.String("count"),
+						JsonName: proto.String("count"),
+						Number:   proto.Int32(1),
+						Label:    descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+						Type:     descriptorpb.FieldDescriptorProto_TYPE_INT32.Enum(),
+					},
+				},
+			},
 		},
 	}
 }
@@ -107,6 +122,173 @@ func decodeWireMessage(t *testing.T, frame []byte) *message.Message {
 	msg, err := message.Decode(packets[0].Data)
 	require.NoError(t, err)
 	return msg
+}
+
+func writeProtoServerMessage(conn net.Conn, msg *message.Message) error {
+	encoded, err := message.NewMessagesEncoder(false).Encode(msg)
+	if err != nil {
+		return err
+	}
+	frame, err := codec.NewPomeloPacketEncoder().Encode(packet.Data, encoded)
+	if err != nil {
+		return err
+	}
+	_, err = conn.Write(frame)
+	return err
+}
+
+func readProtoServerMessage(conn net.Conn) (*message.Message, error) {
+	p, err := readPacket(conn)
+	if err != nil {
+		return nil, err
+	}
+	if p.Type != packet.Data {
+		return nil, fmt.Errorf("packet type = %v, want data", p.Type)
+	}
+	return message.Decode(p.Data)
+}
+
+func protoDocsFixture() string {
+	return `{"handlers":{"fixture.echo":{"input":{"*fixture.Input":{}},"output":[{"*fixture.Output":{}}]}},"remotes":{}}`
+}
+
+func serveProtoBootstrap(conn net.Conn, malformedDocs bool) error {
+	if err := serveClientHandshake(conn); err != nil {
+		return err
+	}
+	docsRequest, err := readProtoServerMessage(conn)
+	if err != nil {
+		return fmt.Errorf("read docs request: %w", err)
+	}
+	if docsRequest.Route != "sys.docs" {
+		return fmt.Errorf("docs route = %q", docsRequest.Route)
+	}
+	docsData := []byte{0xff}
+	if !malformedDocs {
+		docsData, err = proto.Marshal(&protos.Doc{Doc: protoDocsFixture()})
+		if err != nil {
+			return err
+		}
+	}
+	if err := writeProtoServerMessage(conn, &message.Message{
+		Type: message.Response,
+		ID:   docsRequest.ID,
+		Data: docsData,
+	}); err != nil {
+		return fmt.Errorf("write docs response: %w", err)
+	}
+	if malformedDocs {
+		return nil
+	}
+
+	descriptorRequest, err := readProtoServerMessage(conn)
+	if err != nil {
+		return fmt.Errorf("read descriptor request: %w", err)
+	}
+	if descriptorRequest.Route != "sys.descriptors" {
+		return fmt.Errorf("descriptor route = %q", descriptorRequest.Route)
+	}
+	descriptorData, err := proto.Marshal(&protos.ProtoDescriptors{
+		Desc: []*descriptorpb.FileDescriptorProto{testDescriptorProto()},
+	})
+	if err != nil {
+		return err
+	}
+	if err := writeProtoServerMessage(conn, &message.Message{
+		Type: message.Response,
+		ID:   descriptorRequest.ID,
+		Data: descriptorData,
+	}); err != nil {
+		return fmt.Errorf("write descriptor response: %w", err)
+	}
+	_, err = readPacket(conn)
+	if err == nil || errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		return nil
+	}
+	return err
+}
+
+type protoServerStep struct {
+	bootstrap    bool
+	malformed    bool
+	ready        chan struct{}
+	release      <-chan struct{}
+	remoteClose  bool
+	pushAfterAck bool
+}
+
+func startProtoServerSequence(
+	listener net.Listener,
+	steps []protoServerStep,
+	accepts *atomic.Int64,
+) <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		for _, step := range steps {
+			conn, err := listener.Accept()
+			if err != nil {
+				done <- err
+				return
+			}
+			accepts.Add(1)
+			if step.bootstrap {
+				err = serveProtoBootstrap(conn, step.malformed)
+				_ = conn.Close()
+				if err != nil {
+					done <- err
+					return
+				}
+				continue
+			}
+			if err = serveClientHandshake(conn); err != nil {
+				_ = conn.Close()
+				done <- err
+				return
+			}
+			if step.ready != nil {
+				close(step.ready)
+			}
+			if step.release != nil {
+				<-step.release
+			}
+			if step.pushAfterAck {
+				descriptor, descriptorErr := protodesc.NewFile(testDescriptorProto(), nil)
+				if descriptorErr != nil {
+					_ = conn.Close()
+					done <- descriptorErr
+					return
+				}
+				outputDescriptor := descriptor.Messages().ByName("Output")
+				output := dynamicpb.NewMessage(outputDescriptor)
+				output.Set(outputDescriptor.Fields().ByName("result"), protoreflect.ValueOfString("new"))
+				encoded, encodeErr := proto.Marshal(output)
+				if encodeErr == nil {
+					encodeErr = writeProtoServerMessage(conn, &message.Message{
+						Type:  message.Push,
+						Route: "fixture.push",
+						Data:  encoded,
+					})
+				}
+				if encodeErr != nil {
+					_ = conn.Close()
+					done <- encodeErr
+					return
+				}
+			}
+			if step.remoteClose {
+				_ = conn.Close()
+				continue
+			}
+			_, err = readPacket(conn)
+			_ = conn.Close()
+			if err != nil && !errors.Is(err, io.EOF) && !errors.Is(err, net.ErrClosed) {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	return done
 }
 
 func TestUnpackDescriptor(t *testing.T) {
@@ -208,9 +390,8 @@ func TestGetDescriptorsBuildsCommands(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	conn := connmocks.NewMockPlayerConn(ctrl)
 	pc := newProto()
-	pc.conn = conn
+	gen := installTestGeneration(&pc.Client, conn, false, 0)
 	pc.descriptorsRoute = "sys.descriptors"
-	pc.Client.IncomingMsgChan = make(chan *message.Message, 1)
 	pc.AddPushResponse("fixture.push", "fixture.Output")
 
 	conn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
@@ -226,7 +407,7 @@ func TestGetDescriptorsBuildsCommands(t *testing.T) {
 
 	descriptorsData, err := proto.Marshal(&protos.ProtoDescriptors{Desc: []*descriptorpb.FileDescriptorProto{testDescriptorProto()}})
 	require.NoError(t, err)
-	pc.Client.IncomingMsgChan <- &message.Message{Type: message.Response, Data: descriptorsData}
+	gen.incomingChan <- &message.Message{Type: message.Response, Data: descriptorsData}
 
 	docs, err := json.Marshal(map[string]interface{}{
 		"handlers": map[string]interface{}{
@@ -262,7 +443,7 @@ func TestProtoClientRequestAndNotifySerialization(t *testing.T) {
 	inputDescriptor := descriptor.Messages().ByName("Input")
 	outputDescriptor := descriptor.Messages().ByName("Output")
 	pc := newProto()
-	pc.conn = conn
+	installTestGeneration(&pc.Client, conn, false, 0)
 	pc.ready = true
 	pc.info.Commands["fixture.echo"] = &Command{
 		input: "fixture.Input", output: "fixture.Output",
@@ -306,7 +487,7 @@ func TestProtoClientRequestWithoutInputDescriptor(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	conn := connmocks.NewMockPlayerConn(ctrl)
 	pc := newProto()
-	pc.conn = conn
+	installTestGeneration(&pc.Client, conn, false, 0)
 	pc.ready = true
 	outputDescriptor := testDescriptor(t).Messages().ByName("Output")
 	pc.info.Commands["fixture.noinput"] = &Command{outputMsgDescriptor: outputDescriptor}
@@ -323,25 +504,87 @@ func TestProtoClientRequestWithoutInputDescriptor(t *testing.T) {
 	assert.Equal(t, outputDescriptor, pc.expectedInputDescriptor)
 }
 
+func TestProtoClientConcurrentResponsesUseTheirRequestRoutes(t *testing.T) {
+	descriptor := testDescriptor(t)
+	stringOutput := descriptor.Messages().ByName("Output")
+	countOutput := descriptor.Messages().ByName("CountOutput")
+	pc := newProto()
+	gen := installTestGeneration(&pc.Client, newGenerationTestConn(), false, 0)
+	pc.ready = true
+	pc.info.Commands["fixture.string"] = &Command{outputMsgDescriptor: stringOutput}
+	pc.info.Commands["fixture.count"] = &Command{outputMsgDescriptor: countOutput}
+
+	reader := pc.startGenerationReader(gen)
+	packetsDone := make(chan struct{})
+	go func() {
+		defer close(packetsDone)
+		pc.Client.handlePackets(gen)
+	}()
+	t.Cleanup(func() {
+		pc.Disconnect(CloseReasonManual)
+		<-reader.done
+		<-packetsDone
+	})
+
+	stringID, err := pc.SendRequest("fixture.string", nil)
+	require.NoError(t, err)
+	countID, err := pc.SendRequest("fixture.count", nil)
+	require.NoError(t, err)
+
+	stringMessage := dynamicpb.NewMessage(stringOutput)
+	stringMessage.Set(stringOutput.Fields().ByName("result"), protoreflect.ValueOfString("first"))
+	stringData, err := proto.Marshal(stringMessage)
+	require.NoError(t, err)
+	countMessage := dynamicpb.NewMessage(countOutput)
+	countMessage.Set(countOutput.Fields().ByName("count"), protoreflect.ValueOfInt32(2))
+	countData, err := proto.Marshal(countMessage)
+	require.NoError(t, err)
+
+	encodeResponse := func(id uint, data []byte) *packet.Packet {
+		encoded, encodeErr := message.NewMessagesEncoder(false).Encode(&message.Message{
+			Type: message.Response,
+			ID:   id,
+			Data: data,
+		})
+		require.NoError(t, encodeErr)
+		return &packet.Packet{Type: packet.Data, Data: encoded}
+	}
+	gen.packetChan <- encodeResponse(stringID, stringData)
+	gen.packetChan <- encodeResponse(countID, countData)
+
+	receive := func() *message.Message {
+		t.Helper()
+		select {
+		case response := <-pc.IncomingMsgChan:
+			return response
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for decoded concurrent response")
+			return nil
+		}
+	}
+	first := receive()
+	assert.Equal(t, "fixture.string", first.Route)
+	assert.JSONEq(t, `{"result":"first"}`, string(first.Data))
+	second := receive()
+	assert.Equal(t, "fixture.count", second.Route)
+	assert.JSONEq(t, `{"count":2}`, string(second.Data))
+}
+
 func TestProtoClientWaitForData(t *testing.T) {
 	descriptor := testDescriptor(t)
 	outputDescriptor := descriptor.Messages().ByName("Output")
 	pc := newProto()
 	pc.expectedInputDescriptor = outputDescriptor
 	pc.info.Commands["fixture.echo"] = &Command{outputMsgDescriptor: outputDescriptor}
-	pc.Client.IncomingMsgChan = make(chan *message.Message, 1)
+	gen := newConnectionGeneration(1, nil, codec.NewPomeloPacketEncoder(), message.NewMessagesEncoder(false))
 
 	output := dynamicpb.NewMessage(outputDescriptor)
 	output.Set(outputDescriptor.Fields().ByName("result"), protoreflect.ValueOfString("ok"))
 	encoded, err := proto.Marshal(output)
 	require.NoError(t, err)
 
-	done := make(chan struct{})
-	go func() {
-		pc.waitForData()
-		close(done)
-	}()
-	pc.Client.IncomingMsgChan <- &message.Message{Type: message.Response, Route: "fixture.echo", Data: encoded}
+	reader := pc.startGenerationReader(gen)
+	gen.incomingChan <- &message.Message{Type: message.Response, Route: "fixture.echo", Data: encoded}
 
 	select {
 	case response := <-pc.IncomingMsgChan:
@@ -349,12 +592,332 @@ func TestProtoClientWaitForData(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for decoded proto response")
 	}
-	pc.closeChan <- true
+	close(gen.closeCh)
 	select {
-	case <-done:
+	case <-reader.done:
 	case <-time.After(time.Second):
 		t.Fatal("proto response loop did not stop")
 	}
+}
+
+func TestProtoClientFreshConnectToPlainAndTLS(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(*testing.T) (net.Listener, string, []*tls.Config)
+	}{
+		{
+			name: "plain",
+			setup: func(t *testing.T) (net.Listener, string, []*tls.Config) {
+				listener, err := net.Listen("tcp", "127.0.0.1:0")
+				require.NoError(t, err)
+				return listener, listener.Addr().String(), nil
+			},
+		},
+		{
+			name: "TLS",
+			setup: func(t *testing.T) (net.Listener, string, []*tls.Config) {
+				certificate, leaf := newTestServerCertificate(t)
+				listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{
+					Certificates: []tls.Certificate{certificate},
+					MinVersion:   tls.VersionTLS12,
+				})
+				require.NoError(t, err)
+				config := &tls.Config{
+					RootCAs:    rootPoolForCertificate(leaf),
+					MinVersion: tls.VersionTLS12,
+				}
+				return listener, tlsURIForLocalhost(t, listener.Addr().String()), []*tls.Config{config}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			listener, uri, configs := test.setup(t)
+			t.Cleanup(func() { _ = listener.Close() })
+			var accepts atomic.Int64
+			serverDone := startProtoServerSequence(listener, []protoServerStep{
+				{bootstrap: true},
+				{},
+			}, &accepts)
+
+			pc := NewWithDescriptor("sys.descriptors", "sys.docs")
+			var callbacks atomic.Int64
+			pc.OnDisconnected(func(CloseReason) { callbacks.Add(1) })
+			require.NoError(t, pc.ConnectTo(uri, configs...))
+			assert.True(t, pc.ConnectedStatus())
+			assert.Zero(t, callbacks.Load(), "bootstrap must not invoke the public callback")
+			assert.Equal(t, int64(2), accepts.Load())
+
+			pc.Disconnect(CloseReasonManual)
+			select {
+			case err := <-serverDone:
+				require.NoError(t, err)
+			case <-time.After(time.Second):
+				t.Fatal("proto server did not stop")
+			}
+			assert.Equal(t, int64(1), callbacks.Load())
+		})
+	}
+}
+
+func TestProtoClientBootstrapFailureLeavesIdleAndRetrySucceeds(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	var accepts atomic.Int64
+	serverDone := startProtoServerSequence(listener, []protoServerStep{
+		{bootstrap: true, malformed: true},
+		{bootstrap: true},
+		{},
+	}, &accepts)
+
+	pc := NewWithDescriptor("sys.descriptors", "sys.docs")
+	var callbacks atomic.Int64
+	pc.OnDisconnected(func(CloseReason) { callbacks.Add(1) })
+	require.Error(t, pc.ConnectTo(listener.Addr().String()))
+	assert.False(t, pc.ConnectedStatus())
+	pc.stateMu.RLock()
+	assert.False(t, pc.ready)
+	pc.stateMu.RUnlock()
+	assert.Zero(t, callbacks.Load())
+
+	require.NoError(t, pc.ConnectTo(listener.Addr().String()))
+	assert.True(t, pc.ConnectedStatus())
+	assert.Equal(t, int64(3), accepts.Load())
+	assert.Zero(t, callbacks.Load())
+	pc.Disconnect(CloseReasonManual)
+	select {
+	case serverErr := <-serverDone:
+		require.NoError(t, serverErr)
+	case <-time.After(time.Second):
+		t.Fatal("proto retry server did not stop")
+	}
+}
+
+func TestProtoClientReaderStopsWithGenerationAndReadyReconnectSkipsBootstrap(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	finalReady := make(chan struct{})
+	releaseFinal := make(chan struct{})
+	var accepts atomic.Int64
+	serverDone := startProtoServerSequence(listener, []protoServerStep{
+		{bootstrap: true},
+		{ready: finalReady, release: releaseFinal, remoteClose: true},
+		{pushAfterAck: true},
+	}, &accepts)
+
+	pc := NewWithDescriptor("sys.descriptors", "sys.docs")
+	pc.AddPushResponse("fixture.push", "fixture.Output")
+	var callbacks atomic.Int64
+	pc.OnDisconnected(func(CloseReason) { callbacks.Add(1) })
+	require.NoError(t, pc.ConnectTo(listener.Addr().String()))
+	select {
+	case <-finalReady:
+	case <-time.After(time.Second):
+		t.Fatal("final connection handshake did not finish")
+	}
+	oldGen := pc.Client.currentGeneration()
+	pc.stateMu.RLock()
+	oldReader := pc.reader
+	pc.stateMu.RUnlock()
+	require.NotNil(t, oldGen)
+	require.NotNil(t, oldReader)
+	close(releaseFinal)
+
+	waitForGenerationLoops(t, oldGen)
+	select {
+	case <-oldReader.done:
+	case <-time.After(time.Second):
+		t.Fatal("old proto reader did not stop")
+	}
+	assert.False(t, pc.ConnectedStatus())
+	assert.Equal(t, int64(1), callbacks.Load())
+
+	require.NoError(t, pc.ConnectTo(listener.Addr().String()))
+	select {
+	case response := <-pc.IncomingMsgChan:
+		assert.Equal(t, "fixture.push", response.Route)
+		assert.JSONEq(t, `{"result":"new"}`, string(response.Data))
+	case <-time.After(time.Second):
+		t.Fatal("reconnected generation did not deliver its push")
+	}
+	assert.Equal(t, int64(3), accepts.Load(), "ready reconnect must not download descriptors again")
+	pc.Disconnect(CloseReasonManual)
+	select {
+	case serverErr := <-serverDone:
+		require.NoError(t, serverErr)
+	case <-time.After(time.Second):
+		t.Fatal("proto reconnect server did not stop")
+	}
+}
+
+func TestProtoClientReaderHandoffWaitsForPreviousReader(t *testing.T) {
+	pc := newProto()
+	oldGen := newConnectionGeneration(1, nil, codec.NewPomeloPacketEncoder(), message.NewMessagesEncoder(false))
+	newGen := newConnectionGeneration(2, nil, codec.NewPomeloPacketEncoder(), message.NewMessagesEncoder(false))
+	previousDone := make(chan struct{})
+	previous := &protoGenerationReader{generation: oldGen, done: previousDone}
+	pc.reader = previous
+
+	started := make(chan struct{})
+	replacementDone := make(chan *protoGenerationReader, 1)
+	go func() {
+		close(started)
+		replacementDone <- pc.startGenerationReader(newGen)
+	}()
+	<-started
+
+	var replacement *protoGenerationReader
+	replacedEarly := false
+	select {
+	case replacement = <-replacementDone:
+		replacedEarly = true
+	case <-time.After(50 * time.Millisecond):
+		pc.stateMu.RLock()
+		assert.Same(t, previous, pc.reader)
+		pc.stateMu.RUnlock()
+	}
+
+	close(previousDone)
+	if replacement == nil {
+		select {
+		case replacement = <-replacementDone:
+		case <-time.After(time.Second):
+			t.Fatal("replacement reader did not start after previous reader stopped")
+		}
+	}
+	require.NotNil(t, replacement)
+	close(newGen.closeCh)
+	select {
+	case <-replacement.done:
+	case <-time.After(time.Second):
+		t.Fatal("replacement reader did not stop")
+	}
+
+	assert.False(t, replacedEarly, "replacement reader became current before the previous reader stopped")
+	pc.stateMu.RLock()
+	assert.Nil(t, pc.reader)
+	pc.stateMu.RUnlock()
+}
+
+func TestProtoClientDisconnectCancelsReaderHandoff(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	serverReady := make(chan struct{})
+	var accepts atomic.Int64
+	serverDone := startProtoServerSequence(listener, []protoServerStep{{ready: serverReady}}, &accepts)
+
+	pc := newProto()
+	pc.ready = true
+	oldGen := newConnectionGeneration(1, nil, codec.NewPomeloPacketEncoder(), message.NewMessagesEncoder(false))
+	previousDone := make(chan struct{})
+	releasedPrevious := false
+	t.Cleanup(func() {
+		if !releasedPrevious {
+			close(previousDone)
+		}
+	})
+	previous := &protoGenerationReader{generation: oldGen, done: previousDone}
+	pc.reader = previous
+
+	connectResult := make(chan error, 1)
+	go func() { connectResult <- pc.ConnectTo(listener.Addr().String()) }()
+	select {
+	case <-serverReady:
+	case <-time.After(time.Second):
+		t.Fatal("final connection handshake did not finish")
+	}
+	require.Eventually(t, func() bool {
+		return pc.Client.currentGeneration() != nil
+	}, time.Second, time.Millisecond)
+	pc.stateMu.RLock()
+	assert.Same(t, previous, pc.reader)
+	pc.stateMu.RUnlock()
+
+	disconnectDone := make(chan struct{})
+	go func() {
+		pc.Disconnect(CloseReasonManual)
+		close(disconnectDone)
+	}()
+	require.Eventually(t, func() bool {
+		return !pc.ConnectedStatus()
+	}, time.Second, time.Millisecond)
+	select {
+	case <-disconnectDone:
+		t.Fatal("Disconnect returned before the active connect attempt finished")
+	default:
+	}
+
+	releasedPrevious = true
+	close(previousDone)
+	select {
+	case connectErr := <-connectResult:
+		assert.ErrorIs(t, connectErr, errClientConnectionClosed)
+	case <-time.After(time.Second):
+		t.Fatal("ConnectTo did not finish after the previous reader stopped")
+	}
+	select {
+	case <-disconnectDone:
+	case <-time.After(time.Second):
+		t.Fatal("Disconnect did not join the canceled connect attempt")
+	}
+	select {
+	case serverErr := <-serverDone:
+		require.NoError(t, serverErr)
+	case <-time.After(time.Second):
+		t.Fatal("proto server did not stop")
+	}
+	assert.False(t, pc.ConnectedStatus())
+	assert.Equal(t, int64(1), accepts.Load())
+}
+
+func TestProtoClientDisconnectCallbackCanReconnect(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = listener.Close() })
+	var accepts atomic.Int64
+	serverDone := startProtoServerSequence(listener, []protoServerStep{
+		{bootstrap: true},
+		{remoteClose: true},
+		{pushAfterAck: true},
+	}, &accepts)
+
+	pc := NewWithDescriptor("sys.descriptors", "sys.docs")
+	pc.AddPushResponse("fixture.push", "fixture.Output")
+	reconnectResult := make(chan error, 1)
+	var callbacks atomic.Int64
+	pc.OnDisconnected(func(CloseReason) {
+		if callbacks.Add(1) == 1 {
+			reconnectResult <- pc.ConnectTo(listener.Addr().String())
+		}
+	})
+	require.NoError(t, pc.ConnectTo(listener.Addr().String()))
+
+	select {
+	case reconnectErr := <-reconnectResult:
+		require.NoError(t, reconnectErr)
+	case <-time.After(time.Second):
+		t.Fatal("disconnect callback did not finish reconnecting")
+	}
+	select {
+	case response := <-pc.IncomingMsgChan:
+		assert.Equal(t, "fixture.push", response.Route)
+		assert.JSONEq(t, `{"result":"new"}`, string(response.Data))
+	case <-time.After(time.Second):
+		t.Fatal("callback replacement did not deliver its push")
+	}
+
+	pc.Disconnect(CloseReasonManual)
+	select {
+	case serverErr := <-serverDone:
+		require.NoError(t, serverErr)
+	case <-time.After(time.Second):
+		t.Fatal("callback reconnect server did not stop")
+	}
+	assert.Equal(t, int64(3), accepts.Load())
 }
 
 func TestClientBasicsAndHandshake(t *testing.T) {
@@ -422,14 +985,13 @@ func TestReceiveHandshakeResponseAndDisconnect(t *testing.T) {
 	require.NoError(t, <-serverDone)
 
 	disconnected := make(chan CloseReason, 1)
-	c.closeChan = make(chan struct{})
-	c.Connected = true
+	gen := installTestGeneration(c, clientConn, false, 0)
 	c.OnDisconnected(func(reason CloseReason) { disconnected <- reason })
 	c.Disconnect(CloseReasonManual)
 	assert.False(t, c.ConnectedStatus())
 	assert.Equal(t, CloseReasonManual, <-disconnected)
 	select {
-	case <-c.closeChan:
+	case <-gen.closeCh:
 	default:
 		t.Fatal("disconnect did not close the client channel")
 	}

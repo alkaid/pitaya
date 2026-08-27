@@ -336,3 +336,29 @@ func TestPitayaConfigValidateClusterAllowsZeroLeaseRetries(t *testing.T) {
 
 	require.NoError(t, cfg.ValidateCluster())
 }
+
+func TestPitayaConfigValidateClusterShutdownDelay(t *testing.T) {
+	for _, table := range []struct {
+		name    string
+		delay   time.Duration
+		wantErr bool
+	}{
+		{name: "negative", delay: -time.Nanosecond, wantErr: true},
+		{name: "zero", delay: 0},
+		{name: "default", delay: 300 * time.Millisecond},
+		{name: "maximum", delay: 5 * time.Second},
+		{name: "above maximum", delay: 5*time.Second + time.Nanosecond, wantErr: true},
+	} {
+		t.Run(table.name, func(t *testing.T) {
+			cfg := NewDefaultPitayaConfig()
+			cfg.Cluster.SD.Etcd.Shutdown.Delay = table.delay
+			err := cfg.ValidateCluster()
+			if table.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "pitaya.cluster.sd.etcd.shutdown.delay")
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}

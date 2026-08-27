@@ -42,10 +42,35 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+type valueProtoMessage struct {
+	proto.Message
+}
+
 func TestDoSendRPCNotInitialized(t *testing.T) {
 	app := &App{}
 	err := app.doSendRPC(nil, "", "", nil, nil, "")
 	assert.Equal(t, constants.ErrRPCServerNotInitialized, err)
+}
+
+func TestDoSendRPCValidatesReplyBeforeRouting(t *testing.T) {
+	var typedNil *test.SomeStruct
+	for _, table := range []struct {
+		name  string
+		reply proto.Message
+	}{
+		{name: "nil interface"},
+		{name: "typed nil pointer", reply: typedNil},
+		{name: "non pointer", reply: valueProtoMessage{Message: &test.SomeStruct{}}},
+	} {
+		t.Run(table.name, func(t *testing.T) {
+			app := &App{rpcServer: &cluster.NatsRPCServer{}}
+			assert.ErrorIs(
+				t,
+				app.doSendRPC(context.Background(), "", "not-a-route", table.reply, nil, ""),
+				constants.ErrReplyShouldBePtr,
+			)
+		})
+	}
 }
 
 func TestDoSendRPC(t *testing.T) {

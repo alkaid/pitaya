@@ -337,6 +337,7 @@ func TestSysSessionCloseCallbackNotifiesClusterDeterministically(t *testing.T) {
 	var onClose session.OnSessionCloseFunc
 	pool := mocks.NewMockSessionPool(ctrl)
 	pool.EXPECT().OnSessionBind(gomock.Any())
+	pool.EXPECT().OnAfterSessionBind(gomock.Any())
 	pool.EXPECT().OnSessionClose(gomock.Any()).Do(func(callback session.OnSessionCloseFunc) {
 		onClose = callback
 	})

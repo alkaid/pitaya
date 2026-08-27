@@ -18,7 +18,7 @@ concurrency:
 jobs:
   stress:
     # This capacity gate is intentionally separate from PR and release lanes.
-    name: 10k Clients and Reconnect
+    name: 10k Clients, Reconnect, and Bind Retry
     runs-on: ubuntu-24.04
     # Leave enough job-level budget for the always-run artifact upload after a
     # stress step reaches its own timeout.
@@ -47,6 +47,9 @@ jobs:
       # and any NATS drop still fails that evidence.
       env:
         STRESS_NATS_MESSAGES_BUFFER: 16384
+        STRESS_BIND_RETRIES: 1000
+        STRESS_CLEANUP_MAX: 30s
+        STRESS_GOROUTINE_DELTA_MAX: 5
       run: |
         mkdir -p build/stress
         set -o pipefail

@@ -71,32 +71,86 @@ type pendingRequest struct {
 
 var clientActivityEpoch = time.Now()
 
-const defaultClientIOTimeout = 5 * time.Second
+const (
+	defaultClientIOTimeout = 5 * time.Second
+	clientInflightLimit    = 30
+)
+
+var (
+	errClientAlreadyConnected = errors.New("client: already connected")
+	errClientConnecting       = errors.New("client: connection in progress")
+	errClientConnectionClosed = errors.New("client: connection closed")
+)
+
+type clientConnectionState uint8
+
+const (
+	clientStateIdle clientConnectionState = iota
+	clientStateConnecting
+	clientStateConnected
+)
+
+type connectAttempt struct {
+	id                    uint64
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	done                  sync.WaitGroup
+	conn                  net.Conn
+	cancelledByDisconnect bool
+	handshakeData         *session.HandshakeData
+	packetEncoder         codec.PacketEncoder
+	messageEncoder        message.Encoder
+}
+
+type connectionGeneration struct {
+	id           uint64
+	conn         net.Conn
+	closeCh      chan struct{}
+	closeOnce    sync.Once
+	packetChan   chan *packet.Packet
+	incomingChan chan *message.Message
+
+	pendingMu sync.Mutex
+	pending   map[uint]*pendingRequest
+	slots     chan struct{}
+	closed    bool
+
+	writeMu          sync.Mutex
+	lastActivityTick atomic.Int64
+	packetEncoder    codec.PacketEncoder
+	messageEncoder   message.Encoder
+
+	loops sync.WaitGroup
+}
 
 // Client struct
 type Client struct {
-	conn                net.Conn
-	Connected           bool
+	// conn remains a private snapshot for compatibility with package-level tests.
+	// Connection loops always use their immutable generation instead.
+	conn            net.Conn
+	Connected       bool
+	IncomingMsgChan chan *message.Message
+
 	packetEncoder       codec.PacketEncoder
-	packetChan          chan *packet.Packet
-	IncomingMsgChan     chan *message.Message
-	pendingChan         chan bool
-	pendingRequests     map[uint]*pendingRequest
-	pendingReqMutex     sync.Mutex
+	messageEncoder      message.Encoder
 	requestTimeout      time.Duration
 	handshakeTimeout    time.Duration
-	closeChan           chan struct{}
 	nextID              uint32
-	messageEncoder      message.Encoder
 	clientHandshakeData *session.HandshakeData
 	onDisconnected      func(reason CloseReason)
-	writeMutex          sync.Mutex
-	lastActivityTick    atomic.Int64
-	connMutex           sync.Mutex
+
+	connMutex       sync.Mutex
+	state           clientConnectionState
+	connectSequence uint64
+	generationID    uint64
+	attempt         *connectAttempt
+	current         *connectionGeneration
 }
 
 // MsgChannel return the incoming message channel
 func (c *Client) MsgChannel() chan *message.Message {
+	c.connMutex.Lock()
+	defer c.connMutex.Unlock()
 	return c.IncomingMsgChan
 }
 
@@ -116,15 +170,11 @@ func New(requestTimeout ...time.Duration) *Client {
 
 	return &Client{
 		Connected:        false,
+		state:            clientStateIdle,
 		packetEncoder:    codec.NewPomeloPacketEncoder(),
-		packetChan:       make(chan *packet.Packet, 10),
-		pendingRequests:  make(map[uint]*pendingRequest),
 		requestTimeout:   reqTimeout,
 		handshakeTimeout: defaultClientIOTimeout,
-		// 30 here is the limit of inflight messages
-		// TODO this should probably be configurable
-		pendingChan:    make(chan bool, 30),
-		messageEncoder: message.NewMessagesEncoder(false),
+		messageEncoder:   message.NewMessagesEncoder(false),
 		clientHandshakeData: &session.HandshakeData{
 			Sys: session.HandshakeClientData{
 				Platform:    "mac",
@@ -141,21 +191,35 @@ func New(requestTimeout ...time.Duration) *Client {
 
 // SetClientHandshakeData sets the data to send inside handshake
 func (c *Client) SetClientHandshakeData(data *session.HandshakeData) {
+	c.connMutex.Lock()
+	defer c.connMutex.Unlock()
 	c.clientHandshakeData = data
 }
 
 func (c *Client) sendHandshakeRequest() error {
-	enc, err := json.Marshal(c.clientHandshakeData)
+	c.connMutex.Lock()
+	conn := c.conn
+	handshakeData := c.clientHandshakeData
+	packetEncoder := c.packetEncoder
+	c.connMutex.Unlock()
+	return c.sendHandshakeRequestTo(conn, handshakeData, packetEncoder)
+}
+
+func (c *Client) sendHandshakeRequestTo(conn net.Conn, handshakeData *session.HandshakeData, packetEncoder codec.PacketEncoder) error {
+	if conn == nil {
+		return errClientConnectionClosed
+	}
+	enc, err := json.Marshal(handshakeData)
 	if err != nil {
 		return err
 	}
 
-	p, err := c.packetEncoder.Encode(packet.Handshake, enc)
+	p, err := packetEncoder.Encode(packet.Handshake, enc)
 	if err != nil {
 		return err
 	}
 
-	_, err = c.connWriteWithTimeout(p, c.handshakeTimeout)
+	_, err = writeConnWithTimeout(conn, p, c.handshakeTimeout)
 	return err
 }
 
@@ -164,16 +228,32 @@ func (c *Client) handleHandshakeResponse() error {
 	if err != nil {
 		return err
 	}
-	if err := c.conn.SetReadDeadline(time.Time{}); err != nil {
+	c.connMutex.Lock()
+	conn := c.conn
+	c.connMutex.Unlock()
+	if conn == nil {
+		return errClientConnectionClosed
+	}
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
 		return fmt.Errorf("clear handshake read deadline: %w", err)
 	}
-	c.startConnectionLoops(heartbeat)
+	_ = heartbeat
 	return nil
 }
 
 func (c *Client) receiveHandshakeResponse() (int, error) {
-	c.recordServerActivity(time.Now())
-	handshakePacket, err := readPacket(c.conn)
+	c.connMutex.Lock()
+	conn := c.conn
+	packetEncoder := c.packetEncoder
+	c.connMutex.Unlock()
+	return c.receiveHandshakeResponseFrom(conn, packetEncoder)
+}
+
+func (c *Client) receiveHandshakeResponseFrom(conn net.Conn, packetEncoder codec.PacketEncoder) (int, error) {
+	if conn == nil {
+		return 0, errClientConnectionClosed
+	}
+	handshakePacket, err := readPacket(conn)
 	if err != nil {
 		return 0, err
 	}
@@ -200,84 +280,170 @@ func (c *Client) receiveHandshakeResponse() (int, error) {
 	if handshake.Sys.Dict != nil {
 		message.SetDictionary(handshake.Sys.Dict)
 	}
-	p, err := c.packetEncoder.Encode(packet.HandshakeAck, []byte{})
+	p, err := packetEncoder.Encode(packet.HandshakeAck, []byte{})
 	if err != nil {
 		return 0, err
 	}
-	_, err = c.connWriteWithTimeout(p, c.handshakeTimeout)
+	_, err = writeConnWithTimeout(conn, p, c.handshakeTimeout)
 	if err != nil {
 		return 0, err
 	}
 	return handshake.Sys.Heartbeat, nil
 }
 
-func (c *Client) startConnectionLoops(heartbeat int) {
-	c.Connected = true
-
-	if heartbeat > 0 {
-		go c.sendHeartbeats(heartbeat)
+func writeConnWithTimeout(conn net.Conn, b []byte, timeout time.Duration) (int, error) {
+	if conn == nil {
+		return 0, errClientConnectionClosed
 	}
-	go c.handleServerMessages()
-	go c.handlePackets()
-	go c.pendingRequestsReaper()
-}
-
-func (c *Client) connWriteWithDeadline(b []byte) (int, error) {
-	return c.connWriteWithTimeout(b, defaultClientIOTimeout)
-}
-
-func (c *Client) connWriteWithTimeout(b []byte, timeout time.Duration) (int, error) {
-	err := c.conn.SetWriteDeadline(time.Now().Add(timeout))
+	err := conn.SetWriteDeadline(time.Now().Add(timeout))
 	if err != nil {
 		return 0, err
 	}
-	n, err := c.conn.Write(b)
+	n, err := conn.Write(b)
 	if err != nil {
 		return n, err
 	}
 	return n, nil
 }
 
-// pendingRequestsReaper delete timedout requests
-func (c *Client) pendingRequestsReaper() {
+func newConnectionGeneration(
+	id uint64,
+	conn net.Conn,
+	packetEncoder codec.PacketEncoder,
+	messageEncoder message.Encoder,
+) *connectionGeneration {
+	gen := &connectionGeneration{
+		id:             id,
+		conn:           conn,
+		closeCh:        make(chan struct{}),
+		packetChan:     make(chan *packet.Packet, 10),
+		incomingChan:   make(chan *message.Message, 10),
+		pending:        make(map[uint]*pendingRequest),
+		slots:          make(chan struct{}, clientInflightLimit),
+		packetEncoder:  packetEncoder,
+		messageEncoder: messageEncoder,
+	}
+	gen.recordServerActivity(time.Now())
+	return gen
+}
+
+func (c *Client) startGenerationLoops(gen *connectionGeneration, heartbeat int) {
+	loopCount := 3
+	if heartbeat > 0 {
+		loopCount++
+	}
+	gen.loops.Add(loopCount)
+
+	if heartbeat > 0 {
+		go func() {
+			defer gen.loops.Done()
+			c.sendHeartbeats(gen, heartbeat)
+		}()
+	}
+	go func() {
+		defer gen.loops.Done()
+		c.handleServerMessages(gen)
+	}()
+	go func() {
+		defer gen.loops.Done()
+		c.handlePackets(gen)
+	}()
+	go func() {
+		defer gen.loops.Done()
+		c.pendingRequestsReaper(gen)
+	}()
+}
+
+func (gen *connectionGeneration) safeWrite(b []byte, timeout time.Duration) (int, error) {
+	select {
+	case <-gen.closeCh:
+		return 0, errClientConnectionClosed
+	default:
+	}
+	gen.writeMu.Lock()
+	defer gen.writeMu.Unlock()
+	select {
+	case <-gen.closeCh:
+		return 0, errClientConnectionClosed
+	default:
+	}
+	return writeConnWithTimeout(gen.conn, b, timeout)
+}
+
+func (gen *connectionGeneration) takePending(id uint) (*pendingRequest, bool) {
+	gen.pendingMu.Lock()
+	defer gen.pendingMu.Unlock()
+	pending, ok := gen.pending[id]
+	if !ok {
+		return nil, false
+	}
+	delete(gen.pending, id)
+	<-gen.slots
+	return pending, true
+}
+
+func (gen *connectionGeneration) takeExpiredPending(now time.Time, timeout time.Duration) []*pendingRequest {
+	gen.pendingMu.Lock()
+	defer gen.pendingMu.Unlock()
+	expired := make([]*pendingRequest, 0)
+	for id, pending := range gen.pending {
+		if now.Sub(pending.sentAt) <= timeout {
+			continue
+		}
+		expired = append(expired, pending)
+		delete(gen.pending, id)
+		<-gen.slots
+	}
+	return expired
+}
+
+func (gen *connectionGeneration) deliver(msg *message.Message) bool {
+	select {
+	case gen.incomingChan <- msg:
+		return true
+	case <-gen.closeCh:
+		return false
+	}
+}
+
+// pendingRequestsReaper deletes timed out requests.
+func (c *Client) pendingRequestsReaper(gen *connectionGeneration) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ticker.C:
-			toDelete := make([]*pendingRequest, 0)
-			c.pendingReqMutex.Lock()
-			for _, v := range c.pendingRequests {
-				if time.Now().Sub(v.sentAt) > c.requestTimeout {
-					toDelete = append(toDelete, v)
-				}
+			if !c.reapPending(gen, time.Now()) {
+				return
 			}
-			for _, pendingReq := range toDelete {
-				err := apierrors.GatewayTimeout("", "request timeout", "")
-				errMarshalled, _ := proto.Marshal(&err.Status)
-				// send a timeout to incoming msg chan
-				m := &message.Message{
-					Type:  message.Response,
-					ID:    pendingReq.msg.ID,
-					Route: pendingReq.msg.Route,
-					Data:  errMarshalled,
-					Err:   true,
-				}
-				delete(c.pendingRequests, pendingReq.msg.ID)
-				<-c.pendingChan
-				c.IncomingMsgChan <- m
-			}
-			c.pendingReqMutex.Unlock()
-		case <-c.closeChan:
+		case <-gen.closeCh:
 			return
 		}
 	}
 }
 
-func (c *Client) handlePackets() {
+func (c *Client) reapPending(gen *connectionGeneration, now time.Time) bool {
+	for _, pendingReq := range gen.takeExpiredPending(now, c.requestTimeout) {
+		err := apierrors.GatewayTimeout("", "request timeout", "")
+		errMarshalled, _ := proto.Marshal(&err.Status)
+		m := &message.Message{
+			Type:  message.Response,
+			ID:    pendingReq.msg.ID,
+			Route: pendingReq.msg.Route,
+			Data:  errMarshalled,
+			Err:   true,
+		}
+		if !gen.deliver(m) {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *Client) handlePackets(gen *connectionGeneration) {
 	for {
 		select {
-		case p := <-c.packetChan:
+		case p := <-gen.packetChan:
 			if p == nil {
 				continue
 			}
@@ -291,27 +457,27 @@ func (c *Client) handlePackets() {
 						zap.Int("payload_length", len(p.Data)),
 						zap.Error(err),
 					)
-					c.Disconnect(CloseReasonError)
+					c.disconnectGeneration(gen, CloseReasonError)
 					return
 				}
 				if m.Type == message.Response {
-					c.pendingReqMutex.Lock()
-					if _, ok := c.pendingRequests[m.ID]; ok {
-						delete(c.pendingRequests, m.ID)
-						<-c.pendingChan
-					} else {
-						c.pendingReqMutex.Unlock()
+					pending, ok := gen.takePending(m.ID)
+					if !ok {
 						continue // do not process msg for already timedout request
 					}
-					c.pendingReqMutex.Unlock()
+					if m.Route == "" {
+						m.Route = pending.msg.Route
+					}
 				}
-				c.IncomingMsgChan <- m
+				if !gen.deliver(m) {
+					return
+				}
 			case packet.Kick:
 				Log.Warn("got kick packet from the server! disconnecting...")
-				c.Disconnect(CloseReasonKicked)
+				c.disconnectGeneration(gen, CloseReasonKicked)
 				return
 			}
-		case <-c.closeChan:
+		case <-gen.closeCh:
 			return
 		}
 	}
@@ -334,81 +500,117 @@ func readPacket(reader io.Reader) (*packet.Packet, error) {
 	return p, nil
 }
 
-func (c *Client) handleServerMessages() {
-	defer c.Disconnect(CloseReasonError)
+func (c *Client) handleServerMessages(gen *connectionGeneration) {
+	defer c.disconnectGeneration(gen, CloseReasonError)
 	for {
-		p, err := readPacket(c.conn)
+		p, err := readPacket(gen.conn)
 		if err != nil {
 			select {
-			case <-c.closeChan:
+			case <-gen.closeCh:
 				return
 			default:
 				Log.Error("", zap.Error(err))
 				return
 			}
 		}
-		c.recordServerActivity(time.Now())
+		gen.recordServerActivity(time.Now())
 		select {
-		case c.packetChan <- p:
-		case <-c.closeChan:
+		case gen.packetChan <- p:
+		case <-gen.closeCh:
 			return
 		}
 	}
 }
 
-func (c *Client) sendHeartbeats(interval int) {
+func (c *Client) sendHeartbeats(gen *connectionGeneration, interval int) {
 	t := time.NewTicker(time.Duration(interval) * time.Second)
 	heartbeatTimeout := time.Duration(interval) * time.Second * 2
 	defer func() {
 		t.Stop()
-		c.Disconnect(CloseReasonError)
+		c.disconnectGeneration(gen, CloseReasonError)
 	}()
 	for {
 		select {
 		case <-t.C:
 			deadline := time.Now().Add(-heartbeatTimeout)
-			lastAt := c.lastServerActivity()
+			lastAt := gen.lastServerActivity()
 			if lastAt.Before(deadline) {
 				logger.Zap.Debug("Session heartbeat timeout", zap.Time("LastTime", lastAt), zap.Time("Deadline", deadline))
 				return
 			}
 
-			p, _ := c.packetEncoder.Encode(packet.Heartbeat, []byte{})
-			_, err := c.SafeWrite(p)
+			p, err := gen.packetEncoder.Encode(packet.Heartbeat, []byte{})
+			if err == nil {
+				_, err = gen.safeWrite(p, defaultClientIOTimeout)
+			}
 			if err != nil {
 				Log.Error("error sending heartbeat to server", zap.Error(err))
 				return
 			}
-		case <-c.closeChan:
+		case <-gen.closeCh:
 			return
 		}
 	}
 }
 
-func (c *Client) recordServerActivity(at time.Time) {
-	c.lastActivityTick.Store(at.Sub(clientActivityEpoch).Nanoseconds())
+func (gen *connectionGeneration) recordServerActivity(at time.Time) {
+	gen.lastActivityTick.Store(at.Sub(clientActivityEpoch).Nanoseconds())
 }
 
-func (c *Client) lastServerActivity() time.Time {
-	return clientActivityEpoch.Add(time.Duration(c.lastActivityTick.Load()))
+func (gen *connectionGeneration) lastServerActivity() time.Time {
+	return clientActivityEpoch.Add(time.Duration(gen.lastActivityTick.Load()))
 }
 
 // Disconnect disconnects the client
 func (c *Client) Disconnect(reason CloseReason) {
 	c.connMutex.Lock()
-	if !c.Connected {
+	if c.state == clientStateConnecting && c.attempt != nil {
+		attempt := c.attempt
+		attempt.cancelledByDisconnect = true
+		attempt.cancel()
+		conn := attempt.conn
 		c.connMutex.Unlock()
+		if conn != nil {
+			_ = conn.Close()
+		}
+		attempt.done.Wait()
 		return
 	}
-	c.Connected = false
-	close(c.closeChan)
-	_ = c.conn.Close()
-	callback := c.onDisconnected
+	gen := c.current
 	c.connMutex.Unlock()
-
-	if callback != nil {
-		callback(reason)
+	if gen != nil {
+		c.disconnectGeneration(gen, reason)
 	}
+}
+
+func (c *Client) disconnectGeneration(gen *connectionGeneration, reason CloseReason) {
+	gen.closeOnce.Do(func() {
+		gen.pendingMu.Lock()
+		gen.closed = true
+		for id := range gen.pending {
+			delete(gen.pending, id)
+			<-gen.slots
+		}
+		gen.pendingMu.Unlock()
+
+		close(gen.closeCh)
+		_ = gen.conn.Close()
+
+		var callback func(reason CloseReason)
+		c.connMutex.Lock()
+		if c.current == gen {
+			c.current = nil
+			c.conn = nil
+			c.state = clientStateIdle
+			c.Connected = false
+			callback = c.onDisconnected
+		}
+		c.connMutex.Unlock()
+
+		if callback != nil {
+			callback(reason)
+		}
+	})
 }
 
 func (c *Client) OnDisconnected(callback func(reason CloseReason)) {
@@ -439,7 +641,7 @@ func configureTLSServerName(u *url.URL, tlsCfg *tls.Config) error {
 	return nil
 }
 
-func (c *Client) dial(u *url.URL, tlsCfg *tls.Config) (net.Conn, error) {
+func (c *Client) dial(ctx context.Context, u *url.URL, tlsCfg *tls.Config) (net.Conn, error) {
 	switch u.Scheme {
 	case "wss":
 		if err := configureTLSServerName(u, tlsCfg); err != nil {
@@ -447,8 +649,6 @@ func (c *Client) dial(u *url.URL, tlsCfg *tls.Config) (net.Conn, error) {
 		}
 		dialer := *websocket.DefaultDialer
 		dialer.TLSClientConfig = tlsCfg
-		ctx, cancel := context.WithTimeout(context.Background(), c.handshakeTimeout)
-		defer cancel()
 		wsconn, _, err := dialer.DialContext(ctx, u.String(), nil)
 		if err != nil {
 			return nil, err
@@ -461,8 +661,6 @@ func (c *Client) dial(u *url.URL, tlsCfg *tls.Config) (net.Conn, error) {
 		return conn, nil
 	case "ws":
 		dialer := *websocket.DefaultDialer
-		ctx, cancel := context.WithTimeout(context.Background(), c.handshakeTimeout)
-		defer cancel()
 		wsconn, _, err := dialer.DialContext(ctx, u.String(), nil)
 		if err != nil {
 			return nil, err
@@ -477,20 +675,18 @@ func (c *Client) dial(u *url.URL, tlsCfg *tls.Config) (net.Conn, error) {
 		if err := configureTLSServerName(u, tlsCfg); err != nil {
 			return nil, err
 		}
-		rawConn, err := net.DialTimeout("tcp", u.Host, c.handshakeTimeout)
+		rawConn, err := (&net.Dialer{}).DialContext(ctx, "tcp", u.Host)
 		if err != nil {
 			return nil, err
 		}
 		tlsConn := tls.Client(rawConn, tlsCfg)
-		ctx, cancel := context.WithTimeout(context.Background(), c.handshakeTimeout)
-		defer cancel()
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			_ = rawConn.Close()
 			return nil, err
 		}
 		return tlsConn, nil
 	case "tcp":
-		return net.DialTimeout("tcp", u.Host, c.handshakeTimeout)
+		return (&net.Dialer{}).DialContext(ctx, "tcp", u.Host)
 	default:
 		return nil, errors.New("unSupport schme:" + u.Scheme)
 	}
@@ -499,57 +695,172 @@ func (c *Client) dial(u *url.URL, tlsCfg *tls.Config) (net.Conn, error) {
 // ConnectTo connects to the server at addr, for now the only supported protocol is tcp
 // if tlsConfig is sent, it connects using TLS
 func (c *Client) ConnectTo(uri string, tlsConfig ...*tls.Config) error {
+	_, err := c.connectToContext(context.Background(), uri, tlsConfig, nil)
+	return err
+}
+
+func (c *Client) connectToContext(
+	parent context.Context,
+	uri string,
+	tlsConfig []*tls.Config,
+	afterHandshake func(),
+) (*connectionGeneration, error) {
 	if !strings.Contains(uri, "://") {
 		uri = "tcp://" + uri
 	}
 	u, err := url.ParseRequestURI(uri)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	tlsCfg, err := cloneTLSConfig(tlsConfig)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	if parent == nil {
+		parent = context.Background()
+	}
+
 	c.connMutex.Lock()
-	defer c.connMutex.Unlock()
-	if c.Connected {
-		return errors.New("client: already connected")
+	switch c.state {
+	case clientStateConnected:
+		c.connMutex.Unlock()
+		return nil, errClientAlreadyConnected
+	case clientStateConnecting:
+		c.connMutex.Unlock()
+		return nil, errClientConnecting
 	}
-	c.conn, err = c.dial(u, tlsCfg)
-	if err != nil {
-		return err
+	c.connectSequence++
+	ctx, cancel := context.WithTimeout(parent, c.handshakeTimeout)
+	attempt := &connectAttempt{
+		id:             c.connectSequence,
+		ctx:            ctx,
+		cancel:         cancel,
+		handshakeData:  c.clientHandshakeData,
+		packetEncoder:  c.packetEncoder,
+		messageEncoder: c.messageEncoder,
 	}
-	connected := false
+	attempt.done.Add(1)
+	c.attempt = attempt
+	c.state = clientStateConnecting
+	c.connMutex.Unlock()
+
 	defer func() {
-		if !connected {
-			_ = c.conn.Close()
-			c.conn = nil
-		}
+		attempt.cancel()
+		attempt.done.Done()
 	}()
-	c.IncomingMsgChan = make(chan *message.Message, 10)
-	c.closeChan = make(chan struct{})
-	c.packetChan = make(chan *packet.Packet, 10)
 
-	if err = c.handleHandshake(); err != nil {
-		return err
+	connection, err := c.dial(attempt.ctx, u, tlsCfg)
+	if err != nil {
+		c.failConnectAttempt(attempt, nil)
+		return nil, c.connectAttemptError(attempt, err)
 	}
 
-	connected = true
-	return nil
+	c.connMutex.Lock()
+	if c.attempt != attempt || c.state != clientStateConnecting {
+		c.connMutex.Unlock()
+		_ = connection.Close()
+		return nil, errClientConnectionClosed
+	}
+	attempt.conn = connection
+	c.connMutex.Unlock()
+
+	cancelComplete := make(chan struct{})
+	stopCancel := context.AfterFunc(attempt.ctx, func() {
+		_ = connection.Close()
+		close(cancelComplete)
+	})
+
+	heartbeat, err := c.handleHandshake(attempt, connection)
+	if err == nil && afterHandshake != nil {
+		afterHandshake()
+	}
+	if !stopCancel() {
+		<-cancelComplete
+	}
+	if err == nil && attempt.ctx.Err() != nil {
+		err = attempt.ctx.Err()
+	}
+	if err != nil {
+		c.failConnectAttempt(attempt, connection)
+		return nil, c.connectAttemptError(attempt, err)
+	}
+
+	c.connMutex.Lock()
+	if c.attempt != attempt || c.state != clientStateConnecting || attempt.ctx.Err() != nil {
+		c.connMutex.Unlock()
+		c.failConnectAttempt(attempt, connection)
+		return nil, c.connectAttemptError(attempt, errClientConnectionClosed)
+	}
+	c.generationID++
+	gen := newConnectionGeneration(
+		c.generationID,
+		connection,
+		attempt.packetEncoder,
+		attempt.messageEncoder,
+	)
+	c.current = gen
+	c.conn = connection
+	c.IncomingMsgChan = gen.incomingChan
+	c.Connected = true
+	c.state = clientStateConnected
+	c.attempt = nil
+	c.startGenerationLoops(gen, heartbeat)
+	c.connMutex.Unlock()
+
+	return gen, nil
 }
 
-func (c *Client) handleHandshake() error {
-	if err := c.conn.SetReadDeadline(time.Now().Add(c.handshakeTimeout)); err != nil {
-		return fmt.Errorf("set handshake read deadline: %w", err)
+func (c *Client) failConnectAttempt(attempt *connectAttempt, conn net.Conn) {
+	if conn != nil {
+		_ = conn.Close()
 	}
-	if err := c.sendHandshakeRequest(); err != nil {
-		return err
+	c.connMutex.Lock()
+	if c.attempt == attempt {
+		c.attempt = nil
+		c.state = clientStateIdle
+		c.conn = nil
+		c.Connected = false
 	}
+	c.connMutex.Unlock()
+}
 
-	if err := c.handleHandshakeResponse(); err != nil {
+func (c *Client) connectAttemptError(attempt *connectAttempt, fallback error) error {
+	c.connMutex.Lock()
+	cancelledByDisconnect := attempt.cancelledByDisconnect
+	c.connMutex.Unlock()
+	if cancelledByDisconnect {
+		return errClientConnectionClosed
+	}
+	if err := attempt.ctx.Err(); err != nil {
 		return err
 	}
-	return nil
+	if netErr, ok := fallback.(net.Error); ok && netErr.Timeout() {
+		if deadline, hasDeadline := attempt.ctx.Deadline(); hasDeadline && !time.Now().Before(deadline) {
+			return context.DeadlineExceeded
+		}
+	}
+	return fallback
+}
+
+func (c *Client) handleHandshake(attempt *connectAttempt, conn net.Conn) (int, error) {
+	deadline := time.Now().Add(c.handshakeTimeout)
+	if contextDeadline, ok := attempt.ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	if err := conn.SetReadDeadline(deadline); err != nil {
+		return 0, fmt.Errorf("set handshake read deadline: %w", err)
+	}
+	if err := c.sendHandshakeRequestTo(conn, attempt.handshakeData, attempt.packetEncoder); err != nil {
+		return 0, err
+	}
+	heartbeat, err := c.receiveHandshakeResponseFrom(conn, attempt.packetEncoder)
+	if err != nil {
+		return 0, err
+	}
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		return 0, fmt.Errorf("clear handshake read deadline: %w", err)
+	}
+	return heartbeat, nil
 }
 
 // SendRequest sends a request to the server
@@ -564,11 +875,19 @@ func (c *Client) SendNotify(route string, data []byte) error {
 }
 
 func (c *Client) buildPacket(msg message.Message) ([]byte, error) {
-	encMsg, err := c.messageEncoder.Encode(&msg)
+	c.connMutex.Lock()
+	messageEncoder := c.messageEncoder
+	packetEncoder := c.packetEncoder
+	c.connMutex.Unlock()
+	return buildPacket(messageEncoder, packetEncoder, msg)
+}
+
+func buildPacket(messageEncoder message.Encoder, packetEncoder codec.PacketEncoder, msg message.Message) ([]byte, error) {
+	encMsg, err := messageEncoder.Encode(&msg)
 	if err != nil {
 		return nil, err
 	}
-	p, err := c.packetEncoder.Encode(packet.Data, encMsg)
+	p, err := packetEncoder.Encode(packet.Data, encMsg)
 	if err != nil {
 		return nil, err
 	}
@@ -576,9 +895,39 @@ func (c *Client) buildPacket(msg message.Message) ([]byte, error) {
 	return p, nil
 }
 
+func (c *Client) currentGeneration() *connectionGeneration {
+	c.connMutex.Lock()
+	defer c.connMutex.Unlock()
+	return c.current
+}
+
+func (gen *connectionGeneration) registerPending(pending *pendingRequest) error {
+	select {
+	case gen.slots <- struct{}{}:
+	case <-gen.closeCh:
+		return errClientConnectionClosed
+	}
+
+	gen.pendingMu.Lock()
+	defer gen.pendingMu.Unlock()
+	if gen.closed {
+		<-gen.slots
+		return errClientConnectionClosed
+	}
+	if _, exists := gen.pending[pending.msg.ID]; exists {
+		<-gen.slots
+		return fmt.Errorf("client: duplicate request id %d", pending.msg.ID)
+	}
+	gen.pending[pending.msg.ID] = pending
+	return nil
+}
+
 // sendMsg sends the request to the server
 func (c *Client) sendMsg(msgType message.Type, route string, data []byte) (uint, error) {
-	// TODO mount msg and encode
+	gen := c.currentGeneration()
+	if gen == nil {
+		return 0, errClientConnectionClosed
+	}
 	m := message.Message{
 		Type:  msgType,
 		ID:    uint(atomic.AddUint32(&c.nextID, 1)),
@@ -586,28 +935,27 @@ func (c *Client) sendMsg(msgType message.Type, route string, data []byte) (uint,
 		Data:  data,
 		Err:   false,
 	}
-	p, err := c.buildPacket(m)
-	if msgType == message.Request {
-		c.pendingChan <- true
-		c.pendingReqMutex.Lock()
-		if _, ok := c.pendingRequests[m.ID]; !ok {
-			c.pendingRequests[m.ID] = &pendingRequest{
-				msg:    &m,
-				sentAt: time.Now(),
-			}
-		}
-		c.pendingReqMutex.Unlock()
-	}
-
+	p, err := buildPacket(gen.messageEncoder, gen.packetEncoder, m)
 	if err != nil {
 		return m.ID, err
 	}
-	_, err = c.SafeWrite(p)
+	if msgType == message.Request {
+		if err := gen.registerPending(&pendingRequest{msg: &m, sentAt: time.Now()}); err != nil {
+			return m.ID, err
+		}
+	}
+
+	_, err = gen.safeWrite(p, defaultClientIOTimeout)
+	if err != nil && msgType == message.Request {
+		gen.takePending(m.ID)
+	}
 	return m.ID, err
 }
 
 func (c *Client) SafeWrite(b []byte) (n int, err error) {
-	c.writeMutex.Lock()
-	defer c.writeMutex.Unlock()
-	return c.connWriteWithDeadline(b)
+	gen := c.currentGeneration()
+	if gen == nil {
+		return 0, errClientConnectionClosed
+	}
+	return gen.safeWrite(b, defaultClientIOTimeout)
 }

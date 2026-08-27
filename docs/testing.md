@@ -527,18 +527,25 @@ pipelines session-ownership and unique echo checks on the stable bound identity.
 It observes the old client close exactly once and checks that the replacement
 still owns the UID afterward. A kick packet and peer EOF can race, so the server
 may record either normal or rebind closure; all surrounding identity and count
-checks remain mandatory. The gate requires all configured counts and the run
-identity to match a fresh atomic JSON report; a skipped/zero-match test or stale
-report cannot pass.
+checks remain mandatory. On the stable replacement sessions, the workload then
+performs 1,000 same-session Bind retries and publishes one NATS user push per
+bound user. The schema-v2 report requires attempted, successful, and configured
+retry counts to match; duplicate delivery must remain zero; active subscription
+pairs must equal bound users and return to zero during cleanup. It also records
+stale-owner drops, the exact user-subscription tracker cleanup delta, cleanup
+duration, and the client-process goroutine delta. A skipped/zero-match test,
+schema-v1 report, or stale artifact cannot pass.
 
 This lane records the soft file limit and Linux ephemeral port range. It fails
 as an environment error when they cannot cover the configured resident and
 replacement sockets; it never changes host limits or sysctls. Override
 `STRESS_CLIENTS`, `STRESS_CONNECT_CONCURRENCY`, `STRESS_REQUEST_CONCURRENCY`,
-`STRESS_RECONNECTS`, `STRESS_RECONNECT_CONCURRENCY`, `STRESS_REQUEST_TIMEOUT`,
-`STRESS_INTERNAL_TIMEOUT`, `STRESS_CLEANUP_TIMEOUT`, `STRESS_TIMEOUT`,
-`STRESS_NATS_MESSAGES_BUFFER`, or `STRESS_OUT` for local diagnosis. Reduced
-settings are smoke evidence only, not a substitute for the default gate.
+`STRESS_RECONNECTS`, `STRESS_RECONNECT_CONCURRENCY`, `STRESS_BIND_RETRIES`,
+`STRESS_REQUEST_TIMEOUT`, `STRESS_INTERNAL_TIMEOUT`, `STRESS_CLEANUP_TIMEOUT`,
+`STRESS_CLEANUP_MAX`, `STRESS_GOROUTINE_DELTA_MAX`, `STRESS_TIMEOUT`,
+`STRESS_NATS_MESSAGES_BUFFER`, or `STRESS_OUT` for local diagnosis. The default
+cleanup maximum is 30 seconds and the default goroutine delta maximum is five.
+Reduced settings are smoke evidence only, not a substitute for the default gate.
 
 The formal gate declares a stress-only NATS message buffer of 16,384 and records
 the value in its JSON report. This covers the burst of 10,000 `SessionClosed`

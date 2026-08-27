@@ -56,18 +56,13 @@ func (c *serverConnection) waitForReader() {
 	<-c.readerDone
 }
 
-func protoClient(log Log, addr string) error {
+func protoClient(log Log, _ string) error {
 	log.Println("Using protobuf client")
 	protoclient := client.NewProto(docsString)
 	pClient = protoclient
 
 	for k, v := range pushInfo {
 		protoclient.AddPushResponse(k, v)
-	}
-
-	if err := protoclient.LoadServerInfo(addr); err != nil {
-		log.Println("Failed to load server info")
-		return err
 	}
 
 	return nil

@@ -46,6 +46,7 @@ import (
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/helpers"
+	"github.com/alkaid/pitaya/v2/interfaces"
 	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/metrics"
 	"github.com/alkaid/pitaya/v2/metrics/models"
@@ -130,6 +131,43 @@ type blockingStopAcceptor struct {
 type readyMarkerObserverModule struct {
 	MyMod
 	zapLogger *zap.Logger
+}
+
+type LifecycleBarrierComponent struct {
+	MyComp
+	initEntered chan struct{}
+	releaseInit chan struct{}
+}
+
+func (component *LifecycleBarrierComponent) Init() {
+	close(component.initEntered)
+	<-component.releaseInit
+	component.MyComp.Init()
+}
+
+type FailingLifecycleBarrierComponent struct {
+	MyComp
+	initEntered chan struct{}
+	releaseInit chan struct{}
+	failure     error
+}
+
+func (component *FailingLifecycleBarrierComponent) Init() {
+	close(component.initEntered)
+	<-component.releaseInit
+	panic(component.failure)
+}
+
+type ShutdownBarrierComponent struct {
+	MyComp
+	beforeShutdownEntered chan struct{}
+	releaseShutdown       chan struct{}
+}
+
+func (component *ShutdownBarrierComponent) BeforeShutdown() {
+	close(component.beforeShutdownEntered)
+	<-component.releaseShutdown
+	component.MyComp.BeforeShutdown()
 }
 
 func (m *readyMarkerObserverModule) AfterInit() {
@@ -341,6 +379,7 @@ func TestInitSysRemotes(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	sessionPool := mocks.NewMockSessionPool(ctrl)
 	sessionPool.EXPECT().OnSessionBind(gomock.Any()).Times(1)
+	sessionPool.EXPECT().OnAfterSessionBind(gomock.Any()).Times(1)
 	sessionPool.EXPECT().OnSessionClose(gomock.Any()).Times(1)
 
 	app := newTestAppForComponents(&backendCoordinatorTestPool{SessionPool: sessionPool})
@@ -367,9 +406,9 @@ func TestSetDictionary(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, expected, message.GetDictionary())
 
-	app.configurationLocked.Store(true)
+	app.lifecycleState.Store(uint32(appStateStarting))
 	err = app.SetDictionary(dict)
-	assert.EqualError(t, constants.ErrChangeDictionaryWhileRunning, err.Error())
+	assert.ErrorIs(t, err, constants.ErrAppConfigurationLocked)
 }
 
 var appDictionarySequence atomic.Uint32
@@ -389,11 +428,11 @@ func TestAddRoute(t *testing.T) {
 	})
 	assert.NoError(t, err)
 
-	app.configurationLocked.Store(true)
+	app.lifecycleState.Store(uint32(appStateStarting))
 	err = app.AddRoute("somesv", func(ctx context.Context, route *route.Route, payload []byte, servers map[string]*cluster.Server, session session.Session) (*cluster.Server, error) {
 		return nil, nil
 	})
-	assert.EqualError(t, constants.ErrChangeRouteWhileRunning, err.Error())
+	assert.ErrorIs(t, err, constants.ErrAppConfigurationLocked)
 }
 
 func TestShutdown(t *testing.T) {
@@ -421,6 +460,364 @@ func TestShutdownToleratesClosedLegacyDieChannel(t *testing.T) {
 	app := newAppTestApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
 	close(app.dieChan)
 	assert.NotPanics(t, app.Shutdown)
+}
+
+func TestAppConfigurationAdmissionByLifecycleState(t *testing.T) {
+	states := []appLifecycleState{
+		appStateCreated,
+		appStateStarting,
+		appStateRunning,
+		appStateStopping,
+		appStateStopped,
+	}
+	for _, state := range states {
+		t.Run(state.String(), func(t *testing.T) {
+			app := newTestAppForComponents(nil)
+			app.router = router.New()
+			app.modulesMap = make(map[string]interfaces.Module)
+			app.lifecycleState.Store(uint32(state))
+
+			assertResult := func(err error) {
+				t.Helper()
+				if state == appStateCreated {
+					require.NoError(t, err)
+					return
+				}
+				require.ErrorIs(t, err, constants.ErrAppConfigurationLocked)
+			}
+
+			assertResult(app.Register(&MyComp{}, component.WithName("handler")))
+			assertResult(app.RegisterRemote(&MyComp{}, component.WithName("remote")))
+			assertResult(app.RegisterSubscribe(&MyComp{}, component.WithName("subscriber")))
+			assertResult(app.RegisterModule(&MyMod{}, "module"))
+			assertResult(app.OnStarted(func() {}))
+			assertResult(app.AddRoute("backend", nil))
+		})
+	}
+}
+
+func TestAppRegisterAndStartShareOneAdmissionDecision(t *testing.T) {
+	for iteration := 0; iteration < 20; iteration++ {
+		cfg := config.NewDefaultPitayaConfig()
+		app := newAppTestApp(false, "registration-race", Standalone, nil, *cfg).(*App)
+		registered := &MyComp{}
+		registerDone := make(chan error, 1)
+		startDone := make(chan any, 1)
+
+		app.configurationMu.Lock()
+		go func() {
+			registerDone <- app.Register(registered, component.WithName("race"))
+		}()
+		go func() {
+			defer func() { startDone <- recover() }()
+			app.Start()
+		}()
+		app.configurationMu.Unlock()
+
+		registerErr := <-registerDone
+		require.Eventually(t, app.IsRunning, 5*time.Second, time.Millisecond)
+		app.Shutdown()
+		select {
+		case recovered := <-startDone:
+			require.Nil(t, recovered)
+		case <-time.After(5 * time.Second):
+			t.Fatal("App did not finish after registration race")
+		}
+
+		if registerErr == nil {
+			assert.Equal(t, 1, registered.initCount)
+			assert.Equal(t, 1, registered.beforeShutdownCount)
+			assert.Equal(t, 1, registered.shutdownCount)
+		} else {
+			require.ErrorIs(t, registerErr, constants.ErrAppConfigurationLocked)
+			assert.Zero(t, registered.initCount)
+			assert.Zero(t, registered.beforeShutdownCount)
+			assert.Zero(t, registered.shutdownCount)
+		}
+	}
+}
+
+func TestAppConcurrentStartAndShutdownDuringStarting(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig()
+	app := newAppTestApp(false, "lifecycle-race", Standalone, nil, *cfg).(*App)
+	barrier := &LifecycleBarrierComponent{
+		initEntered: make(chan struct{}),
+		releaseInit: make(chan struct{}),
+	}
+	require.NoError(t, app.Register(barrier, component.WithName("barrier")))
+
+	firstStart := make(chan any, 1)
+	go func() {
+		defer func() { firstStart <- recover() }()
+		app.Start()
+	}()
+	select {
+	case <-barrier.initEntered:
+	case recovered := <-firstStart:
+		t.Fatalf("App.Start exited before component barrier: %v", recovered)
+	case <-time.After(time.Second):
+		t.Fatal("component Init did not reach barrier")
+	}
+	require.Equal(t, appStateStarting, app.state())
+
+	secondStart := make(chan any, 1)
+	go func() {
+		defer func() { secondStart <- recover() }()
+		app.Start()
+	}()
+	select {
+	case recovered := <-secondStart:
+		require.ErrorIs(t, recovered.(error), constants.ErrAppAlreadyStarted)
+	case <-time.After(time.Second):
+		t.Fatal("concurrent Start did not fail")
+	}
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		app.Shutdown()
+		close(shutdownDone)
+	}()
+	require.Eventually(t, func() bool {
+		app.configurationMu.Lock()
+		defer app.configurationMu.Unlock()
+		return app.stopRequested
+	}, time.Second, time.Millisecond)
+
+	close(barrier.releaseInit)
+	select {
+	case recovered := <-firstStart:
+		require.Nil(t, recovered)
+	case <-time.After(5 * time.Second):
+		t.Fatal("startup owner did not finish rollback")
+	}
+	select {
+	case <-shutdownDone:
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not join startup rollback")
+	}
+
+	require.Equal(t, appStateStopped, app.state())
+	assert.Equal(t, 1, barrier.initCount)
+	assert.Equal(t, 1, barrier.beforeShutdownCount)
+	assert.Equal(t, 1, barrier.shutdownCount)
+	assert.ErrorIs(t, app.Register(&MyComp{}), constants.ErrAppConfigurationLocked)
+	assert.PanicsWithValue(t, constants.ErrAppAlreadyStarted, app.Start)
+}
+
+func TestAppStartupFailureAndShutdownBeforeStartAreTerminal(t *testing.T) {
+	t.Run("startup failure", func(t *testing.T) {
+		cfg := config.NewDefaultPitayaConfig()
+		app := newAppTestApp(true, "invalid-start", Standalone, nil, *cfg).(*App)
+		assert.Panics(t, app.Start)
+		require.Equal(t, appStateStopped, app.state())
+		assert.PanicsWithValue(t, constants.ErrAppAlreadyStarted, app.Start)
+	})
+
+	t.Run("shutdown before start", func(t *testing.T) {
+		cfg := config.NewDefaultPitayaConfig()
+		app := newAppTestApp(false, "shutdown-before-start", Standalone, nil, *cfg).(*App)
+		app.Shutdown()
+		require.Equal(t, appStateStopped, app.state())
+		assert.PanicsWithValue(t, constants.ErrAppAlreadyStarted, app.Start)
+		assert.NotPanics(t, app.Shutdown)
+	})
+}
+
+func TestAppStartupFailureIsNotMaskedByConcurrentShutdown(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig()
+	app := newAppTestApp(false, "startup-failure-shutdown", Standalone, nil, *cfg).(*App)
+	initialized := &MyComp{}
+	startupFailure := errors.New("startup failure")
+	failing := &FailingLifecycleBarrierComponent{
+		initEntered: make(chan struct{}),
+		releaseInit: make(chan struct{}),
+		failure:     startupFailure,
+	}
+	require.NoError(t, app.Register(initialized, component.WithName("initialized")))
+	require.NoError(t, app.Register(failing, component.WithName("failing")))
+
+	startDone := make(chan any, 1)
+	go func() {
+		defer func() { startDone <- recover() }()
+		app.Start()
+	}()
+	select {
+	case <-failing.initEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("failing component did not reach Init barrier")
+	}
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		app.Shutdown()
+		close(shutdownDone)
+	}()
+	require.Eventually(t, func() bool {
+		app.configurationMu.Lock()
+		defer app.configurationMu.Unlock()
+		return app.stopRequested
+	}, time.Second, time.Millisecond)
+	close(failing.releaseInit)
+
+	select {
+	case recovered := <-startDone:
+		require.ErrorIs(t, recovered.(error), startupFailure)
+	case <-time.After(5 * time.Second):
+		t.Fatal("startup owner did not surface the initialization failure")
+	}
+	select {
+	case <-shutdownDone:
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown did not join startup rollback")
+	}
+	require.Equal(t, appStateStopped, app.state())
+	assert.Equal(t, 1, initialized.initCount)
+	assert.Equal(t, 1, initialized.beforeShutdownCount)
+	assert.Equal(t, 1, initialized.shutdownCount)
+}
+
+func TestAppOnStartedCanShutdownSynchronously(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig()
+	app := newAppTestApp(false, "on-started-shutdown", Standalone, nil, *cfg).(*App)
+	callbackDone := make(chan struct{})
+	require.NoError(t, app.OnStarted(func() {
+		app.Shutdown()
+		close(callbackDone)
+	}))
+
+	startDone := make(chan any, 1)
+	go func() {
+		defer func() { startDone <- recover() }()
+		app.Start()
+	}()
+
+	select {
+	case <-callbackDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnStarted callback deadlocked in Shutdown")
+	}
+	select {
+	case recovered := <-startDone:
+		require.Nil(t, recovered)
+	case <-time.After(5 * time.Second):
+		t.Fatal("App did not finish teardown after OnStarted requested shutdown")
+	}
+	require.Equal(t, appStateStopped, app.state())
+}
+
+func TestAppShutdownDuringActiveOnStartedReturnsAfterSignaling(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig()
+	app := newAppTestApp(false, "on-started-external-shutdown", Standalone, nil, *cfg).(*App)
+	callbackStarted := make(chan struct{})
+	releaseCallback := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-releaseCallback:
+		default:
+			close(releaseCallback)
+		}
+	})
+	require.NoError(t, app.OnStarted(func() {
+		close(callbackStarted)
+		<-releaseCallback
+	}))
+
+	startDone := make(chan any, 1)
+	go func() {
+		defer func() { startDone <- recover() }()
+		app.Start()
+	}()
+	select {
+	case <-callbackStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnStarted callback did not begin")
+	}
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		app.Shutdown()
+		close(shutdownDone)
+	}()
+	select {
+	case <-shutdownDone:
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown waited for an active OnStarted callback")
+	}
+	assert.Equal(t, appStateStopping, app.state())
+	select {
+	case <-startDone:
+		t.Fatal("Start returned before the active OnStarted callback exited")
+	default:
+	}
+
+	close(releaseCallback)
+	select {
+	case recovered := <-startDone:
+		require.Nil(t, recovered)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not finish teardown after the OnStarted callback exited")
+	}
+	require.Equal(t, appStateStopped, app.state())
+}
+
+func TestAppConcurrentShutdownHasOneTeardownOwner(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig()
+	app := newAppTestApp(false, "concurrent-shutdown", Standalone, nil, *cfg).(*App)
+	barrier := &ShutdownBarrierComponent{
+		beforeShutdownEntered: make(chan struct{}),
+		releaseShutdown:       make(chan struct{}),
+	}
+	require.NoError(t, app.Register(barrier, component.WithName("shutdown-barrier")))
+
+	startDone := make(chan any, 1)
+	go func() {
+		defer func() { startDone <- recover() }()
+		app.Start()
+	}()
+	require.Eventually(t, app.IsRunning, 5*time.Second, time.Millisecond)
+
+	const shutdownCalls = 32
+	var shutdownWG sync.WaitGroup
+	shutdownWG.Add(shutdownCalls)
+	allShutdownDone := make(chan struct{})
+	for range shutdownCalls {
+		go func() {
+			defer shutdownWG.Done()
+			app.Shutdown()
+		}()
+	}
+	go func() {
+		shutdownWG.Wait()
+		close(allShutdownDone)
+	}()
+
+	select {
+	case <-barrier.beforeShutdownEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("teardown owner did not reach component barrier")
+	}
+	select {
+	case <-allShutdownDone:
+		t.Fatal("concurrent Shutdown returned before lifecycle completion")
+	default:
+	}
+	close(barrier.releaseShutdown)
+	select {
+	case <-allShutdownDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("concurrent Shutdown callers did not join lifecycle completion")
+	}
+	select {
+	case recovered := <-startDone:
+		require.Nil(t, recovered)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start owner did not observe completed shutdown")
+	}
+
+	require.Equal(t, appStateStopped, app.state())
+	assert.Equal(t, 1, barrier.initCount)
+	assert.Equal(t, 1, barrier.beforeShutdownCount)
+	assert.Equal(t, 1, barrier.shutdownCount)
 }
 
 func TestInternalDependencyFailureStopsAppWhenLegacyEventIsObserved(t *testing.T) {
@@ -828,7 +1225,7 @@ func TestStartAndListenStandalone(t *testing.T) {
 		}
 	})
 	helpers.ShouldEventuallyReturn(t, func() bool {
-		return app.running.Load()
+		return app.IsRunning()
 	}, true)
 
 	assert.NotNil(t, app.handlerService)
@@ -1282,25 +1679,73 @@ func TestAppStartsAndStopsWSSAcceptor(t *testing.T) {
 	}
 }
 
-func TestAppStopsWhenAcceptorReturnsNilUnexpectedly(t *testing.T) {
+func TestAppRejectsAcceptorThatStopsAfterReportingReadiness(t *testing.T) {
 	cfg := config.NewDefaultPitayaConfig()
 	builder := newAppTestBuilder(true, "early-exit", Standalone, nil, *cfg)
 	builder.AddAcceptor(newUnexpectedExitAcceptor())
 	app := builder.Build().(*App)
+	started := make(chan struct{})
+	require.NoError(t, app.OnStarted(func() { close(started) }))
 
-	done := make(chan struct{})
+	panicResult := make(chan any, 1)
 	go func() {
-		defer close(done)
+		defer func() { panicResult <- recover() }()
 		app.Start()
 	}()
 
 	select {
-	case <-done:
+	case recovered := <-panicResult:
+		require.NotNil(t, recovered)
+		assert.Contains(t, fmt.Sprint(recovered), "stopped after reporting readiness")
 	case <-time.After(5 * time.Second):
 		app.Shutdown()
-		t.Fatal("App did not stop after its acceptor returned unexpectedly")
+		t.Fatal("App did not reject the stopped acceptor")
 	}
 	assert.False(t, app.IsRunning())
+	select {
+	case <-started:
+		t.Fatal("OnStarted ran for an acceptor that had already stopped")
+	default:
+	}
+}
+
+func TestSignalStopSerializesWithRunningPublication(t *testing.T) {
+	app := &App{stopCh: make(chan struct{})}
+	app.configurationMu.Lock()
+
+	entered := make(chan struct{})
+	returned := make(chan struct{})
+	go func() {
+		close(entered)
+		app.signalStop()
+		close(returned)
+	}()
+	<-entered
+
+	select {
+	case <-returned:
+		app.configurationMu.Unlock()
+		t.Fatal("signalStop bypassed the running publication lock")
+	case <-time.After(25 * time.Millisecond):
+	}
+	select {
+	case <-app.stopCh:
+		app.configurationMu.Unlock()
+		t.Fatal("signalStop closed stopCh while running publication was locked")
+	default:
+	}
+
+	app.configurationMu.Unlock()
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("signalStop did not complete after running publication unlocked")
+	}
+	select {
+	case <-app.stopCh:
+	default:
+		t.Fatal("signalStop returned without closing stopCh")
+	}
 }
 
 func TestStartAndListenCluster(t *testing.T) {
@@ -1547,7 +1992,7 @@ func TestAppStatelessStartupFailsFast(t *testing.T) {
 
 	ants.Release()
 	assert.True(t, errors.Is(recoverError(app.Start), ants.ErrPoolClosed))
-	assert.False(t, app.running.Load())
+	assert.False(t, app.IsRunning())
 	assert.False(t, acc.IsRunning())
 	assert.False(t, comp.running)
 	assert.Equal(t, 1, comp.initCount)

@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alkaid/viper"
 	"github.com/alkaid/pitaya/v2"
 	"github.com/alkaid/pitaya/v2/acceptor"
 	"github.com/alkaid/pitaya/v2/acceptorwrapper"
@@ -14,6 +13,7 @@ import (
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/examples/demo/rate_limiting/services"
 	"github.com/alkaid/pitaya/v2/metrics"
+	"github.com/alkaid/viper"
 )
 
 func createAcceptor(port int, reporters []metrics.Reporter) acceptor.Acceptor {
@@ -35,6 +35,11 @@ func createAcceptor(port int, reporters []metrics.Reporter) acceptor.Acceptor {
 
 var app pitaya.Pitaya
 
+func runApp(lifecycle pitaya.Lifecycle) {
+	defer lifecycle.Shutdown()
+	lifecycle.Start()
+}
+
 func main() {
 	port := flag.Int("port", 3250, "the port to listen")
 	svType := "room"
@@ -47,13 +52,11 @@ func main() {
 
 	app = builder.Build()
 
-	defer app.Shutdown()
-
 	room := services.NewRoom()
 	app.Register(room,
 		component.WithName("room"),
 		component.WithNameFunc(strings.ToLower),
 	)
 
-	app.Start()
+	runApp(app)
 }

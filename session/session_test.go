@@ -40,7 +40,6 @@ import (
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/util"
 	"github.com/google/uuid"
-	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
@@ -1635,38 +1634,6 @@ func TestStoreAndRemoveSessionLocalAreAtomic(t *testing.T) {
 	})
 }
 
-func TestSessionCloseFrontendWithSubscription(t *testing.T) {
-	s := helpers.GetTestNatsServer(t)
-	defer s.Shutdown()
-	initialSubs := s.NumSubscriptions()
-
-	conn, err := nats.Connect(fmt.Sprintf("nats://%s", s.Addr()))
-	assert.NoError(t, err)
-	defer conn.Close()
-
-	subs, err := conn.Subscribe(uuid.New().String(), func(msg *nats.Msg) {})
-	assert.NoError(t, err)
-
-	helpers.ShouldEventuallyReturn(t, s.NumSubscriptions, initialSubs+1)
-	helpers.ShouldEventuallyReturn(t, conn.NumSubscriptions, 1)
-
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
-	mockEntity := mocks.NewMockNetworkEntity(ctrl)
-	sessionPool := NewSessionPool()
-	ss := newTestSession(sessionPool, mockEntity, true)
-	assert.NotNil(t, ss)
-	ss.SetSubscriptions([]*nats.Subscription{subs})
-
-	mockEntity.EXPECT().Close(nil)
-	ss.Close(nil)
-	ss.Close(nil)
-
-	helpers.ShouldEventuallyReturn(t, s.NumSubscriptions, initialSubs)
-	helpers.ShouldEventuallyReturn(t, conn.NumSubscriptions, 0)
-}
-
 func TestSessionRemoteAddr(t *testing.T) {
 	t.Parallel()
 
@@ -2637,9 +2604,7 @@ func TestSessionPoolRangesAndSessionSnapshots(t *testing.T) {
 	callbacks := []func(){func() {}}
 	local.SetOnCloseCallbacks(callbacks)
 	local.SetIsFrontend(false)
-	local.SetSubscriptions(nil)
 	callbacks[0] = nil
 	assert.Len(t, local.GetOnCloseCallbacks(), 1)
 	assert.False(t, local.GetIsFrontend())
-	assert.Empty(t, local.GetSubscriptions())
 }

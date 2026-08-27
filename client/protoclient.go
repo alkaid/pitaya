@@ -23,12 +23,14 @@ package client
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
@@ -61,6 +63,17 @@ type ProtoBufferInfo struct {
 	Commands map[string]*Command
 }
 
+type protoConnectAttempt struct {
+	done      chan struct{}
+	cancelled bool
+	bootstrap *Client
+}
+
+type protoGenerationReader struct {
+	generation *connectionGeneration
+	done       chan struct{}
+}
+
 // ProtoClient struct
 type ProtoClient struct {
 	Client
@@ -71,7 +84,10 @@ type ProtoClient struct {
 	IncomingMsgChan         chan *message.Message
 	expectedInputDescriptor protoreflect.MessageDescriptor
 	ready                   bool
-	closeChan               chan bool
+
+	stateMu       sync.RWMutex
+	activeAttempt *protoConnectAttempt
+	reader        *protoGenerationReader
 }
 
 // MsgChannel return the incoming message channel
@@ -191,6 +207,10 @@ func getKeys(info map[string]interface{}, keysSet map[string]bool) {
 // not set, this function identify the route responsible for providing the
 // protobuf descriptors.
 func (pc *ProtoClient) getDescriptors(data string) error {
+	return pc.getDescriptorsForGeneration(data, pc.Client.currentGeneration())
+}
+
+func (pc *ProtoClient) getDescriptorsForGeneration(data string, gen *connectionGeneration) error {
 	d := []byte(data)
 	var jsonmap interface{}
 	if err := json.Unmarshal(d, &jsonmap); err != nil {
@@ -262,7 +282,10 @@ func (pc *ProtoClient) getDescriptors(data string) error {
 		return fmt.Errorf("failed to send proto descriptors request: %w", err)
 	}
 
-	response := <-pc.Client.IncomingMsgChan
+	response, err := pc.receiveClientMessage(gen)
+	if err != nil {
+		return fmt.Errorf("failed to receive proto descriptors response: %w", err)
+	}
 	descriptors := &protos.ProtoDescriptors{}
 	if err := proto.Unmarshal(response.Data, descriptors); err != nil {
 		return fmt.Errorf("failed to unmarshal proto descriptors response: %w", err)
@@ -300,7 +323,6 @@ func newProto(requestTimeout ...time.Duration) *ProtoClient {
 		docsRoute:        "",
 		descriptorsRoute: "",
 		IncomingMsgChan:  make(chan *message.Message, 10),
-		closeChan:        make(chan bool),
 	}
 }
 
@@ -323,61 +345,55 @@ func NewWithDescriptor(descriptorsRoute string, docsRoute string, requestTimeout
 // LoadServerInfo load commands information from the server. Addr is the
 // server address.
 func (pc *ProtoClient) LoadServerInfo(uri string) error {
-	pc.ready = false
-
-	if err := pc.Client.ConnectTo(uri); err != nil {
-		return err
-	}
-
-	// request doc info
-	_, err := pc.SendRequest(pc.docsRoute, make([]byte, 0))
+	attempt, err := pc.beginConnectAttempt()
 	if err != nil {
-		pc.Disconnect(CloseReasonFatal)
 		return err
 	}
-	response := <-pc.Client.IncomingMsgChan
+	defer pc.finishConnectAttempt(attempt)
 
-	docs := &protos.Doc{}
-	if err := proto.Unmarshal(response.Data, docs); err != nil {
-		pc.Disconnect(CloseReasonFatal)
-		return fmt.Errorf("failed to unmarshal docs route response: %w", err)
+	bootstrap, err := pc.bootstrapServerInfo(attempt, uri, nil)
+	if err != nil {
+		return err
 	}
-
-	if err := pc.getDescriptors(docs.Doc); err != nil {
-		pc.Disconnect(CloseReasonFatal)
-		return fmt.Errorf("failed to read proto descriptors: %w", err)
-	}
-	// TODO 这里不明白为什么要断开上层后续自己再重联,可能是descriptor解析耗时操作可能使得服务端踢出?
-	pc.Disconnect(CloseReasonManual)
-	pc.ready = true
-
-	return nil
+	return pc.commitBootstrap(attempt, bootstrap)
 }
 
 // Disconnect the client
 func (pc *ProtoClient) Disconnect(reason CloseReason) {
+	pc.stateMu.Lock()
+	attempt := pc.activeAttempt
+	var bootstrap *Client
+	if attempt != nil {
+		attempt.cancelled = true
+		bootstrap = attempt.bootstrap
+	}
+	pc.stateMu.Unlock()
+
+	if bootstrap != nil {
+		bootstrap.Disconnect(reason)
+	}
 	pc.Client.Disconnect(reason)
-	if pc.ready {
-		pc.closeChan <- true
+	if attempt != nil {
+		<-attempt.done
 	}
 }
 
 // Wait for new messages from the server or the connection end. If the menssage
 // has a response.Route, it decodes based on it. If not, it will try to decode
 // the menssage using the last expected response.
-func (pc *ProtoClient) waitForData() {
+func (pc *ProtoClient) waitForData(gen *connectionGeneration) {
+	incoming := gen.incomingChan
 	for {
 		select {
-		case response := <-pc.Client.IncomingMsgChan:
-			inputMsg := dynamicpb.NewMessage(pc.expectedInputDescriptor)
-
-			msg, ok := pc.info.Commands[response.Route]
-			if ok {
-				inputMsg = dynamicpb.NewMessage(msg.outputMsgDescriptor)
-			} else {
-				pc.expectedInputDescriptor = nil
+		case response := <-incoming:
+			if response == nil {
+				continue
 			}
-
+			select {
+			case <-gen.closeCh:
+				return
+			default:
+			}
 			if response.Err {
 				errMsg := &apierrors.Status{}
 				err := proto.Unmarshal(response.Data, errMsg)
@@ -390,14 +406,18 @@ func (pc *ProtoClient) waitForData() {
 					Log.Error("error encode error to json", zap.String("data", string(response.Data)))
 					continue
 				}
-				pc.IncomingMsgChan <- response
+				if !pc.deliverProtoMessage(gen, response) {
+					return
+				}
 				continue
 			}
 
-			if inputMsg == nil {
+			inputDescriptor := pc.outputDescriptorForResponse(gen, response.Route)
+			if inputDescriptor == nil {
 				Log.Error("not expected data", zap.String("data", string(response.Data)))
 				continue
 			}
+			inputMsg := dynamicpb.NewMessage(inputDescriptor)
 
 			err := proto.Unmarshal(response.Data, inputMsg)
 			if err != nil {
@@ -412,8 +432,10 @@ func (pc *ProtoClient) waitForData() {
 			}
 
 			response.Data = data
-			pc.IncomingMsgChan <- response
-		case <-pc.closeChan:
+			if !pc.deliverProtoMessage(gen, response) {
+				return
+			}
+		case <-gen.closeCh:
 			return
 		}
 	}
@@ -422,26 +444,264 @@ func (pc *ProtoClient) waitForData() {
 // ConnectTo connects to the server at addr, for now the only supported protocol is tcp
 // this methods blocks as it also handles the messages from the server
 func (pc *ProtoClient) ConnectTo(addr string, tlsConfig ...*tls.Config) error {
-	err := pc.Client.ConnectTo(addr, tlsConfig...)
+	attempt, err := pc.beginConnectAttempt()
 	if err != nil {
 		return err
 	}
+	attemptFinished := false
+	defer func() {
+		if !attemptFinished {
+			pc.finishConnectAttempt(attempt)
+		}
+	}()
 
-	if !pc.ready {
-		err = pc.LoadServerInfo(addr)
-		if err != nil {
+	pc.stateMu.RLock()
+	ready := pc.ready
+	pc.stateMu.RUnlock()
+	if !ready {
+		bootstrap, bootstrapErr := pc.bootstrapServerInfo(attempt, addr, tlsConfig)
+		if bootstrapErr != nil {
+			return bootstrapErr
+		}
+		if err = pc.commitBootstrap(attempt, bootstrap); err != nil {
 			return err
 		}
 	}
+	if pc.connectAttemptCancelled(attempt) {
+		return errClientConnectionClosed
+	}
 
-	if pc.ready {
-		go pc.waitForData()
+	gen, err := pc.Client.connectToContext(context.Background(), addr, tlsConfig, nil)
+	if err != nil {
+		return err
+	}
+	if pc.connectAttemptCancelled(attempt) {
+		pc.Client.disconnectGeneration(gen, CloseReasonManual)
+		return errClientConnectionClosed
+	}
+	pc.startGenerationReader(gen)
+	cancelled := pc.finishConnectAttempt(attempt)
+	attemptFinished = true
+	if cancelled {
+		pc.Client.disconnectGeneration(gen, CloseReasonManual)
+		return errClientConnectionClosed
 	}
 	return nil
 }
 
+func (pc *ProtoClient) beginConnectAttempt() (*protoConnectAttempt, error) {
+	pc.stateMu.Lock()
+	defer pc.stateMu.Unlock()
+	if pc.activeAttempt != nil {
+		return nil, errClientConnecting
+	}
+	attempt := &protoConnectAttempt{done: make(chan struct{})}
+	pc.activeAttempt = attempt
+	return attempt, nil
+}
+
+func (pc *ProtoClient) finishConnectAttempt(attempt *protoConnectAttempt) bool {
+	pc.stateMu.Lock()
+	cancelled := attempt.cancelled
+	if pc.activeAttempt == attempt {
+		pc.activeAttempt = nil
+	}
+	attempt.bootstrap = nil
+	close(attempt.done)
+	pc.stateMu.Unlock()
+	return cancelled
+}
+
+func (pc *ProtoClient) connectAttemptCancelled(attempt *protoConnectAttempt) bool {
+	pc.stateMu.RLock()
+	defer pc.stateMu.RUnlock()
+	return attempt.cancelled
+}
+
+func (pc *ProtoClient) setBootstrapClient(attempt *protoConnectAttempt, bootstrap *Client) error {
+	pc.stateMu.Lock()
+	defer pc.stateMu.Unlock()
+	if pc.activeAttempt != attempt || attempt.cancelled {
+		return errClientConnectionClosed
+	}
+	attempt.bootstrap = bootstrap
+	return nil
+}
+
+func (pc *ProtoClient) clearBootstrapClient(attempt *protoConnectAttempt, bootstrap *Client) {
+	pc.stateMu.Lock()
+	if pc.activeAttempt == attempt && attempt.bootstrap == bootstrap {
+		attempt.bootstrap = nil
+	}
+	pc.stateMu.Unlock()
+}
+
+func cloneCommand(command *Command) *Command {
+	if command == nil {
+		return nil
+	}
+	copy := *command
+	return &copy
+}
+
+func (pc *ProtoClient) newBootstrapClient() *ProtoClient {
+	pc.stateMu.RLock()
+	bootstrap := newProto(pc.requestTimeout)
+	bootstrap.docsRoute = pc.docsRoute
+	bootstrap.descriptorsRoute = pc.descriptorsRoute
+	for route, command := range pc.info.Commands {
+		bootstrap.info.Commands[route] = cloneCommand(command)
+	}
+	pc.stateMu.RUnlock()
+
+	pc.Client.connMutex.Lock()
+	bootstrap.Client.clientHandshakeData = pc.Client.clientHandshakeData
+	bootstrap.Client.packetEncoder = pc.Client.packetEncoder
+	bootstrap.Client.messageEncoder = pc.Client.messageEncoder
+	bootstrap.Client.handshakeTimeout = pc.Client.handshakeTimeout
+	pc.Client.connMutex.Unlock()
+	return bootstrap
+}
+
+func (pc *ProtoClient) bootstrapServerInfo(
+	attempt *protoConnectAttempt,
+	uri string,
+	tlsConfig []*tls.Config,
+) (*ProtoClient, error) {
+	bootstrap := pc.newBootstrapClient()
+	if err := pc.setBootstrapClient(attempt, &bootstrap.Client); err != nil {
+		return nil, err
+	}
+	defer pc.clearBootstrapClient(attempt, &bootstrap.Client)
+
+	gen, err := bootstrap.Client.connectToContext(context.Background(), uri, tlsConfig, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		bootstrap.Client.disconnectGeneration(gen, CloseReasonManual)
+		gen.loops.Wait()
+	}()
+
+	if pc.connectAttemptCancelled(attempt) {
+		return nil, errClientConnectionClosed
+	}
+	if _, err = bootstrap.Client.SendRequest(bootstrap.docsRoute, nil); err != nil {
+		return nil, err
+	}
+	response, err := bootstrap.receiveClientMessage(gen)
+	if err != nil {
+		return nil, fmt.Errorf("failed to receive docs route response: %w", err)
+	}
+	docs := &protos.Doc{}
+	if err := proto.Unmarshal(response.Data, docs); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal docs route response: %w", err)
+	}
+	if err := bootstrap.getDescriptorsForGeneration(docs.Doc, gen); err != nil {
+		return nil, fmt.Errorf("failed to read proto descriptors: %w", err)
+	}
+	if pc.connectAttemptCancelled(attempt) {
+		return nil, errClientConnectionClosed
+	}
+	return bootstrap, nil
+}
+
+func (pc *ProtoClient) commitBootstrap(attempt *protoConnectAttempt, bootstrap *ProtoClient) error {
+	pc.stateMu.Lock()
+	defer pc.stateMu.Unlock()
+	if pc.activeAttempt != attempt || attempt.cancelled {
+		return errClientConnectionClosed
+	}
+	pc.info = bootstrap.info
+	pc.descriptorsNames = bootstrap.descriptorsNames
+	pc.descriptorsRoute = bootstrap.descriptorsRoute
+	pc.ready = true
+	return nil
+}
+
+func (pc *ProtoClient) receiveClientMessage(gen *connectionGeneration) (*message.Message, error) {
+	if gen == nil {
+		incoming := pc.Client.MsgChannel()
+		if incoming == nil {
+			return nil, errClientConnectionClosed
+		}
+		response := <-incoming
+		if response == nil {
+			return nil, errClientConnectionClosed
+		}
+		return response, nil
+	}
+	select {
+	case response := <-gen.incomingChan:
+		if response == nil {
+			return nil, errClientConnectionClosed
+		}
+		return response, nil
+	case <-gen.closeCh:
+		return nil, errClientConnectionClosed
+	}
+}
+
+func (pc *ProtoClient) deliverProtoMessage(gen *connectionGeneration, response *message.Message) bool {
+	if !pc.isCurrentReaderGeneration(gen) {
+		return false
+	}
+	select {
+	case pc.IncomingMsgChan <- response:
+		return true
+	case <-gen.closeCh:
+		return false
+	}
+}
+
+func (pc *ProtoClient) isCurrentReaderGeneration(gen *connectionGeneration) bool {
+	pc.stateMu.RLock()
+	defer pc.stateMu.RUnlock()
+	return pc.reader != nil && pc.reader.generation == gen
+}
+
+func (pc *ProtoClient) outputDescriptorForResponse(gen *connectionGeneration, route string) protoreflect.MessageDescriptor {
+	pc.stateMu.Lock()
+	defer pc.stateMu.Unlock()
+	if pc.reader == nil || pc.reader.generation != gen {
+		return nil
+	}
+	if command, ok := pc.info.Commands[route]; ok && command != nil {
+		return command.outputMsgDescriptor
+	}
+	descriptor := pc.expectedInputDescriptor
+	pc.expectedInputDescriptor = nil
+	return descriptor
+}
+
+func (pc *ProtoClient) startGenerationReader(gen *connectionGeneration) *protoGenerationReader {
+	pc.stateMu.RLock()
+	previous := pc.reader
+	pc.stateMu.RUnlock()
+	if previous != nil && previous.generation != gen {
+		<-previous.done
+	}
+
+	reader := &protoGenerationReader{generation: gen, done: make(chan struct{})}
+	pc.stateMu.Lock()
+	pc.reader = reader
+	pc.stateMu.Unlock()
+	go func() {
+		defer close(reader.done)
+		pc.waitForData(gen)
+		pc.stateMu.Lock()
+		if pc.reader == reader {
+			pc.reader = nil
+		}
+		pc.stateMu.Unlock()
+	}()
+	return reader
+}
+
 // ExportInformation export supported server commands information
 func (pc *ProtoClient) ExportInformation() *ProtoBufferInfo {
+	pc.stateMu.RLock()
+	defer pc.stateMu.RUnlock()
 	if !pc.ready {
 		return nil
 	}
@@ -453,6 +713,8 @@ func (pc *ProtoClient) LoadInfo(info *ProtoBufferInfo) error {
 	if info == nil {
 		return errors.New("protobuffer information invalid")
 	}
+	pc.stateMu.Lock()
+	defer pc.stateMu.Unlock()
 	pc.info = *info
 	pc.ready = true
 	return nil
@@ -461,6 +723,8 @@ func (pc *ProtoClient) LoadInfo(info *ProtoBufferInfo) error {
 // AddPushResponse add a push response. Must be ladded before LoadInfo.
 func (pc *ProtoClient) AddPushResponse(route string, protoName string) {
 	if route != "" && protoName != "" {
+		pc.stateMu.Lock()
+		defer pc.stateMu.Unlock()
 		var command Command
 		command.input = ""
 		command.output = protoName
@@ -471,14 +735,19 @@ func (pc *ProtoClient) AddPushResponse(route string, protoName string) {
 
 // SendRequest sends a request to the server
 func (pc *ProtoClient) SendRequest(route string, data []byte) (uint, error) {
-
-	if !pc.ready {
+	pc.stateMu.RLock()
+	ready := pc.ready
+	cmd, ok := pc.info.Commands[route]
+	pc.stateMu.RUnlock()
+	if !ready {
 		return pc.Client.SendRequest(route, data)
 	}
 
-	if cmd, ok := pc.info.Commands[route]; ok {
-		if len(data) < 0 || string(data) == "{}" || cmd.inputMsgDescriptor == nil {
+	if ok && cmd != nil {
+		if len(data) == 0 || string(data) == "{}" || cmd.inputMsgDescriptor == nil {
+			pc.stateMu.Lock()
 			pc.expectedInputDescriptor = cmd.outputMsgDescriptor
+			pc.stateMu.Unlock()
 			data = data[:0]
 			return pc.Client.SendRequest(route, data)
 		}
@@ -490,7 +759,9 @@ func (pc *ProtoClient) SendRequest(route string, data []byte) (uint, error) {
 		if err != nil {
 			return 0, err
 		}
+		pc.stateMu.Lock()
 		pc.expectedInputDescriptor = cmd.outputMsgDescriptor
+		pc.stateMu.Unlock()
 		return pc.Client.SendRequest(route, realdata)
 	}
 
@@ -499,8 +770,13 @@ func (pc *ProtoClient) SendRequest(route string, data []byte) (uint, error) {
 
 // SendNotify sends a notify to the server
 func (pc *ProtoClient) SendNotify(route string, data []byte) error {
-
-	if cmd, ok := pc.info.Commands[route]; ok {
+	pc.stateMu.RLock()
+	cmd, ok := pc.info.Commands[route]
+	pc.stateMu.RUnlock()
+	if ok && cmd != nil {
+		if len(data) == 0 || string(data) == "{}" || cmd.inputMsgDescriptor == nil {
+			return pc.Client.SendNotify(route, nil)
+		}
 		inputMsg := dynamicpb.NewMessage(cmd.inputMsgDescriptor)
 		if err := protojson.Unmarshal(data, inputMsg); err != nil {
 			return err

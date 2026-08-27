@@ -480,6 +480,41 @@ func TestBuilderRejectsSecondBuild(t *testing.T) {
 	assert.EqualError(t, panicValue.(error), "builder build already started")
 }
 
+func TestBuilderBuildAppReturnsConcreteApp(t *testing.T) {
+	builder := NewDefaultBuilder(false, "standalone", Standalone, nil, *config.NewDefaultPitayaConfig())
+	app := builder.BuildApp()
+
+	require.NotNil(t, app)
+	assert.IsType(t, &App{}, app)
+}
+
+func TestBuilderRejectsGRPCForFullClusterAppCapabilities(t *testing.T) {
+	builder := NewDefaultBuilder(false, "grpc-compatibility", Cluster, nil, *config.NewDefaultPitayaConfig())
+	grpcServer, err := cluster.NewGRPCServer(
+		builder.Config.Cluster.RPC.Server.Grpc,
+		builder.Server,
+		builder.MetricsReporters,
+	)
+	require.NoError(t, err)
+	grpcClient, err := cluster.NewGRPCClient(
+		builder.Config.Cluster.RPC.Client.Grpc,
+		builder.Server,
+		builder.MetricsReporters,
+		nil,
+		cluster.NewInfoRetriever(builder.Config.Cluster.Info),
+	)
+	require.NoError(t, err)
+	builder.RPCClient = grpcClient
+	builder.RPCServer = grpcServer
+
+	panicValue := captureBuilderPanic(t, builder)
+	message := fmt.Sprint(panicValue)
+	assert.Contains(t, message, "invalid RPC transport capabilities")
+	assert.Contains(t, message, "point-to-point")
+	assert.Contains(t, message, "fanout,user-delivery,broker-subscription")
+	assert.Contains(t, message, "gRPC is point-to-point compatibility only")
+}
+
 func TestBuilderRejectsConcurrentBuild(t *testing.T) {
 	builder := NewDefaultBuilder(false, "standalone", Standalone, nil, *config.NewDefaultPitayaConfig())
 	hookStarted := make(chan struct{})

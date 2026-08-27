@@ -22,6 +22,7 @@ package cluster
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/alkaid/pitaya/v2/co"
@@ -35,6 +36,99 @@ import (
 	"github.com/alkaid/pitaya/v2/session"
 	"github.com/alkaid/pitaya/v2/util"
 )
+
+// TransportCapability identifies one cluster transport behavior used by App.
+type TransportCapability uint8
+
+const (
+	TransportPointToPoint TransportCapability = iota
+	TransportFanout
+	TransportUserDelivery
+	TransportBrokerSubscription
+)
+
+// TransportCapabilitySet is a compact, static set of transport capabilities.
+type TransportCapabilitySet uint8
+
+const (
+	NATSTransportCapabilities TransportCapabilitySet = (1 << TransportPointToPoint) |
+		(1 << TransportFanout) |
+		(1 << TransportUserDelivery) |
+		(1 << TransportBrokerSubscription)
+	GRPCTransportCapabilities TransportCapabilitySet = 1 << TransportPointToPoint
+	FullTransportCapabilities                        = NATSTransportCapabilities
+)
+
+func NewTransportCapabilitySet(capabilities ...TransportCapability) TransportCapabilitySet {
+	var set TransportCapabilitySet
+	for _, capability := range capabilities {
+		set |= 1 << capability
+	}
+	return set
+}
+
+func (set TransportCapabilitySet) Has(capability TransportCapability) bool {
+	return set&(1<<capability) != 0
+}
+
+func (required TransportCapabilitySet) MissingFrom(available TransportCapabilitySet) TransportCapabilitySet {
+	return required &^ available
+}
+
+func (set TransportCapabilitySet) String() string {
+	names := make([]string, 0, 4)
+	for _, capability := range []struct {
+		value TransportCapability
+		name  string
+	}{
+		{TransportPointToPoint, "point-to-point"},
+		{TransportFanout, "fanout"},
+		{TransportUserDelivery, "user-delivery"},
+		{TransportBrokerSubscription, "broker-subscription"},
+	} {
+		if set.Has(capability.value) {
+			names = append(names, capability.name)
+		}
+	}
+	return strings.Join(names, ",")
+}
+
+type transportCapabilityDeclarer interface {
+	TransportCapabilities() TransportCapabilitySet
+}
+
+// RPCTransportCapabilities returns the capabilities shared by a client/server
+// pair. Legacy custom transports that predate capability declarations retain
+// the aggregate RPCClient/RPCServer contract.
+func RPCTransportCapabilities(client RPCClient, server RPCServer) TransportCapabilitySet {
+	return endpointTransportCapabilities(client) & endpointTransportCapabilities(server)
+}
+
+func endpointTransportCapabilities(endpoint any) TransportCapabilitySet {
+	if endpoint == nil {
+		return 0
+	}
+	if declared, ok := endpoint.(transportCapabilityDeclarer); ok {
+		return declared.TransportCapabilities()
+	}
+	return FullTransportCapabilities
+}
+
+func (*NatsRPCClient) TransportCapabilities() TransportCapabilitySet {
+	return NATSTransportCapabilities
+}
+
+func (*NatsRPCServer) TransportCapabilities() TransportCapabilitySet {
+	return NATSTransportCapabilities
+}
+
+func (*GRPCClient) TransportCapabilities() TransportCapabilitySet {
+	return GRPCTransportCapabilities
+}
+
+func (*GRPCServer) TransportCapabilities() TransportCapabilitySet {
+	return GRPCTransportCapabilities
+}
 
 // RPCServer interface
 type RPCServer interface {

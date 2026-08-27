@@ -21,8 +21,10 @@ builder := pitaya.NewDefaultBuilder(
 )
 builder.AddAcceptor(acceptor.NewTCPAcceptor(":3250"))
 
-app := builder.Build()
-app.Register(&Handler{}, component.WithName("user"))
+app := builder.BuildApp()
+if err := app.Register(&Handler{}, component.WithName("user")); err != nil {
+    panic(err)
+}
 app.Start()
 ```
 
@@ -94,6 +96,10 @@ func (h *Handler) Login(ctx context.Context, req *UserRequest) (*UserResponse, e
 With `component.WithName("user")`, a frontend route is
 `connector.user.login` after the default name conversion. Register components
 before `App.Start` so their lifecycle methods are owned by the application.
+`Register`, `RegisterRemote`, `RegisterSubscribe`, and `OnStarted` return errors
+and are accepted only before startup begins. After that they return
+`constants.ErrAppConfigurationLocked`; use the `LazyRegister*` APIs only for
+objects whose lifecycle is owned elsewhere.
 
 ## Startup transaction and extension lifecycle
 
@@ -186,6 +192,23 @@ Remote methods receive `context.Context` plus an optional protobuf message and
 return a protobuf message plus an error. Keep internal `sys.*` routes reserved
 for the framework; they must never be exposed through a public client service.
 
+## Application interfaces and transport capabilities
+
+New consumers should accept the smallest exported application contract they
+need: `Lifecycle`, `RPCInvoker`, `UserSessionLookup`, or `ReadinessProvider`.
+The large `Pitaya` interface remains as a deprecated compatibility aggregate;
+apart from the registration signature changes documented above, it retains the
+legacy aggregate surface. `Builder.BuildApp()` returns `*App` for new code,
+while `Builder.Build()` retains the aggregate return type.
+
+A complete Cluster `App` exposes point-to-point RPC, fanout, user delivery, and
+broker-backed subscription behavior. The Builder validates that its RPC client
+and server pair provides all four capabilities before mutating the router or
+starting modules. The NATS pair provides the complete set. The retained gRPC
+pair declares point-to-point only and therefore cannot be injected into the
+full App Builder; use the gRPC package directly only for isolated compatibility
+work that does not claim the full Pitaya transport contract.
+
 ## Publish subscribers
 
 Use `App.RegisterSubscribe` for components reached by `Publish` or
@@ -205,11 +228,13 @@ executor := component.TaskExecutorFunc(func(ctx context.Context, task component.
     return task(ctx)
 })
 
-app.Register(
+if err := app.Register(
     &Handler{},
     component.WithName("user"),
     component.WithTaskExecutor(executor),
-)
+); err != nil {
+    return err
+}
 ```
 
 `Execute` may be called concurrently. It must not retain `task` after returning,

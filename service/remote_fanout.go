@@ -192,6 +192,7 @@ func (e *remoteFanoutExecutor) execute(ctx context.Context, task remoteFanoutTas
 		}
 	}()
 
+	ctx = withFanoutIdempotencyScope(ctx)
 	result.server = task.server
 	if result.server == nil {
 		result.server, result.err = e.remote.resolveRemoteTarget(
@@ -205,7 +206,6 @@ func (e *remoteFanoutExecutor) execute(ctx context.Context, task remoteFanoutTas
 			return
 		}
 	}
-	ctx = withFanoutIdempotencyScope(ctx)
 	result.response, result.err = e.remote.remoteCall(
 		ctx,
 		result.server,

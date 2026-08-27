@@ -12,6 +12,8 @@ import (
 	"github.com/alkaid/pitaya/v2/constants"
 )
 
+const maxEtcdShutdownDelay = 5 * time.Second
+
 // Validate checks configuration used by every Builder mode. It reports all
 // invalid fields at once so a deployment can correct the complete config in a
 // single pass.
@@ -336,6 +338,12 @@ func (c PitayaConfig) ValidateCluster() error {
 	if etcd.Shutdown.Delay < 0 {
 		errs = append(errs, fmt.Errorf(
 			"pitaya.cluster.sd.etcd.shutdown.delay must not be negative, got %s",
+			etcd.Shutdown.Delay,
+		))
+	} else if etcd.Shutdown.Delay > maxEtcdShutdownDelay {
+		errs = append(errs, fmt.Errorf(
+			"pitaya.cluster.sd.etcd.shutdown.delay must not exceed %s, got %s",
+			maxEtcdShutdownDelay,
 			etcd.Shutdown.Delay,
 		))
 	}

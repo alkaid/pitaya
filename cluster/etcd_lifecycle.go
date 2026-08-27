@@ -34,6 +34,8 @@ import (
 	"google.golang.org/grpc"
 )
 
+var after = time.After
+
 type etcdLifecycleState uint8
 
 const (
@@ -291,7 +293,7 @@ func (sd *etcdServiceDiscovery) BeforeShutdown() {
 		sd.lease.cancel()
 		_ = sd.revoke()
 		sd.cancelElection()
-		time.Sleep(sd.shutdownDelay) // Sleep for a short while to ensure shutdown has propagated
+		<-after(sd.shutdownDelay)
 	})
 }
 

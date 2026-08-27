@@ -3,14 +3,16 @@ package tracing
 import (
 	"context"
 	"fmt"
-	"github.com/pkg/errors"
-	"github.com/alkaid/pitaya/v2/logger"
-	"go.opentelemetry.io/otel/attribute"
-	"go.uber.org/zap"
 	"net"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/alkaid/pitaya/v2/config"
+	"github.com/alkaid/pitaya/v2/logger"
+	"github.com/pkg/errors"
+	"go.opentelemetry.io/otel/attribute"
+	"go.uber.org/zap"
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
@@ -19,17 +21,18 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.32.0"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
 )
 
 // copy from go-zero trace
 
 // A Config is a opentelemetry config.
 type Config struct {
-	Name     string  `json:",optional"`
-	Endpoint string  `json:",optional"`
-	Sampler  float64 `json:",default=0.1"`
+	Name     string            `json:",optional"`
+	Endpoint string            `json:",optional"`
+	Sampler  float64           `json:",default=0.1"`
+	TLS      config.TLSConfig  `json:",optional"`
+	Headers  map[string]string `json:",optional"`
 }
 
 var (
@@ -66,17 +69,21 @@ func stopAgent() error {
 	if agentInstance == nil {
 		return nil
 	}
+	instance := agentInstance
+	agentInstance = nil
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := agentInstance.Shutdown(ctx)
+	err := instance.Shutdown(ctx)
 	if err != nil {
 		return errors.WithStack(err)
 	}
-	agentInstance = nil
 	return nil
 }
 
 func startAgent(ctx context.Context, c Config, opts ...sdktrace.TracerProviderOption) error {
+	if err := c.TLS.Validate("pitaya.tracing.tls"); err != nil {
+		return errors.WithStack(err)
+	}
 	resourceAttrs := []attribute.KeyValue{
 		semconv.ServiceNameKey.String(c.Name),
 	}
@@ -106,14 +113,21 @@ func startAgent(ctx context.Context, c Config, opts ...sdktrace.TracerProviderOp
 	}, opts...)
 
 	if len(c.Endpoint) > 0 {
-		// conn, err := grpc.DialContext(ctx, opt.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
-		conn, err := grpc.NewClient(c.Endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		exporterOptions := []otlptracegrpc.Option{
+			otlptracegrpc.WithEndpoint(c.Endpoint),
+			otlptracegrpc.WithHeaders(cloneHeaders(c.Headers)),
+		}
+		clientTLS, err := config.LoadClientTLS("pitaya.tracing.tls", c.TLS)
 		if err != nil {
-			return errors.WithStack(fmt.Errorf("failed to create gRPC connection to collector: %w", err))
+			return errors.WithStack(fmt.Errorf("failed to configure trace exporter TLS: %w", err))
+		}
+		if clientTLS == nil {
+			exporterOptions = append(exporterOptions, otlptracegrpc.WithInsecure())
+		} else {
+			exporterOptions = append(exporterOptions, otlptracegrpc.WithTLSCredentials(credentials.NewTLS(clientTLS)))
 		}
 
-		// Set up a trace exporter
-		exp, err := otlptracegrpc.New(ctx, otlptracegrpc.WithGRPCConn(conn))
+		exp, err := otlptracegrpc.New(ctx, exporterOptions...)
 		if err != nil {
 			return errors.WithStack(fmt.Errorf("failed to create trace exporter: %w", err))
 		}
@@ -130,6 +144,17 @@ func startAgent(ctx context.Context, c Config, opts ...sdktrace.TracerProviderOp
 	}))
 	agentInstance = tp
 	return nil
+}
+
+func cloneHeaders(headers map[string]string) map[string]string {
+	if headers == nil {
+		return nil
+	}
+	cloned := make(map[string]string, len(headers))
+	for key, value := range headers {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func getLocalIP() string {

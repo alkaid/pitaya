@@ -86,10 +86,20 @@ type (
 		messageEncoder       message.Encoder
 		messagesBufferSize   int // size of the pending messages buffer
 		metricsReporters     []metrics.Reporter
+		outboundAdmissionN   atomic.Int64
+		outboundAdmissions   sync.WaitGroup
+		outboundClosing      chan struct{}
+		outboundInitOnce     sync.Once
+		outboundItemN        atomic.Int64
+		outboundItems        sync.WaitGroup
+		outboundMu           sync.Mutex
+		outboundOpen         bool
 		packetData           *agentPacketData
 		serializer           serialize.Serializer // message serializer
 		state                int32                // current agent state
 		trustedProxies       netutil.TrustedProxies
+		writerDone           chan struct{}
+		writerStarted        bool
 	}
 
 	pendingMessage struct {
@@ -102,9 +112,17 @@ type (
 	}
 
 	pendingWrite struct {
-		ctx  context.Context
-		data []byte
-		err  error
+		ctx        context.Context
+		data       []byte
+		err        error
+		completion *outboundCompletion
+	}
+
+	outboundCompletion struct {
+		agent *agentImpl
+		ctx   context.Context
+		err   error
+		once  sync.Once
 	}
 
 	// Agent corresponds to a user and is used for storing raw Conn information
@@ -378,22 +396,101 @@ func (a *agentImpl) packetEncodeMessage(m *message.Message) ([]byte, error) {
 	return p, nil
 }
 
+func (a *agentImpl) initOutbound() {
+	a.outboundInitOnce.Do(func() {
+		a.outboundClosing = make(chan struct{})
+		a.writerDone = make(chan struct{})
+		a.outboundOpen = true
+	})
+}
+
+func brokenPipeError() error {
+	return apierrors.ClientClosed("ErrBrokenPipe", constants.ErrBrokenPipe.Error(), "").WithCause(constants.ErrBrokenPipe)
+}
+
+func (a *agentImpl) reportOutboundCompletion(ctx context.Context, messageErr, resultErr error) {
+	tracing.FinishSpan(ctx, resultErr)
+	if resultErr == nil {
+		resultErr = messageErr
+	}
+	metrics.ReportTimingFromCtx(ctx, a.metricsReporters, handlerType, resultErr)
+}
+
+func (c *outboundCompletion) finish(resultErr error) {
+	if c == nil {
+		return
+	}
+	c.once.Do(func() {
+		c.agent.reportOutboundCompletion(c.ctx, c.err, resultErr)
+		c.agent.outboundItemN.Add(-1)
+		c.agent.outboundItems.Done()
+	})
+}
+
+func (a *agentImpl) finishPendingWrite(p pendingWrite, resultErr error) {
+	if p.completion != nil {
+		p.completion.finish(resultErr)
+		return
+	}
+	a.reportOutboundCompletion(p.ctx, p.err, resultErr)
+}
+
+func (a *agentImpl) enqueueOutbound(p pendingWrite) (err error) {
+	a.initOutbound()
+	a.outboundMu.Lock()
+	if !a.outboundOpen {
+		a.outboundMu.Unlock()
+		err = brokenPipeError()
+		a.reportOutboundCompletion(p.ctx, p.err, err)
+		return err
+	}
+	a.outboundAdmissions.Add(1)
+	a.outboundAdmissionN.Add(1)
+	a.outboundItems.Add(1)
+	a.outboundItemN.Add(1)
+	p.completion = &outboundCompletion{agent: a, ctx: p.ctx, err: p.err}
+	closing := a.outboundClosing
+	a.outboundMu.Unlock()
+
+	defer func() {
+		a.outboundAdmissionN.Add(-1)
+		a.outboundAdmissions.Done()
+	}()
+	defer func() {
+		if recover() != nil {
+			err = brokenPipeError()
+			p.completion.finish(err)
+		}
+	}()
+	select {
+	case a.chSend <- p:
+		return nil
+	case <-closing:
+		err = brokenPipeError()
+		p.completion.finish(err)
+		return err
+	}
+}
+
 func (a *agentImpl) send(pendingMsg pendingMessage) (err error) {
 	defer func() {
 		if e := recover(); e != nil {
-			err = apierrors.ClientClosed("pitaya.BrokenPipe", constants.ErrBrokenPipe.Error(), "")
+			err = brokenPipeError()
+			a.reportOutboundCompletion(pendingMsg.ctx, nil, err)
 		}
 	}()
 	a.reportChannelSize()
 
 	m, err := a.getMessageFromPendingMessage(pendingMsg)
 	if err != nil {
+		a.reportOutboundCompletion(pendingMsg.ctx, nil, err)
 		return err
 	}
 
 	// packet encode
 	p, err := a.packetEncodeMessage(m)
 	if err != nil {
+		a.reportOutboundCompletion(pendingMsg.ctx, nil, err)
 		return err
 	}
 
@@ -406,12 +503,7 @@ func (a *agentImpl) send(pendingMsg pendingMessage) (err error) {
 		pWrite.err = util.GetErrorFromPayload(a.serializer, m.Data)
 	}
 
-	// chSend is never closed so we need this to don't block if agent is already closed
-	select {
-	case a.chSend <- pWrite:
-	case <-a.chDie:
-	}
-	return
+	return a.enqueueOutbound(pWrite)
 }
 
 // GetSession returns the agent session
@@ -422,7 +514,9 @@ func (a *agentImpl) GetSession() session.Session {
 // Push implementation for NetworkEntity interface
 func (a *agentImpl) Push(route string, v interface{}) error {
 	if a.GetStatus() == constants.StatusClosed {
-		return apierrors.ClientClosed("ErrBrokenPipe", "agent push error", "").WithCause(constants.ErrBrokenPipe)
+		err := brokenPipeError()
+		a.reportOutboundCompletion(nil, nil, err)
+		return err
 	}
 
 	switch d := v.(type) {
@@ -442,13 +536,16 @@ func (a *agentImpl) ResponseMID(ctx context.Context, mid uint, v interface{}, is
 		err = isError[0]
 	}
 	if a.GetStatus() == constants.StatusClosed {
-		return apierrors.ClientClosed("ErrBrokenPipe", constants.ErrBrokenPipe.Error(), "").WithCause(constants.ErrBrokenPipe)
+		closedErr := brokenPipeError()
+		a.reportOutboundCompletion(ctx, nil, closedErr)
+		return closedErr
 	}
 
 	if mid <= 0 {
 		// return constants.ErrSessionOnNotify
 		// 改成用push通知客户端系统错误
 		if !err {
+			a.reportOutboundCompletion(ctx, nil, constants.ErrSessionOnNotify)
 			return constants.ErrSessionOnNotify
 		} else {
 			return a.send(pendingMessage{
@@ -482,6 +579,13 @@ func (a *agentImpl) Close(callback map[string]string, reason ...session.CloseRea
 		return constants.ErrCloseClosedSession
 	}
 	a.SetStatus(constants.StatusClosed)
+	a.initOutbound()
+	a.outboundMu.Lock()
+	if a.outboundOpen {
+		a.outboundOpen = false
+		close(a.outboundClosing)
+	}
+	a.outboundMu.Unlock()
 	closeReason := session.CloseReasonNormal
 	if len(reason) > 0 {
 		closeReason = reason[0]
@@ -489,17 +593,21 @@ func (a *agentImpl) Close(callback map[string]string, reason ...session.CloseRea
 	logger.Zap.Debug("Session closed",
 		zap.Int64("ID", a.Session.ID()), zap.String("UID", a.Session.UID()), zap.Int("reason", closeReason), zap.Stringer("IP", a.conn.RemoteAddr()))
 
-	// prevent closing closed channel
-	select {
-	case <-a.chDie:
-		// expect
-	default:
-		close(a.chStopWrite)
-		close(a.chStopHeartbeat)
-		close(a.chStopKeepCacheAlive)
-		close(a.chDie)
-		a.onSessionClosed(a.Session, callback, reason...)
+	close(a.chStopHeartbeat)
+	close(a.chStopKeepCacheAlive)
+	close(a.chDie)
+	a.outboundAdmissions.Wait()
+	close(a.chStopWrite)
+	a.failQueuedWrites(brokenPipeError())
+	a.outboundItems.Wait()
+	a.outboundMu.Lock()
+	writerStarted := a.writerStarted
+	writerDone := a.writerDone
+	a.outboundMu.Unlock()
+	if writerStarted {
+		<-writerDone
 	}
+	a.onSessionClosed(a.Session, callback, reason...)
 	metrics.ReportNumberOfConnectedClients(a.metricsReporters, a.sessionPool.GetSessionCount())
 	// 若是websocket 且是被踢的 返回自定义reason
 	if wsConn, ok := a.conn.(*acceptor.WSConn); ok && closeReason > session.CloseReasonKickMin {
@@ -519,9 +627,27 @@ func (a *agentImpl) RemoteAddr() net.Addr {
 
 func (a *agentImpl) RemoteIP() netip.Addr {
 	if wsConn, ok := a.conn.(*acceptor.WSConn); ok && wsConn.InnerReq() != nil {
-		return netutil.GetClientIPWithTrustedProxies(wsConn.InnerReq(), a.trustedProxies)
+		return netutil.GetClientIPWithTrustedProxies(wsConn.InnerReq(), a.trustedProxies).Unmap()
 	}
-	return netip.Addr{}
+	if a.conn == nil {
+		return netip.Addr{}
+	}
+	remoteAddr := a.conn.RemoteAddr()
+	if remoteAddr == nil {
+		return netip.Addr{}
+	}
+	if tcpAddr, ok := remoteAddr.(*net.TCPAddr); ok {
+		return tcpAddr.AddrPort().Addr().Unmap()
+	}
+	host, _, err := net.SplitHostPort(remoteAddr.String())
+	if err != nil {
+		return netip.Addr{}
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Addr{}
+	}
+	return ip.Unmap()
 }
 
 // String, implementation for Stringer interface
@@ -699,12 +825,7 @@ func (a *agentImpl) heartbeatLoop(ticks <-chan time.Time) {
 			if err != nil {
 				logger.Zap.Error("encode heartbeat failed", zap.Error(err))
 			}
-			// chSend is never closed so we need this to don't block if agent is already closed
-			select {
-			case a.chSend <- pendingWrite{data: hbData}:
-			case <-a.chDie:
-				return
-			case <-a.chStopHeartbeat:
+			if err := a.enqueueOutbound(pendingWrite{data: hbData}); err != nil {
 				return
 			}
 		case <-a.chDie:
@@ -764,34 +885,56 @@ func (a *agentImpl) SendHeartbeatResponse(unixMillTime int64) error {
 		data: hbAckData,
 	}
 
-	// chSend is never closed so we need this to don't block if agent is already closed
-	select {
-	case a.chSend <- pWrite:
-	case <-a.chDie:
-	}
-	return nil
+	return a.enqueueOutbound(pWrite)
 }
 
 func (a *agentImpl) write() {
-	// clean func
+	a.initOutbound()
+	a.outboundMu.Lock()
+	if !a.outboundOpen || a.writerStarted {
+		a.outboundMu.Unlock()
+		return
+	}
+	a.writerStarted = true
+	writerDone := a.writerDone
+	a.outboundMu.Unlock()
+
 	defer func() {
-		a.Session.Close(nil)
+		close(writerDone)
+		if a.Session != nil {
+			a.Session.Close(nil)
+		}
 	}()
 
 	for {
 		select {
-		case pWrite := <-a.chSend:
+		case pWrite, ok := <-a.chSend:
+			if !ok {
+				return
+			}
 			// close agent if low-level Conn broken
 			if _, err := a.connWriteWithDeadline(pWrite.data); err != nil {
-				tracing.FinishSpan(pWrite.ctx, err)
-				metrics.ReportTimingFromCtx(pWrite.ctx, a.metricsReporters, handlerType, err)
+				a.finishPendingWrite(pWrite, err)
 				logger.Log.Errorf("Failed to write in conn: %s", err.Error())
 				return
 			}
-			var e error
-			tracing.FinishSpan(pWrite.ctx, e)
-			metrics.ReportTimingFromCtx(pWrite.ctx, a.metricsReporters, handlerType, pWrite.err)
+			a.finishPendingWrite(pWrite, nil)
 		case <-a.chStopWrite:
+			a.failQueuedWrites(brokenPipeError())
+			return
+		}
+	}
+}
+
+func (a *agentImpl) failQueuedWrites(err error) {
+	for {
+		select {
+		case pWrite, ok := <-a.chSend:
+			if !ok {
+				return
+			}
+			a.finishPendingWrite(pWrite, err)
+		default:
 			return
 		}
 	}
@@ -815,13 +958,6 @@ func (a *agentImpl) SendRequest(ctx context.Context, serverID, route string, v i
 
 // AnswerWithError answers with an error
 func (a *agentImpl) AnswerWithError(ctx context.Context, mid uint, err error) {
-	var e error
-	defer func() {
-		if e != nil {
-			tracing.FinishSpan(ctx, e)
-			metrics.ReportTimingFromCtx(ctx, a.metricsReporters, handlerType, e)
-		}
-	}()
 	if ctx != nil && err != nil {
 		s := trace.SpanFromContext(ctx)
 		if s != nil {
@@ -830,6 +966,7 @@ func (a *agentImpl) AnswerWithError(ctx context.Context, mid uint, err error) {
 	}
 	p, e := util.GetErrorPayload(a.serializer, err)
 	if e != nil {
+		a.reportOutboundCompletion(ctx, nil, e)
 		logger.Zap.Error("error answering the user with an error", zap.Error(err))
 		return
 	}

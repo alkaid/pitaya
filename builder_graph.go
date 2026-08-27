@@ -173,6 +173,23 @@ func (resolved resolvedDependencies) validateGraph() error {
 	return errors.Join(errs...)
 }
 
+func (resolved resolvedDependencies) validateTransportCapabilities() error {
+	available := cluster.RPCTransportCapabilities(resolved.rpcClient, resolved.rpcServer)
+	required := cluster.FullTransportCapabilities
+	missing := required.MissingFrom(available)
+	if missing == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"RPC client %T and server %T provide [%s], but a full Cluster App requires [%s]; missing [%s] (gRPC is point-to-point compatibility only)",
+		resolved.rpcClient,
+		resolved.rpcServer,
+		available,
+		required,
+		missing,
+	)
+}
+
 func containsReporter(reporters []metrics.Reporter, target metrics.Reporter) bool {
 	for _, reporter := range reporters {
 		if sameDependencyIdentity(reporter, target) {

@@ -18,7 +18,6 @@ import (
 	networkentity "github.com/alkaid/pitaya/v2/networkentity"
 	protos "github.com/alkaid/pitaya/v2/protos"
 	session "github.com/alkaid/pitaya/v2/session"
-	nats "github.com/nats-io/nats.go"
 	gomock "go.uber.org/mock/gomock"
 	proto "google.golang.org/protobuf/proto"
 )
@@ -382,20 +381,6 @@ func (m *MockSession) GetRequestsInFlight() session.ReqInFlight {
 func (mr *MockSessionMockRecorder) GetRequestsInFlight() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetRequestsInFlight", reflect.TypeOf((*MockSession)(nil).GetRequestsInFlight))
-}
-
-// GetSubscriptions mocks base method.
-func (m *MockSession) GetSubscriptions() []*nats.Subscription {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetSubscriptions")
-	ret0, _ := ret[0].([]*nats.Subscription)
-	return ret0
-}
-
-// GetSubscriptions indicates an expected call of GetSubscriptions.
-func (mr *MockSessionMockRecorder) GetSubscriptions() *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetSubscriptions", reflect.TypeOf((*MockSession)(nil).GetSubscriptions))
 }
 
 // Go mocks base method.
@@ -898,18 +883,6 @@ func (m *MockSession) SetRequestInFlight(reqID, reqData string, inFlight bool) {
 func (mr *MockSessionMockRecorder) SetRequestInFlight(reqID, reqData, inFlight any) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetRequestInFlight", reflect.TypeOf((*MockSession)(nil).SetRequestInFlight), reqID, reqData, inFlight)
-}
-
-// SetSubscriptions mocks base method.
-func (m *MockSession) SetSubscriptions(subscriptions []*nats.Subscription) {
-	m.ctrl.T.Helper()
-	m.ctrl.Call(m, "SetSubscriptions", subscriptions)
-}
-
-// SetSubscriptions indicates an expected call of SetSubscriptions.
-func (mr *MockSessionMockRecorder) SetSubscriptions(subscriptions any) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetSubscriptions", reflect.TypeOf((*MockSession)(nil).SetSubscriptions), subscriptions)
 }
 
 // String mocks base method.

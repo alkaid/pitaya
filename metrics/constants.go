@@ -11,6 +11,16 @@ var (
 	ChannelCapacity = "channel_capacity"
 	// DroppedMessages reports the number of dropped messages in rpc server (messages that will not be handled)
 	DroppedMessages = "dropped_messages"
+	// ActiveUserSubscriptionPairs reports active NATS push/kick pairs owned by frontend sessions.
+	ActiveUserSubscriptionPairs = "active_user_subscription_pairs"
+	// UserSubscriptionStaleOwnerDrops reports user deliveries rejected after session replacement.
+	UserSubscriptionStaleOwnerDrops = "user_subscription_stale_owner_drops"
+	// UserSubscriptionCreateRollbacks reports partially-created user subscription pairs rolled back.
+	UserSubscriptionCreateRollbacks = "user_subscription_create_rollbacks"
+	// UserSubscriptionDuplicateBindReuse reports same-session Bind calls that reused an active pair.
+	UserSubscriptionDuplicateBindReuse = "user_subscription_duplicate_bind_reuse"
+	// UserMessageUIDMismatches reports NATS user messages rejected because subject and payload disagree.
+	UserMessageUIDMismatches = "user_message_uid_mismatches"
 	// ProcessDelay reports the message processing delay to handle the messages at the handler service
 	ProcessDelay = "handler_delay_ns"
 	// Goroutines reports the number of goroutines
@@ -19,6 +29,8 @@ var (
 	HeapSize = "heapsize"
 	// HeapObjects reports the number of allocated heap objects
 	HeapObjects = "heapobjects"
+	// AppReadiness reports overall and fixed-dependency readiness.
+	AppReadiness = "readiness"
 	// WorkerJobsTotal reports the number of executed jobs
 	WorkerJobsTotal = "worker_jobs_total"
 	// WorkerJobsRetry reports the number of retried jobs

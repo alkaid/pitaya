@@ -44,6 +44,7 @@ require (
 	github.com/bitly/go-simplejson v0.5.1
 	github.com/gomodule/redigo v1.9.2
 	github.com/spf13/cast v1.10.0
+	go.opentelemetry.io/proto/otlp v1.10.0
 	go.uber.org/mock v0.6.0
 	golang.org/x/sys v0.46.0
 	k8s.io/utils v0.0.0-20250502105355-0f33e8f1c979
@@ -150,7 +151,6 @@ require (
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.61.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.43.0 // indirect
 	go.opentelemetry.io/otel/metric v1.44.0 // indirect
-	go.opentelemetry.io/proto/otlp v1.10.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect

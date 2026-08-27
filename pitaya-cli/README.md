@@ -102,6 +102,8 @@ When initializing the CLI, provide the docs route as follows:
 
 NOTE: The descriptors handler is automatically discovered by the client.
 It must only follow the signature mentioned earlier.
+The CLI downloads documentation and descriptors automatically as part of the
+first `connect`; no separate metadata connection is required.
 
 A full example of running pitaya-cli with protobuf:
 ```

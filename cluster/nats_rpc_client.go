@@ -138,6 +138,15 @@ func (ns *NatsRPCClient) Send(topic string, data []byte) error {
 
 // SendPush sends a message to a user
 func (ns *NatsRPCClient) SendPush(userID string, frontendSv *Server, push *protos.Push) error {
+	if userID == "" {
+		return constants.ErrEmptyUID
+	}
+	if push == nil {
+		return constants.ErrNilUserMessage
+	}
+	if userID != push.Uid {
+		return constants.ErrUserMessageUIDMismatch
+	}
 	topic := GetUserMessagesTopic(userID, frontendSv.Type)
 	msg, err := proto.Marshal(push)
 	if err != nil {
@@ -148,6 +157,15 @@ func (ns *NatsRPCClient) SendPush(userID string, frontendSv *Server, push *proto
 
 // SendKick kicks an user
 func (ns *NatsRPCClient) SendKick(userID string, serverType string, kick *protos.KickMsg) error {
+	if userID == "" {
+		return constants.ErrEmptyUID
+	}
+	if kick == nil {
+		return constants.ErrNilUserMessage
+	}
+	if userID != kick.UserId {
+		return constants.ErrUserMessageUIDMismatch
+	}
 	topic := GetUserKickTopic(userID, serverType)
 	msg, err := proto.Marshal(kick)
 	if err != nil {

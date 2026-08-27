@@ -22,7 +22,7 @@ func (w *Worker) Configure(app pitaya.Pitaya) {
 
 // RPCJob implements worker.RPCJob
 type RPCJob struct {
-	app pitaya.Pitaya
+	app pitaya.RPCInvoker
 }
 
 // ServerDiscovery returns a serverID="", meaning any server

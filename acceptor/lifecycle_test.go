@@ -484,6 +484,31 @@ func TestTCPProxyHeaderTimeoutRejectsAndContinues(t *testing.T) {
 	}
 }
 
+func TestProxyProtocolV2ExposesRemoteAddr(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	header := []byte{
+		0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d, 0x0a, 0x51, 0x55, 0x49, 0x54, 0x0a,
+		0x21, 0x21, 0x00, 0x24,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+		0xcf, 0x8f, 0x04, 0x01,
+	}
+	writeResult := make(chan error, 1)
+	go func() {
+		_, err := client.Write(header)
+		writeResult <- err
+	}()
+
+	conn := &Conn{Conn: server}
+	require.NoError(t, conn.checkPrefix(time.Second))
+	require.NoError(t, <-writeResult)
+	assert.Equal(t, "[::1]:53135", conn.RemoteAddr().String())
+	assert.Equal(t, "[::1]:1025", conn.LocalAddr().String())
+}
+
 func TestTCPProxySlowHeaderDoesNotBlockAcceptAndStop(t *testing.T) {
 	a := NewTCPAcceptor("127.0.0.1:0")
 	a.proxyProtocolHeaderTimeout = 2 * time.Second

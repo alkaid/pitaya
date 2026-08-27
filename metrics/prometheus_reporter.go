@@ -416,6 +416,28 @@ func (p *PrometheusReporter) registerMetrics(
 		additionalLabelsKeys,
 	))
 
+	for _, metric := range []struct {
+		name string
+		help string
+	}{
+		{name: ActiveUserSubscriptionPairs, help: "the number of active NATS user subscription pairs"},
+		{name: UserSubscriptionStaleOwnerDrops, help: "the number of NATS user deliveries rejected for stale session ownership"},
+		{name: UserSubscriptionCreateRollbacks, help: "the number of partially-created NATS user subscription pairs rolled back"},
+		{name: UserSubscriptionDuplicateBindReuse, help: "the number of duplicate session binds that reused a NATS user subscription pair"},
+		{name: UserMessageUIDMismatches, help: "the number of NATS user messages rejected for subject and payload UID mismatch"},
+	} {
+		collectorSet.addGauge("rpc_server", metric.name, prometheus.NewGaugeVec(
+			prometheus.GaugeOpts{
+				Namespace:   prometheusNamespace,
+				Subsystem:   "rpc_server",
+				Name:        metric.name,
+				Help:        metric.help,
+				ConstLabels: constLabels,
+			},
+			additionalLabelsKeys,
+		))
+	}
+
 	collectorSet.addGauge("sys", Goroutines, prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace:   prometheusNamespace,
@@ -447,6 +469,17 @@ func (p *PrometheusReporter) registerMetrics(
 			ConstLabels: constLabels,
 		},
 		additionalLabelsKeys,
+	))
+
+	collectorSet.addGauge("app", AppReadiness, prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace:   prometheusNamespace,
+			Subsystem:   "app",
+			Name:        AppReadiness,
+			Help:        "whether the app and each fixed dependency are ready",
+			ConstLabels: constLabels,
+		},
+		append([]string{"dependency"}, additionalLabelsKeys...),
 	))
 
 	collectorSet.addGauge("worker", WorkerJobsRetry, prometheus.NewGaugeVec(

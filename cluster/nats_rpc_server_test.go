@@ -44,6 +44,7 @@ import (
 	"github.com/alkaid/pitaya/v2/metrics"
 	metricsmocks "github.com/alkaid/pitaya/v2/metrics/mocks"
 	"github.com/alkaid/pitaya/v2/protos"
+	"github.com/alkaid/pitaya/v2/session"
 	sessionmocks "github.com/alkaid/pitaya/v2/session/mocks"
 	nats "github.com/nats-io/nats.go"
 	"github.com/stretchr/testify/assert"
@@ -501,7 +502,7 @@ func TestNatsRPCServerOnSessionBind(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	mockSession := sessionmocks.NewMockSession(ctrl)
 	mockSession.EXPECT().UID().Return("uid").Times(2)
-	mockSession.EXPECT().SetSubscriptions(gomock.Len(2)).Times(1)
+	mockSession.EXPECT().ID().Return(int64(42)).Times(2)
 
 	rpcServer, _ := NewNatsRPCServer(cfg, sv, nil, nil, nil)
 	s := helpers.GetTestNatsServer(t)
@@ -511,7 +512,105 @@ func TestNatsRPCServerOnSessionBind(t *testing.T) {
 	rpcServer.conn = conn
 	err = rpcServer.onSessionBind(context.Background(), mockSession, nil)
 	assert.NoError(t, err)
+	err = rpcServer.onSessionBind(context.Background(), mockSession, nil)
+	assert.NoError(t, err)
+	require.NoError(t, conn.Flush())
+	assert.Equal(t, 2, conn.NumSubscriptions())
+	assert.Equal(t, 1, rpcServer.userSubscriptions.activeCount())
+	assert.Equal(t, uint64(1), rpcServer.duplicateBindReuse.Load())
 	assert.NotNil(t, rpcServer.userKickCh)
+	require.NoError(t, rpcServer.Shutdown())
+}
+
+func TestNatsRPCServerBindRetryReplacesUIDAfterLaterObserverFailure(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	sv := getServer()
+	pool := session.NewSessionPool()
+	rpcServer, err := NewNatsRPCServer(cfg, sv, nil, nil, pool)
+	require.NoError(t, err)
+	natsServer := helpers.GetTestNatsServer(t)
+	defer natsServer.Shutdown()
+	conn, err := setupNatsConn(fmt.Sprintf("nats://%s", natsServer.Addr()), nil)
+	require.NoError(t, err)
+	rpcServer.conn = conn
+
+	pool.OnSessionBind(rpcServer.onSessionBind)
+	bindErr := errors.New("later bind observer failed")
+	failObserver := true
+	pool.OnSessionBind(func(context.Context, session.Session, map[string]string) error {
+		if failObserver {
+			return bindErr
+		}
+		return nil
+	})
+	sess, isNew := pool.NewSession(nil, true)
+	require.True(t, isNew)
+
+	err = sess.Bind(context.Background(), "old-user", nil, nil)
+	require.ErrorIs(t, err, bindErr)
+	assert.Empty(t, sess.UID())
+	assert.Equal(t, 1, rpcServer.userSubscriptions.activeCount())
+
+	failObserver = false
+	require.NoError(t, sess.Bind(context.Background(), "new-user", nil, nil))
+	assert.Equal(t, "new-user", sess.UID())
+	assert.Equal(t, 1, rpcServer.userSubscriptions.activeCount())
+	require.Eventually(t, func() bool { return conn.NumSubscriptions() == 2 }, time.Second, time.Millisecond)
+
+	rpcServer.onSessionClose(sess, nil, session.CloseReasonNormal)
+	assert.Equal(t, 0, rpcServer.userSubscriptions.activeCount())
+	require.Eventually(t, func() bool { return conn.NumSubscriptions() == 0 }, time.Second, time.Millisecond)
+	require.NoError(t, rpcServer.Shutdown())
+}
+
+func TestNatsRPCServerReplacementDropsStaleOwnerDelivery(t *testing.T) {
+	cfg := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Nats
+	sv := getServer()
+	ctrl := gomock.NewController(t)
+	pool := sessionmocks.NewMockSessionPool(ctrl)
+	oldSession := sessionmocks.NewMockSession(ctrl)
+	newSession := sessionmocks.NewMockSession(ctrl)
+	oldSession.EXPECT().UID().Return("uid").AnyTimes()
+	oldSession.EXPECT().ID().Return(int64(1)).AnyTimes()
+	newSession.EXPECT().UID().Return("uid").AnyTimes()
+	newSession.EXPECT().ID().Return(int64(2)).AnyTimes()
+	pool.EXPECT().GetSessionByUID("uid").Return(newSession).Times(3)
+
+	rpcServer, err := NewNatsRPCServer(cfg, sv, nil, nil, pool)
+	require.NoError(t, err)
+	natsServer := helpers.GetTestNatsServer(t)
+	defer natsServer.Shutdown()
+	conn, err := setupNatsConn(fmt.Sprintf("nats://%s", natsServer.Addr()), nil)
+	require.NoError(t, err)
+	rpcServer.conn = conn
+
+	require.NoError(t, rpcServer.onSessionBind(context.Background(), oldSession, nil))
+	require.NoError(t, rpcServer.onSessionBind(context.Background(), newSession, nil))
+	require.NoError(t, conn.Flush())
+	assert.Equal(t, 2, rpcServer.userSubscriptions.activeCount())
+
+	payload, err := proto.Marshal(&protos.Push{Uid: "uid"})
+	require.NoError(t, err)
+	require.NoError(t, conn.Publish(GetUserMessagesTopic("uid", sv.Type), payload))
+	require.NoError(t, conn.Flush())
+	require.Eventually(t, func() bool {
+		return rpcServer.staleUserDeliveries.Load() == 1 && len(rpcServer.userPushCh) == 1
+	}, time.Second, time.Millisecond)
+	first := <-rpcServer.userPushCh
+	assert.Equal(t, int64(2), first.owner.sessionID)
+
+	rpcServer.onSessionClose(oldSession, nil, session.CloseReasonKickRebind)
+	assert.Equal(t, 1, rpcServer.userSubscriptions.activeCount())
+	require.NoError(t, conn.Publish(GetUserMessagesTopic("uid", sv.Type), payload))
+	require.NoError(t, conn.Flush())
+	second := helpers.ShouldEventuallyReceive(t, rpcServer.userPushCh).(natsUserPushDelivery)
+	assert.Equal(t, int64(2), second.owner.sessionID)
+	assert.Equal(t, uint64(1), rpcServer.staleUserDeliveries.Load())
+
+	rpcServer.onSessionClose(newSession, nil, session.CloseReasonNormal)
+	assert.Equal(t, 0, rpcServer.userSubscriptions.activeCount())
+	require.Eventually(t, func() bool { return conn.NumSubscriptions() == 0 }, time.Second, time.Millisecond)
+	require.NoError(t, rpcServer.Shutdown())
 }
 
 func TestNatsRPCServerSubscribeToBindingsChannel(t *testing.T) {
@@ -560,8 +659,14 @@ func TestNatsRPCServerSubscribeUserKickChannel(t *testing.T) {
 	assert.NoError(t, err)
 	err = conn.Publish(GetUserKickTopic("someuid", sv.Type), dt)
 	assert.NoError(t, err)
-	msg := helpers.ShouldEventuallyReceive(t, rpcServer.getUserKickChannel()).(*protos.KickMsg)
-	assert.Equal(t, msg.UserId, kick.UserId)
+	require.Eventually(t, func() bool {
+		return rpcServer.userUIDMismatches.Load() == 1
+	}, time.Second, time.Millisecond)
+	select {
+	case msg := <-rpcServer.getUserKickChannel():
+		t.Fatalf("mismatched kick reached user channel: %#v", msg)
+	default:
+	}
 }
 
 func TestNatsRPCServerGetUserPushChannel(t *testing.T) {
@@ -570,7 +675,7 @@ func TestNatsRPCServerGetUserPushChannel(t *testing.T) {
 	sv := getServer()
 	n, _ := NewNatsRPCServer(cfg, sv, nil, nil, nil)
 	assert.NotNil(t, n.getUserPushChannel())
-	assert.IsType(t, make(chan *protos.Push), n.getUserPushChannel())
+	assert.IsType(t, make(chan natsUserPushDelivery), n.getUserPushChannel())
 }
 
 func TestNatsRPCServerGetUserKickChannel(t *testing.T) {
@@ -579,7 +684,7 @@ func TestNatsRPCServerGetUserKickChannel(t *testing.T) {
 	sv := getServer()
 	n, _ := NewNatsRPCServer(cfg, sv, nil, nil, nil)
 	assert.NotNil(t, n.getUserKickChannel())
-	assert.IsType(t, make(chan *protos.KickMsg), n.getUserKickChannel())
+	assert.IsType(t, make(chan natsUserKickDelivery), n.getUserKickChannel())
 }
 
 func TestNatsRPCServerSubscribeToUserMessages(t *testing.T) {
@@ -608,8 +713,8 @@ func TestNatsRPCServerSubscribeToUserMessages(t *testing.T) {
 			payload, err := proto.Marshal(&protos.Push{Uid: table.uid})
 			require.NoError(t, err)
 			require.NoError(t, conn.Publish(GetUserMessagesTopic(table.uid, table.svType), payload))
-			push := helpers.ShouldEventuallyReceive(t, rpcServer.userPushCh).(*protos.Push)
-			assert.Equal(t, table.uid, push.Uid)
+			delivery := helpers.ShouldEventuallyReceive(t, rpcServer.userPushCh).(natsUserPushDelivery)
+			assert.Equal(t, table.uid, delivery.push.Uid)
 		})
 	}
 }
@@ -638,12 +743,24 @@ func TestNatsRPCServerRejectsMalformedUserPush(t *testing.T) {
 		t.Fatalf("malformed push reached user channel: %#v", msg)
 	default:
 	}
+	mismatchPayload, err := proto.Marshal(&protos.Push{Uid: "other-user"})
+	require.NoError(t, err)
+	require.NoError(t, conn.Publish(GetUserMessagesTopic("user1", sv.Type), mismatchPayload))
+	require.NoError(t, conn.Flush())
+	require.Eventually(t, func() bool {
+		return rpcServer.userUIDMismatches.Load() == 1
+	}, time.Second, time.Millisecond)
+	select {
+	case msg := <-rpcServer.userPushCh:
+		t.Fatalf("mismatched push reached user channel: %#v", msg)
+	default:
+	}
 
 	payload, err := proto.Marshal(&protos.Push{Uid: "user1"})
 	require.NoError(t, err)
 	require.NoError(t, conn.Publish(GetUserMessagesTopic("user1", sv.Type), payload))
-	push := helpers.ShouldEventuallyReceive(t, rpcServer.userPushCh).(*protos.Push)
-	assert.Equal(t, "user1", push.Uid)
+	delivery := helpers.ShouldEventuallyReceive(t, rpcServer.userPushCh).(natsUserPushDelivery)
+	assert.Equal(t, "user1", delivery.push.Uid)
 }
 
 func TestNatsRPCServerSubscribe(t *testing.T) {
@@ -727,6 +844,15 @@ func TestNatsRPCServerHandleMessages(t *testing.T) {
 			assert.NoError(t, err)
 
 			mockMetricsReporter.EXPECT().ReportGauge(metrics.DroppedMessages, gomock.Any(), float64(0))
+			for _, metricName := range []string{
+				metrics.ActiveUserSubscriptionPairs,
+				metrics.UserSubscriptionStaleOwnerDrops,
+				metrics.UserSubscriptionCreateRollbacks,
+				metrics.UserSubscriptionDuplicateBindReuse,
+				metrics.UserMessageUIDMismatches,
+			} {
+				mockMetricsReporter.EXPECT().ReportGauge(metricName, gomock.Any(), float64(0))
+			}
 			mockMetricsReporter.EXPECT().ReportGauge(metrics.ChannelCapacity, gomock.Any(), gomock.Any()).Times(3)
 
 			require.NoError(t, conn.PublishRequest(table.topic, table.req.Msg.Reply, b))
@@ -962,7 +1088,7 @@ func TestNatsRPCServerShutdownAfterConnectionCloseReleasesInboundCallback(t *tes
 	require.NoError(t, err)
 	defer publisher.Close()
 
-	rpcServer.userPushCh <- &protos.Push{Uid: "buffer-filler"}
+	rpcServer.userPushCh <- natsUserPushDelivery{push: &protos.Push{Uid: "buffer-filler"}}
 	payload, err := proto.Marshal(&protos.Push{Uid: "closed-connection-user"})
 	require.NoError(t, err)
 	require.NoError(t, publisher.Publish(
@@ -1102,6 +1228,7 @@ func TestNatsRPCServerShutdownDrainsBufferedTransportMessages(t *testing.T) {
 	rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, nil, mockSessionPool)
 	require.NoError(t, err)
 	mockSessionPool.EXPECT().OnSessionBind(newFuncPtrMatcher(rpcServer.onSessionBind))
+	mockSessionPool.EXPECT().OnSessionClose(newFuncPtrMatcher(rpcServer.onSessionClose))
 
 	releaseCallbacks := make(chan struct{})
 	var releaseOnce sync.Once
@@ -1165,8 +1292,8 @@ func TestNatsRPCServerShutdownDrainsBufferedTransportMessages(t *testing.T) {
 		return &nats.Msg{Data: data}
 	}
 	rpcServer.bindingsChan <- marshalBinding("binding-1")
-	rpcServer.userPushCh <- &protos.Push{Uid: "push-1"}
-	rpcServer.userKickCh <- &protos.KickMsg{UserId: "kick-1"}
+	rpcServer.userPushCh <- natsUserPushDelivery{push: &protos.Push{Uid: "push-1"}}
+	rpcServer.userKickCh <- natsUserKickDelivery{kick: &protos.KickMsg{UserId: "kick-1"}}
 	select {
 	case <-bindingStarted:
 	case <-time.After(time.Second):
@@ -1183,8 +1310,8 @@ func TestNatsRPCServerShutdownDrainsBufferedTransportMessages(t *testing.T) {
 		t.Fatal("kick consumer did not start")
 	}
 	rpcServer.bindingsChan <- marshalBinding("binding-2")
-	rpcServer.userPushCh <- &protos.Push{Uid: "push-2"}
-	rpcServer.userKickCh <- &protos.KickMsg{UserId: "kick-2"}
+	rpcServer.userPushCh <- natsUserPushDelivery{push: &protos.Push{Uid: "push-2"}}
+	rpcServer.userKickCh <- natsUserKickDelivery{kick: &protos.KickMsg{UserId: "kick-2"}}
 
 	marshalRequest := func(id uint64, msgType protos.MsgType, reply string) *nats.Msg {
 		data, marshalErr := proto.Marshal(&protos.Request{
@@ -1294,7 +1421,7 @@ func TestNatsRPCServerConsumersPreferSignaledTransportDrain(t *testing.T) {
 		rpcServer := &NatsRPCServer{
 			stopChan:          make(chan bool),
 			transportDraining: draining,
-			userPushCh:        make(chan *protos.Push, 1),
+			userPushCh:        make(chan natsUserPushDelivery, 1),
 		}
 		rpcServer.SetPitayaServer(&pitayaServerStub{
 			pushToUser: func(_ context.Context, push *protos.Push) (*protos.Response, error) {
@@ -1302,7 +1429,7 @@ func TestNatsRPCServerConsumersPreferSignaledTransportDrain(t *testing.T) {
 				return &protos.Response{}, nil
 			},
 		})
-		rpcServer.userPushCh <- &protos.Push{Uid: "drained-push"}
+		rpcServer.userPushCh <- natsUserPushDelivery{push: &protos.Push{Uid: "drained-push"}}
 
 		rpcServer.processPushes()
 
@@ -1314,7 +1441,7 @@ func TestNatsRPCServerConsumersPreferSignaledTransportDrain(t *testing.T) {
 		rpcServer := &NatsRPCServer{
 			stopChan:          make(chan bool),
 			transportDraining: draining,
-			userKickCh:        make(chan *protos.KickMsg, 1),
+			userKickCh:        make(chan natsUserKickDelivery, 1),
 		}
 		rpcServer.SetPitayaServer(&pitayaServerStub{
 			kickUser: func(_ context.Context, kick *protos.KickMsg) (*protos.KickAnswer, error) {
@@ -1322,7 +1449,7 @@ func TestNatsRPCServerConsumersPreferSignaledTransportDrain(t *testing.T) {
 				return &protos.KickAnswer{}, nil
 			},
 		})
-		rpcServer.userKickCh <- &protos.KickMsg{UserId: "drained-kick"}
+		rpcServer.userKickCh <- natsUserKickDelivery{kick: &protos.KickMsg{UserId: "drained-kick"}}
 
 		rpcServer.processKick()
 
@@ -1340,7 +1467,7 @@ func TestNatsRPCServerExplicitCloseSignalsSelectDeterministicBranches(t *testing
 	rpcServer := &NatsRPCServer{
 		stopChan:          stop,
 		transportDraining: make(chan struct{}),
-		userKickCh:        make(chan *protos.KickMsg),
+		userKickCh:        make(chan natsUserKickDelivery),
 	}
 	done := make(chan struct{})
 	go func() {
@@ -1367,6 +1494,7 @@ func TestNatsRPCServerShutdownWaitsForInboundCallbackBeforeLocalDrain(t *testing
 	rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, nil, mockSessionPool)
 	require.NoError(t, err)
 	mockSessionPool.EXPECT().OnSessionBind(newFuncPtrMatcher(rpcServer.onSessionBind))
+	mockSessionPool.EXPECT().OnSessionClose(newFuncPtrMatcher(rpcServer.onSessionClose))
 
 	releaseCallback := make(chan struct{})
 	var releaseOnce sync.Once
@@ -1400,14 +1528,14 @@ func TestNatsRPCServerShutdownWaitsForInboundCallbackBeforeLocalDrain(t *testing
 	require.NoError(t, err)
 	defer publisher.Close()
 
-	rpcServer.userPushCh <- &protos.Push{Uid: "in-progress"}
+	rpcServer.userPushCh <- natsUserPushDelivery{push: &protos.Push{Uid: "in-progress"}}
 	select {
 	case <-callbackStarted:
 	case <-time.After(time.Second):
 		t.Fatal("push consumer did not start")
 	}
-	rpcServer.userPushCh <- &protos.Push{Uid: "buffered"}
-	payload, err := proto.Marshal(&protos.Push{Uid: "nats-callback"})
+	rpcServer.userPushCh <- natsUserPushDelivery{push: &protos.Push{Uid: "buffered"}}
+	payload, err := proto.Marshal(&protos.Push{Uid: "callback-user"})
 	require.NoError(t, err)
 	require.NoError(t, publisher.Publish(GetUserMessagesTopic("callback-user", rpcServer.server.Type), payload))
 	require.NoError(t, publisher.Flush())
@@ -1441,7 +1569,7 @@ func TestNatsRPCServerShutdownWaitsForInboundCallbackBeforeLocalDrain(t *testing
 		case uid := <-processed:
 			got = append(got, uid)
 		default:
-			assert.ElementsMatch(t, []string{"in-progress", "buffered", "nats-callback"}, got)
+			assert.ElementsMatch(t, []string{"in-progress", "buffered", "callback-user"}, got)
 			return
 		}
 	}
@@ -1479,7 +1607,7 @@ func TestNatsRPCServerShutdownCancelsSaturatedUserCallbacks(t *testing.T) {
 				return ns.subscribeToUserMessages("shutdown-user", "frontend")
 			},
 			fill: func(ns *NatsRPCServer) {
-				ns.userPushCh <- &protos.Push{Uid: "buffer-filler"}
+				ns.userPushCh <- natsUserPushDelivery{push: &protos.Push{Uid: "buffer-filler"}}
 			},
 		},
 		{
@@ -1490,7 +1618,7 @@ func TestNatsRPCServerShutdownCancelsSaturatedUserCallbacks(t *testing.T) {
 				return ns.subscribeToUserKickChannel("shutdown-user", "frontend")
 			},
 			fill: func(ns *NatsRPCServer) {
-				ns.userKickCh <- &protos.KickMsg{UserId: "buffer-filler"}
+				ns.userKickCh <- natsUserKickDelivery{kick: &protos.KickMsg{UserId: "buffer-filler"}}
 			},
 		},
 	}
@@ -1646,6 +1774,7 @@ func TestNatsRPCServerTracksBrokerDisconnectRecoveryAndResumesPump(t *testing.T)
 	rpcServer, err := NewNatsRPCServer(cfg, getServer(), nil, dieChan, mockSessionPool)
 	require.NoError(t, err)
 	mockSessionPool.EXPECT().OnSessionBind(newFuncPtrMatcher(rpcServer.onSessionBind))
+	mockSessionPool.EXPECT().OnSessionClose(newFuncPtrMatcher(rpcServer.onSessionClose))
 
 	called := make(chan struct{}, 1)
 	rpcServer.SetPitayaServer(&pitayaServerStub{call: func(context.Context, *protos.Request) (*protos.Response, error) {
@@ -1718,8 +1847,8 @@ func TestNatsRPCServerInitPropagatesHandlerSubmissionError(t *testing.T) {
 func TestNatsRPCServerShutdownIsIdempotent(t *testing.T) {
 	rpcServer := &NatsRPCServer{
 		stopChan:   make(chan bool),
-		userPushCh: make(chan *protos.Push),
-		userKickCh: make(chan *protos.KickMsg),
+		userPushCh: make(chan natsUserPushDelivery),
+		userKickCh: make(chan natsUserKickDelivery),
 	}
 	var wg sync.WaitGroup
 	errs := make(chan error, 32)
@@ -1802,7 +1931,7 @@ func TestNatsRPCServerGracefulShutdownPreservesAcceptedDeliveryContext(t *testin
 		},
 	})
 	require.NoError(t, rpcServer.startHandler(rpcServer.processPushes))
-	rpcServer.userPushCh <- &protos.Push{Uid: "accepted-user"}
+	rpcServer.userPushCh <- natsUserPushDelivery{push: &protos.Push{Uid: "accepted-user"}}
 	<-deliveryStarted
 
 	shutdownDone := make(chan error, 1)
@@ -1945,8 +2074,8 @@ func TestNatsRPCServerBeforeShutdownWaitsForTerminalCallback(t *testing.T) {
 func TestNatsRPCServerBeforeShutdownStopsAndWaitsForOwnedHandlers(t *testing.T) {
 	rpcServer := &NatsRPCServer{
 		stopChan:   make(chan bool),
-		userPushCh: make(chan *protos.Push),
-		userKickCh: make(chan *protos.KickMsg),
+		userPushCh: make(chan natsUserPushDelivery),
+		userKickCh: make(chan natsUserKickDelivery),
 	}
 	require.NoError(t, rpcServer.startHandler(rpcServer.processPushes))
 	require.NoError(t, rpcServer.startHandler(rpcServer.processKick))
@@ -2123,6 +2252,7 @@ func TestNatsRPCServerInit(t *testing.T) {
 	mockSessionPool := sessionmocks.NewMockSessionPool(ctrl)
 	rpcServer, _ := NewNatsRPCServer(cfg, sv, nil, nil, mockSessionPool)
 	mockSessionPool.EXPECT().OnSessionBind(newFuncPtrMatcher(rpcServer.onSessionBind))
+	mockSessionPool.EXPECT().OnSessionClose(newFuncPtrMatcher(rpcServer.onSessionClose))
 	err := rpcServer.Init()
 	assert.NoError(t, err)
 	// should setup conn
@@ -2162,6 +2292,7 @@ func TestNatsRPCServerProcessBindings(t *testing.T) {
 	mockSessionPool := sessionmocks.NewMockSessionPool(ctrl)
 	rpcServer, _ := NewNatsRPCServer(cfg, sv, nil, nil, mockSessionPool)
 	mockSessionPool.EXPECT().OnSessionBind(newFuncPtrMatcher(rpcServer.onSessionBind))
+	mockSessionPool.EXPECT().OnSessionClose(newFuncPtrMatcher(rpcServer.onSessionClose))
 	err := rpcServer.Init()
 
 	assert.NoError(t, err)
@@ -2207,6 +2338,7 @@ func TestNatsRPCServerProcessPushes(t *testing.T) {
 	mockSessionPool := sessionmocks.NewMockSessionPool(ctrl)
 	rpcServer, _ := NewNatsRPCServer(cfg, sv, nil, nil, mockSessionPool)
 	mockSessionPool.EXPECT().OnSessionBind(newFuncPtrMatcher(rpcServer.onSessionBind))
+	mockSessionPool.EXPECT().OnSessionClose(newFuncPtrMatcher(rpcServer.onSessionClose))
 	err := rpcServer.Init()
 
 	assert.NoError(t, err)
@@ -2227,7 +2359,7 @@ func TestNatsRPCServerProcessPushes(t *testing.T) {
 		},
 	})
 
-	rpcServer.userPushCh <- push
+	rpcServer.userPushCh <- natsUserPushDelivery{push: push}
 	got := helpers.ShouldEventuallyReceive(t, processed).(*protos.Push)
 	assert.Equal(t, push.Route, got.Route)
 	assert.Equal(t, push.Uid, got.Uid)
@@ -2244,6 +2376,7 @@ func TestNatsRPCServerProcessKick(t *testing.T) {
 	mockSessionPool := sessionmocks.NewMockSessionPool(ctrl)
 	rpcServer, _ := NewNatsRPCServer(cfg, sv, nil, nil, mockSessionPool)
 	mockSessionPool.EXPECT().OnSessionBind(newFuncPtrMatcher(rpcServer.onSessionBind))
+	mockSessionPool.EXPECT().OnSessionClose(newFuncPtrMatcher(rpcServer.onSessionClose))
 	err := rpcServer.Init()
 
 	assert.NoError(t, err)
@@ -2262,7 +2395,7 @@ func TestNatsRPCServerProcessKick(t *testing.T) {
 		},
 	})
 
-	rpcServer.userKickCh <- kick
+	rpcServer.userKickCh <- natsUserKickDelivery{kick: kick}
 	got := helpers.ShouldEventuallyReceive(t, processed).(*protos.KickMsg)
 	assert.Equal(t, kick.UserId, got.UserId)
 }
@@ -2282,9 +2415,18 @@ func TestNatsRPCServerReportMetrics(t *testing.T) {
 
 	rpcServer.subChan <- &nats.Msg{}
 	rpcServer.bindingsChan <- &nats.Msg{}
-	rpcServer.userPushCh <- &protos.Push{}
+	rpcServer.userPushCh <- natsUserPushDelivery{push: &protos.Push{}}
 
 	mockMetricsReporter.EXPECT().ReportGauge(metrics.DroppedMessages, gomock.Any(), float64(rpcServer.dropped))
+	for _, metricName := range []string{
+		metrics.ActiveUserSubscriptionPairs,
+		metrics.UserSubscriptionStaleOwnerDrops,
+		metrics.UserSubscriptionCreateRollbacks,
+		metrics.UserSubscriptionDuplicateBindReuse,
+		metrics.UserMessageUIDMismatches,
+	} {
+		mockMetricsReporter.EXPECT().ReportGauge(metricName, gomock.Any(), float64(0))
+	}
 	mockMetricsReporter.EXPECT().ReportGauge(metrics.ChannelCapacity, gomock.Any(), float64(99)).Times(3)
 	rpcServer.reportMetrics()
 }

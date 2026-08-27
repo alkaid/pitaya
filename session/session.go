@@ -42,7 +42,6 @@ import (
 	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/pitaya/v2/networkentity"
 	"github.com/alkaid/pitaya/v2/protos"
-	nats "github.com/nats-io/nats.go"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 )
@@ -314,13 +313,11 @@ type Session interface {
 	// Deprecated: 用不到,除非定制frontend
 	//  只有在frontend调用才有用
 	GetOnCloseCallbacks() []func()
-	GetSubscriptions() []*nats.Subscription
 	// Deprecated: 用不到,除非定制frontend
 	//  只有在frontend调用才有用
 	//  @param callbacks
 	SetOnCloseCallbacks(callbacks []func())
 	SetIsFrontend(isFrontend bool)
-	SetSubscriptions(subscriptions []*nats.Subscription)
 	HasRequestsInFlight() bool
 	GetRequestsInFlight() ReqInFlight
 	SetRequestInFlight(reqID string, reqData string, inFlight bool)

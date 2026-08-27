@@ -42,6 +42,7 @@ import (
 	"github.com/alkaid/pitaya/v2/examples/testing/protos"
 	"github.com/alkaid/pitaya/v2/groups"
 	"github.com/alkaid/pitaya/v2/modules"
+	pitayaprotos "github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/protos/test"
 	"github.com/alkaid/pitaya/v2/serialize/json"
 	"github.com/alkaid/pitaya/v2/serialize/protobuf"
@@ -53,9 +54,16 @@ import (
 // TestSvc service for e2e tests
 type TestSvc struct {
 	component.Base
-	app               pitaya.Pitaya
-	sessionPool       session.SessionPool
-	stressCloseEvents sync.Map
+	app                     pitaya.Pitaya
+	sessionPool             session.SessionPool
+	rpcClient               cluster.RPCClient
+	serverType              string
+	subscriptionDiagnostics stressSubscriptionDiagnostics
+	stressCloseEvents       sync.Map
+}
+
+type stressSubscriptionDiagnostics interface {
+	UserSubscriptionStats() cluster.NatsUserSubscriptionStats
 }
 
 // TestRemoteSvc remote service for e2e tests
@@ -259,6 +267,53 @@ func (t *TestSvc) TestStressBindID(ctx context.Context, byteUID []byte) ([]byte,
 	return []byte("ack"), nil
 }
 
+// TestStressRetryBindID repeats Bind on the current owner without changing the
+// close tracker used by the replacement phase.
+func (t *TestSvc) TestStressRetryBindID(ctx context.Context, byteUID []byte) ([]byte, error) {
+	s := t.app.GetSessionFromCtx(ctx)
+	uid := string(byteUID)
+	owner := t.sessionPool.GetSessionByUID(uid)
+	if s == nil || owner == nil || owner.ID() != s.ID() || s.UID() != uid {
+		err := fmt.Errorf("session does not own uid %q before retry", uid)
+		return nil, apierrors.InternalServer("PIT-445", err.Error(), "").WithCause(err)
+	}
+	if err := s.Bind(ctx, uid, nil, nil); err != nil {
+		return nil, apierrors.InternalServer("PIT-444", err.Error(), "").WithCause(err)
+	}
+	owner = t.sessionPool.GetSessionByUID(uid)
+	if owner == nil || owner.ID() != s.ID() {
+		err := fmt.Errorf("session lost uid %q during retry", uid)
+		return nil, apierrors.InternalServer("PIT-445", err.Error(), "").WithCause(err)
+	}
+	return []byte("ack"), nil
+}
+
+// TestStressNATSPush publishes through the cluster user subject, rather than
+// taking the local Session.Push shortcut.
+func (t *TestSvc) TestStressNATSPush(ctx context.Context, payload []byte) ([]byte, error) {
+	parts := strings.SplitN(string(payload), "|", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		err := fmt.Errorf("stress push payload must be uid|token")
+		return nil, apierrors.InternalServer("PIT-449", err.Error(), "").WithCause(err)
+	}
+	uid, token := parts[0], parts[1]
+	s := t.app.GetSessionFromCtx(ctx)
+	owner := t.sessionPool.GetSessionByUID(uid)
+	if s == nil || owner == nil || owner.ID() != s.ID() || t.rpcClient == nil {
+		err := fmt.Errorf("session does not own uid %q or RPC client is unavailable", uid)
+		return nil, apierrors.InternalServer("PIT-445", err.Error(), "").WithCause(err)
+	}
+	err := t.rpcClient.SendPush(uid, &cluster.Server{Type: t.serverType}, &pitayaprotos.Push{
+		Route: "stress.subscription",
+		Uid:   uid,
+		Data:  []byte(token),
+	})
+	if err != nil {
+		return nil, apierrors.InternalServer("PIT-449", err.Error(), "").WithCause(err)
+	}
+	return []byte("ack"), nil
+}
+
 // TestStressRebindID requires and replaces a distinct current owner.
 func (t *TestSvc) TestStressRebindID(ctx context.Context, byteUID []byte) ([]byte, error) {
 	s := t.app.GetSessionFromCtx(ctx)
@@ -319,6 +374,23 @@ func (t *TestSvc) TestAssertSessionOwnership(ctx context.Context, byteUID []byte
 // TestSessionStats returns authoritative pool counts for stress barriers.
 func (t *TestSvc) TestSessionStats(ctx context.Context) ([]byte, error) {
 	return []byte(fmt.Sprintf("%d|%d", t.sessionPool.GetSessionCount(), t.sessionPool.GetUserCount())), nil
+}
+
+// TestStressSubscriptionStats reports only fixed-cardinality NATS ownership
+// counters needed by the stress evidence.
+func (t *TestSvc) TestStressSubscriptionStats(ctx context.Context) ([]byte, error) {
+	if t.subscriptionDiagnostics == nil {
+		return []byte("0|0|0|0|0"), nil
+	}
+	stats := t.subscriptionDiagnostics.UserSubscriptionStats()
+	return []byte(fmt.Sprintf(
+		"%d|%d|%d|%d|%d",
+		stats.ActivePairs,
+		stats.InboundSubscriptions,
+		stats.DuplicateBindReuse,
+		stats.StaleOwnerDrops,
+		stats.PushDeliveries,
+	)), nil
 }
 
 // TestSendGroupMsg handler for e2e tests
@@ -393,7 +465,7 @@ func main() {
 	cfg.Set("pitaya.log.development", *debug)
 	cfg.Set("pitaya.log.level", logLevel)
 
-	app, bs, sessionPool, tcpAcceptor := createApp(*serializer, *port, *grpc, *isFrontend, *svType, pitaya.Cluster, map[string]string{
+	app, bs, sessionPool, tcpAcceptor, rpcClient, subscriptionDiagnostics := createApp(*serializer, *port, *grpc, *isFrontend, *svType, pitaya.Cluster, map[string]string{
 		constants.GRPCHostKey: "127.0.0.1",
 		constants.GRPCPortKey: fmt.Sprintf("%d", *grpcPort),
 	}, cfg)
@@ -404,8 +476,11 @@ func main() {
 
 	app.Register(
 		&TestSvc{
-			app:         app,
-			sessionPool: sessionPool,
+			app:                     app,
+			sessionPool:             sessionPool,
+			rpcClient:               rpcClient,
+			serverType:              *svType,
+			subscriptionDiagnostics: subscriptionDiagnostics,
 		},
 		component.WithName("testsvc"),
 		component.WithNameFunc(strings.ToLower),
@@ -432,7 +507,7 @@ func main() {
 	app.Start()
 }
 
-func createApp(serializer string, port int, grpc bool, isFrontend bool, svType string, serverMode pitaya.ServerMode, metadata map[string]string, cfg ...*viper.Viper) (pitaya.Pitaya, *modules.ETCDBindingStorage, session.SessionPool, *acceptor.TCPAcceptor) {
+func createApp(serializer string, port int, grpc bool, isFrontend bool, svType string, serverMode pitaya.ServerMode, metadata map[string]string, cfg ...*viper.Viper) (pitaya.Pitaya, *modules.ETCDBindingStorage, session.SessionPool, *acceptor.TCPAcceptor, cluster.RPCClient, stressSubscriptionDiagnostics) {
 	conf := config.NewConfig(cfg...)
 	builder := pitaya.NewBuilderWithConfigs(isFrontend, svType, serverMode, metadata, conf)
 
@@ -478,7 +553,8 @@ func createApp(serializer string, port int, grpc bool, isFrontend bool, svType s
 		builder.RPCClient = gc
 	}
 
-	return builder.Build(), bs, builder.SessionPool, tcpAcceptor
+	diagnostics, _ := builder.RPCServer.(stressSubscriptionDiagnostics)
+	return builder.Build(), bs, builder.SessionPool, tcpAcceptor, builder.RPCClient, diagnostics
 }
 
 func verifyTestNATSMessagesBuffer(pitayaConfig *config.PitayaConfig) {

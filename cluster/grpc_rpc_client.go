@@ -24,6 +24,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alkaid/goerrors/apierrors"
@@ -52,6 +53,13 @@ type GRPCClient struct {
 	metricsReporters []metrics.Reporter
 	reqTimeout       time.Duration
 	server           *Server
+	running          atomic.Bool
+	operationMu      sync.Mutex
+	operationWG      sync.WaitGroup
+	operationsClosed bool
+	lifecycleCtx     context.Context
+	cancelLifecycle  context.CancelFunc
+	shutdownOnce     sync.Once
 }
 
 // NewGRPCClient returns a new instance of GRPCClient
@@ -65,11 +73,14 @@ func NewGRPCClient(
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
+	lifecycleCtx, cancelLifecycle := context.WithCancel(context.Background())
 	gs := &GRPCClient{
 		bindingStorage:   bindingStorage,
 		infoRetriever:    infoRetriever,
 		metricsReporters: metricsReporters,
 		server:           server,
+		lifecycleCtx:     lifecycleCtx,
+		cancelLifecycle:  cancelLifecycle,
 	}
 
 	gs.dialTimeout = config.DialTimeout
@@ -89,6 +100,12 @@ type grpcClient struct {
 
 // Init inits grpc rpc client
 func (gs *GRPCClient) Init() error {
+	gs.operationMu.Lock()
+	defer gs.operationMu.Unlock()
+	if gs.operationsClosed {
+		return constants.ErrRPCClientNotInitialized
+	}
+	gs.running.Store(true)
 	return nil
 }
 
@@ -101,6 +118,11 @@ func (gs *GRPCClient) Publish(
 	observersCount int,
 	timeouts ...time.Duration,
 ) ([]*protos.Response, error) {
+	_, done, err := gs.beginOperation(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	return nil, constants.ErrNotImplemented
 }
 
@@ -114,6 +136,11 @@ func (gs *GRPCClient) Call(
 	server *Server,
 ) (*protos.Response, error) {
 	var err error
+	ctx, done, err := gs.beginOperation(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	ctx = withTargetRPCAdmission(ctx, session, server)
 	ctx, err = withTargetOwnerFencingMetadata(ctx, server)
 	if err != nil {
@@ -176,11 +203,21 @@ func (gs *GRPCClient) Call(
 
 // Fork not implemented RPCClient.Fork
 func (gs *GRPCClient) Fork(ctx context.Context, route *route.Route, session session.Session, msg *message.Message) error {
+	_, done, err := gs.beginOperation(ctx)
+	if err != nil {
+		return err
+	}
+	defer done()
 	return constants.ErrNotImplemented
 }
 
 // Send not implemented in grpc client
 func (gs *GRPCClient) Send(uid string, d []byte) error {
+	_, done, err := gs.beginOperation(context.Background())
+	if err != nil {
+		return err
+	}
+	defer done()
 	return constants.ErrNotImplemented
 }
 
@@ -188,6 +225,11 @@ func (gs *GRPCClient) Send(uid string, d []byte) error {
 //
 // sends the binding information to other servers that may be interested in this info
 func (gs *GRPCClient) BroadcastSessionBind(uid string) error {
+	ctx, done, err := gs.beginOperation(context.Background())
+	if err != nil {
+		return err
+	}
+	defer done()
 	if gs.bindingStorage == nil {
 		return constants.ErrNoBindingStorageModule
 	}
@@ -198,8 +240,8 @@ func (gs *GRPCClient) BroadcastSessionBind(uid string) error {
 				Uid: uid,
 				Fid: gs.server.ID,
 			}
-			ctxT, done := context.WithTimeout(context.Background(), gs.reqTimeout)
-			defer done()
+			ctxT, cancel := context.WithTimeout(ctx, gs.reqTimeout)
+			defer cancel()
 			err := c.(*grpcClient).sessionBindRemote(ctxT, msg)
 			return err
 		}
@@ -209,6 +251,11 @@ func (gs *GRPCClient) BroadcastSessionBind(uid string) error {
 
 // SendKick sends a kick to an user
 func (gs *GRPCClient) SendKick(userID string, serverType string, kick *protos.KickMsg) error {
+	ctx, done, admissionErr := gs.beginOperation(context.Background())
+	if admissionErr != nil {
+		return admissionErr
+	}
+	defer done()
 	var svID string
 	var err error
 
@@ -222,8 +269,8 @@ func (gs *GRPCClient) SendKick(userID string, serverType string, kick *protos.Ki
 	}
 
 	if c, ok := gs.clientMap.Load(svID); ok {
-		ctxT, done := context.WithTimeout(context.Background(), gs.reqTimeout)
-		defer done()
+		ctxT, cancel := context.WithTimeout(ctx, gs.reqTimeout)
+		defer cancel()
 		err := c.(*grpcClient).sendKick(ctxT, kick)
 		return err
 	}
@@ -233,6 +280,11 @@ func (gs *GRPCClient) SendKick(userID string, serverType string, kick *protos.Ki
 // SendPush sends a message to an user, if you dont know the serverID that the user is connected to, you need to set a BindingStorage when creating the client
 // TODO: Jaeger?
 func (gs *GRPCClient) SendPush(userID string, frontendSv *Server, push *protos.Push) error {
+	ctx, done, admissionErr := gs.beginOperation(context.Background())
+	if admissionErr != nil {
+		return admissionErr
+	}
+	defer done()
 	var svID string
 	var err error
 	if frontendSv.ID != "" {
@@ -247,8 +299,8 @@ func (gs *GRPCClient) SendPush(userID string, frontendSv *Server, push *protos.P
 		}
 	}
 	if c, ok := gs.clientMap.Load(svID); ok {
-		ctxT, done := context.WithTimeout(context.Background(), gs.reqTimeout)
-		defer done()
+		ctxT, cancel := context.WithTimeout(ctx, gs.reqTimeout)
+		defer cancel()
 		err := c.(*grpcClient).pushToUser(ctxT, push)
 		return err
 	}
@@ -257,6 +309,12 @@ func (gs *GRPCClient) SendPush(userID string, frontendSv *Server, push *protos.P
 
 // AddServer is called when a new server is discovered
 func (gs *GRPCClient) AddServer(sv *Server) {
+	_, done, err := gs.beginOperation(context.Background())
+	if err != nil {
+		logger.Log.Debugf("[grpc client] ignored server %s while shutting down", sv.ID)
+		return
+	}
+	defer done()
 	var host, port, portKey string
 	var ok bool
 
@@ -284,6 +342,11 @@ func (gs *GRPCClient) AddServer(sv *Server) {
 
 // RemoveServer is called when a server is removed
 func (gs *GRPCClient) RemoveServer(sv *Server) {
+	_, done, err := gs.beginOperation(context.Background())
+	if err != nil {
+		return
+	}
+	defer done()
 	if c, ok := gs.clientMap.Load(sv.ID); ok {
 		c.(*grpcClient).disconnect()
 		gs.clientMap.Delete(sv.ID)
@@ -301,9 +364,62 @@ func (gs *GRPCClient) AfterInit() {}
 // BeforeShutdown runs before shutdown
 func (gs *GRPCClient) BeforeShutdown() {}
 
-// Shutdown stops grpc rpc server
+// Shutdown stops admission, cancels admitted calls, and closes every owned
+// connection before returning.
 func (gs *GRPCClient) Shutdown() error {
+	gs.shutdownOnce.Do(func() {
+		gs.operationMu.Lock()
+		gs.operationsClosed = true
+		gs.running.Store(false)
+		if gs.cancelLifecycle != nil {
+			gs.cancelLifecycle()
+		}
+		gs.operationMu.Unlock()
+
+		gs.operationWG.Wait()
+		gs.clientMap.Range(func(key, value any) bool {
+			if client, ok := value.(*grpcClient); ok {
+				client.disconnect()
+			}
+			gs.clientMap.Delete(key)
+			return true
+		})
+	})
 	return nil
+}
+
+// IsRunning reports whether the client has entered its initialized lifecycle
+// and has not started shutdown.
+func (gs *GRPCClient) IsRunning() bool {
+	return gs.running.Load()
+}
+
+func (gs *GRPCClient) beginOperation(ctx context.Context) (context.Context, func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	gs.operationMu.Lock()
+	if gs.operationsClosed {
+		gs.operationMu.Unlock()
+		return nil, nil, constants.ErrRPCClientNotInitialized
+	}
+	if err := ctx.Err(); err != nil {
+		gs.operationMu.Unlock()
+		return nil, nil, err
+	}
+	gs.operationWG.Add(1)
+	gs.operationMu.Unlock()
+
+	operationCtx, cancel := context.WithCancel(ctx)
+	stopLifecycle := func() bool { return false }
+	if gs.lifecycleCtx != nil {
+		stopLifecycle = context.AfterFunc(gs.lifecycleCtx, cancel)
+	}
+	return operationCtx, func() {
+		stopLifecycle()
+		cancel()
+		gs.operationWG.Done()
+	}, nil
 }
 
 func (gs *GRPCClient) getServerHost(sv *Server) (host, portKey string) {
@@ -338,6 +454,10 @@ func (gs *GRPCClient) getServerHost(sv *Server) (host, portKey string) {
 func (gc *grpcClient) connect() error {
 	gc.lock.Lock()
 	defer gc.lock.Unlock()
+	return gc.connectLocked()
+}
+
+func (gc *grpcClient) connectLocked() error {
 	if gc.connected {
 		return nil
 	}
@@ -358,48 +478,60 @@ func (gc *grpcClient) connect() error {
 
 func (gc *grpcClient) disconnect() {
 	gc.lock.Lock()
-	if gc.connected {
-		gc.conn.Close()
-		gc.connected = false
+	if gc.conn != nil {
+		_ = gc.conn.Close()
 	}
+	gc.cli = nil
+	gc.conn = nil
+	gc.connected = false
 	gc.lock.Unlock()
 }
 
-func (gc *grpcClient) pushToUser(ctx context.Context, push *protos.Push) error {
+func (gc *grpcClient) client() (protos.PitayaClient, error) {
+	gc.lock.Lock()
+	defer gc.lock.Unlock()
 	if !gc.connected {
-		if err := gc.connect(); err != nil {
-			return err
+		if err := gc.connectLocked(); err != nil {
+			return nil, err
 		}
 	}
-	_, err := gc.cli.PushToUser(ctx, push)
+	if gc.cli == nil {
+		return nil, constants.ErrNoConnectionToServer
+	}
+	return gc.cli, nil
+}
+
+func (gc *grpcClient) pushToUser(ctx context.Context, push *protos.Push) error {
+	client, err := gc.client()
+	if err != nil {
+		return err
+	}
+	_, err = client.PushToUser(ctx, push)
 	return err
 }
 
 func (gc *grpcClient) call(ctx context.Context, req *protos.Request) (*protos.Response, error) {
-	if !gc.connected {
-		if err := gc.connect(); err != nil {
-			return nil, err
-		}
+	client, err := gc.client()
+	if err != nil {
+		return nil, err
 	}
-	return gc.cli.Call(ctx, req)
+	return client.Call(ctx, req)
 }
 
 func (gc *grpcClient) sessionBindRemote(ctx context.Context, req *protos.BindMsg) error {
-	if !gc.connected {
-		if err := gc.connect(); err != nil {
-			return err
-		}
+	client, err := gc.client()
+	if err != nil {
+		return err
 	}
-	_, err := gc.cli.SessionBindRemote(ctx, req)
+	_, err = client.SessionBindRemote(ctx, req)
 	return err
 }
 
 func (gc *grpcClient) sendKick(ctx context.Context, req *protos.KickMsg) error {
-	if !gc.connected {
-		if err := gc.connect(); err != nil {
-			return err
-		}
+	client, err := gc.client()
+	if err != nil {
+		return err
 	}
-	_, err := gc.cli.KickUser(ctx, req)
+	_, err = client.KickUser(ctx, req)
 	return err
 }

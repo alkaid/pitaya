@@ -539,6 +539,54 @@ func TestNatsRPCClientSendPush(t *testing.T) {
 
 }
 
+func TestNatsRPCClientRejectsInvalidUserMessages(t *testing.T) {
+	rpcClient := &NatsRPCClient{}
+	server := &Server{Type: "frontend"}
+
+	tests := []struct {
+		name string
+		send func() error
+		want error
+	}{
+		{
+			name: "push empty uid",
+			send: func() error { return rpcClient.SendPush("", server, &protos.Push{}) },
+			want: constants.ErrEmptyUID,
+		},
+		{
+			name: "push nil payload",
+			send: func() error { return rpcClient.SendPush("user", server, nil) },
+			want: constants.ErrNilUserMessage,
+		},
+		{
+			name: "push uid mismatch",
+			send: func() error { return rpcClient.SendPush("user", server, &protos.Push{Uid: "other"}) },
+			want: constants.ErrUserMessageUIDMismatch,
+		},
+		{
+			name: "kick empty uid",
+			send: func() error { return rpcClient.SendKick("", "frontend", &protos.KickMsg{}) },
+			want: constants.ErrEmptyUID,
+		},
+		{
+			name: "kick nil payload",
+			send: func() error { return rpcClient.SendKick("user", "frontend", nil) },
+			want: constants.ErrNilUserMessage,
+		},
+		{
+			name: "kick uid mismatch",
+			send: func() error { return rpcClient.SendKick("user", "frontend", &protos.KickMsg{UserId: "other"}) },
+			want: constants.ErrUserMessageUIDMismatch,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.ErrorIs(t, tt.send(), tt.want)
+		})
+	}
+}
+
 func TestNatsRPCClientSendShouldFailIfNotRunning(t *testing.T) {
 	config := config.NewDefaultPitayaConfig().Cluster.RPC.Client.Nats
 	sv := getServer()

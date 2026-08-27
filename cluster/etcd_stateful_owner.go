@@ -21,32 +21,22 @@
 package cluster
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"io"
 
 	"github.com/alkaid/pitaya/v2/constants"
+	"github.com/alkaid/pitaya/v2/internal/statefulowner"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
 const (
-	statefulOwnerRecordVersion  = 1
+	statefulOwnerRecordVersion  = statefulowner.RecordVersion
 	statefulOwnerResolveRetries = 16
-	statefulOwnerKeyPrefix      = "stateful-owners/v1/"
+	statefulOwnerKeyPrefix      = statefulowner.AssignmentRelativePrefix
 )
 
-type statefulOwnerRecord struct {
-	Version       int    `json:"version"`
-	ServerType    string `json:"server_type"`
-	AssignmentKey string `json:"assignment_key"`
-	ServerID      string `json:"server_id"`
-	OwnerEpoch    uint64 `json:"owner_epoch"`
-}
+type statefulOwnerRecord = statefulowner.Record
 
 var _ StatefulOwnerResolver = (*etcdServiceDiscovery)(nil)
 var _ StatefulOwnerHandoff = (*etcdServiceDiscovery)(nil)
@@ -60,54 +50,15 @@ func statefulOwnerAssignmentKey(serverType, routingIdentity string) (string, str
 }
 
 func statefulOwnerStorageKey(opaque string) (string, error) {
-	if len(opaque) != sha256.Size*2 {
-		return "", fmt.Errorf("%w: invalid assignment key", constants.ErrStaleStatefulOwner)
-	}
-	decoded, err := hex.DecodeString(opaque)
-	if err != nil || len(decoded) != sha256.Size || hex.EncodeToString(decoded) != opaque {
-		return "", fmt.Errorf("%w: invalid assignment key", constants.ErrStaleStatefulOwner)
-	}
-	return statefulOwnerKeyPrefix + opaque, nil
+	return statefulowner.AssignmentRelativeKey(opaque)
 }
 
 func encodeStatefulOwnerRecord(record statefulOwnerRecord) ([]byte, error) {
-	return json.Marshal(record)
+	return statefulowner.Encode(record)
 }
 
 func decodeStatefulOwnerRecord(payload []byte) (statefulOwnerRecord, error) {
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.DisallowUnknownFields()
-	var wire struct {
-		Version       int    `json:"version"`
-		ServerType    string `json:"server_type"`
-		AssignmentKey string `json:"assignment_key"`
-		ServerID      string `json:"server_id"`
-		OwnerEpoch    uint64 `json:"owner_epoch"`
-	}
-	if err := decoder.Decode(&wire); err != nil {
-		return statefulOwnerRecord{}, fmt.Errorf("%w: %v", constants.ErrStatefulOwnerAssignmentCorrupt, err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return statefulOwnerRecord{}, fmt.Errorf(
-			"%w: trailing assignment data",
-			constants.ErrStatefulOwnerAssignmentCorrupt,
-		)
-	}
-	if wire.Version != statefulOwnerRecordVersion || wire.ServerType == "" ||
-		wire.AssignmentKey == "" || wire.ServerID == "" || wire.OwnerEpoch == 0 {
-		return statefulOwnerRecord{}, fmt.Errorf(
-			"%w: invalid assignment record",
-			constants.ErrStatefulOwnerAssignmentCorrupt,
-		)
-	}
-	return statefulOwnerRecord{
-		Version:       wire.Version,
-		ServerType:    wire.ServerType,
-		AssignmentKey: wire.AssignmentKey,
-		ServerID:      wire.ServerID,
-		OwnerEpoch:    wire.OwnerEpoch,
-	}, nil
+	return statefulowner.Decode(payload)
 }
 
 // ResolveStatefulOwner preserves an existing live assignment even when the

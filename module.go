@@ -49,6 +49,15 @@ func (app *App) RegisterModule(module interfaces.Module, name string) error {
 
 // RegisterModuleAfter registers a module after all registered modules
 func (app *App) RegisterModuleAfter(module interfaces.Module, name string) error {
+	app.configurationMu.Lock()
+	defer app.configurationMu.Unlock()
+	if err := app.configurationAdmissionLocked(); err != nil {
+		return err
+	}
+	return app.registerModuleAfter(module, name)
+}
+
+func (app *App) registerModuleAfter(module interfaces.Module, name string) error {
 	if err := app.alreadyRegistered(name); err != nil {
 		return err
 	}
@@ -71,6 +80,15 @@ func (app *App) RegisterModuleAfter(module interfaces.Module, name string) error
 
 // RegisterModuleBefore registers a module before all registered modules
 func (app *App) RegisterModuleBefore(module interfaces.Module, name string) error {
+	app.configurationMu.Lock()
+	defer app.configurationMu.Unlock()
+	if err := app.configurationAdmissionLocked(); err != nil {
+		return err
+	}
+	return app.registerModuleBefore(module, name)
+}
+
+func (app *App) registerModuleBefore(module interfaces.Module, name string) error {
 	if err := app.alreadyRegistered(name); err != nil {
 		return err
 	}
@@ -279,9 +297,9 @@ func (app *App) commitRuntimeModules(prepared *preparedRuntimeModules) (err erro
 	for index, spec := range prepared.specs {
 		module := built[index].module
 		if spec.position == runtimeModuleBefore {
-			err = app.RegisterModuleBefore(module, spec.name)
+			err = app.registerModuleBefore(module, spec.name)
 		} else {
-			err = app.RegisterModuleAfter(module, spec.name)
+			err = app.registerModuleAfter(module, spec.name)
 		}
 		if err != nil {
 			return fmt.Errorf("register framework module %q: %w", spec.name, err)
@@ -305,6 +323,9 @@ func (app *App) startModules() error {
 	modules := append([]moduleWrapper(nil), app.modulesArr...)
 	journal := app.ensureStartupJournal()
 	for _, modWrapper := range modules {
+		if err := app.startupCancellationError(); err != nil {
+			return err
+		}
 		logger.Sugar.Debugf("initializing module: %s", modWrapper.name)
 		if err := callModuleInit(modWrapper.name, modWrapper.module); err != nil {
 			return err
@@ -313,6 +334,9 @@ func (app *App) startModules() error {
 	}
 
 	for _, modWrapper := range modules {
+		if err := app.startupCancellationError(); err != nil {
+			return err
+		}
 		if err := callLifecycleHook("module", modWrapper.name, "AfterInit", modWrapper.module.AfterInit); err != nil {
 			return err
 		}

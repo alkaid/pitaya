@@ -17,6 +17,7 @@ import (
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
 	pcontext "github.com/alkaid/pitaya/v2/context"
+	rpccontext "github.com/alkaid/pitaya/v2/internal/rpccontext"
 	"github.com/alkaid/pitaya/v2/pipeline"
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/route"
@@ -655,6 +656,79 @@ func TestNotifyAllReturnsStableJoinedTargetErrors(t *testing.T) {
 	assert.ErrorIs(t, err, errAlpha)
 	assert.ErrorIs(t, err, errBeta)
 	assert.Equal(t, "server alpha-1: alpha failed\nserver beta-1: beta failed", err.Error())
+}
+
+func TestNotifyAllDoesNotResolveStatefulOwnerAssignment(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	baseDiscovery := clustermocks.NewMockServiceDiscovery(ctrl)
+	self := &cluster.Server{ID: "gateway-1", Type: "gateway"}
+	target := &cluster.Server{ID: "game-1", Type: "game"}
+	baseDiscovery.EXPECT().GetServerTypes().Return(map[string]*cluster.Server{
+		"gateway": self,
+		"game":    target,
+	})
+	baseDiscovery.EXPECT().GetServersByType("game").Return(map[string]*cluster.Server{
+		target.ID: target,
+	}, nil)
+	baseDiscovery.EXPECT().GetConsistentHashNode("game", "user-1").Return(target.ID, nil)
+
+	routingIdentity, err := cluster.StatefulOwnerRoutingKey("user-1", "", 0)
+	require.NoError(t, err)
+	assignmentKey, err := cluster.StatefulOwnerAssignmentKey("game", routingIdentity)
+	require.NoError(t, err)
+	var ownerResolutions atomic.Int32
+	discovery := &statefulOwnerTestDiscovery{
+		ServiceDiscovery: baseDiscovery,
+		resolve: func(
+			context.Context,
+			string,
+			string,
+			string,
+		) (*cluster.Server, cluster.StatefulOwnerFence, error) {
+			ownerResolutions.Add(1)
+			return target, cluster.StatefulOwnerFence{
+				AssignmentKey: assignmentKey,
+				Epoch:         7,
+				ServerID:      target.ID,
+			}, nil
+		},
+	}
+	rpcRouter := router.New()
+	rpcRouter.SetServiceDiscovery(discovery)
+	propagation := make(chan map[string]any, 1)
+	rpcClient := &fanoutRPCClient{call: func(
+		ctx context.Context,
+		_ protos.RPCType,
+		_ *route.Route,
+		_ session.Session,
+		_ *message.Message,
+		server *cluster.Server,
+	) (*protos.Response, error) {
+		assert.Equal(t, target.ID, server.ID)
+		propagation <- pcontext.ToMap(ctx)
+		return &protos.Response{}, nil
+	}}
+	svc := NewRemoteService(
+		rpcClient, nil, discovery, nil, nil, rpcRouter, nil,
+		self, nil, nil, nil, nil,
+	)
+	sess, created := session.NewSessionPool().NewSession(nil, false, "user-1")
+	require.True(t, created)
+
+	err = svc.NotifyAll(
+		context.Background(),
+		route.NewRoute("", "sys", "sessionbound"),
+		nil,
+		sess,
+	)
+
+	require.NoError(t, err)
+	assert.Zero(t, ownerResolutions.Load())
+	metadata := receiveFanoutValue(t, propagation)
+	assert.Equal(t, "1", metadata[constants.IdempotencyFanoutKey])
+	assert.Equal(t, string(rpccontext.StatefulRouteModeFanout), metadata[rpccontext.StatefulRouteModeKey])
+	assert.NotContains(t, metadata, constants.StatefulOwnerKey)
+	assert.NotContains(t, metadata, constants.StatefulOwnerEpochKey)
 }
 
 func TestPublishZeroTargetsIgnoreCanceledContext(t *testing.T) {

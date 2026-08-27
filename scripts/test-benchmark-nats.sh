@@ -24,9 +24,12 @@ stress_connect_concurrency=${STRESS_CONNECT_CONCURRENCY:-256}
 stress_request_concurrency=${STRESS_REQUEST_CONCURRENCY:-256}
 stress_reconnects=${STRESS_RECONNECTS:-1000}
 stress_reconnect_concurrency=${STRESS_RECONNECT_CONCURRENCY:-64}
+stress_bind_retries=${STRESS_BIND_RETRIES:-1000}
 stress_request_timeout=${STRESS_REQUEST_TIMEOUT:-10s}
 stress_internal_timeout=${STRESS_INTERNAL_TIMEOUT:-12m}
 stress_cleanup_timeout=${STRESS_CLEANUP_TIMEOUT:-30s}
+stress_cleanup_max=${STRESS_CLEANUP_MAX:-30s}
+stress_goroutine_delta_max=${STRESS_GOROUTINE_DELTA_MAX:-5}
 stress_timeout=${STRESS_TIMEOUT:-15m}
 # Cleanup closes every resident session and can publish 10,000 SessionClosed
 # notifications faster than the isolated backend drains them. This stress-only
@@ -87,7 +90,12 @@ else
 	validate_positive_integer STRESS_REQUEST_CONCURRENCY "$stress_request_concurrency" 1024
 	validate_positive_integer STRESS_RECONNECTS "$stress_reconnects" 10000
 	validate_positive_integer STRESS_RECONNECT_CONCURRENCY "$stress_reconnect_concurrency" 1024
+	validate_positive_integer STRESS_BIND_RETRIES "$stress_bind_retries" 100000
 	validate_positive_integer STRESS_NATS_MESSAGES_BUFFER "$stress_nats_messages_buffer" 65536
+	if [[ ! $stress_goroutine_delta_max =~ ^[0-9]+$ ]] || ((${#stress_goroutine_delta_max} > 4)) || ((stress_goroutine_delta_max > 1000)); then
+		echo "STRESS_GOROUTINE_DELTA_MAX must be an integer between 0 and 1000: $stress_goroutine_delta_max" >&2
+		exit 2
+	fi
 	if ((stress_clients < 2)); then
 		echo "STRESS_CLIENTS must be at least 2: $stress_clients" >&2
 		exit 2
@@ -104,11 +112,12 @@ else
 		echo "STRESS_RECONNECT_CONCURRENCY must not exceed STRESS_RECONNECTS" >&2
 		exit 2
 	fi
-	for duration_name in STRESS_REQUEST_TIMEOUT STRESS_INTERNAL_TIMEOUT STRESS_CLEANUP_TIMEOUT STRESS_TIMEOUT; do
+	for duration_name in STRESS_REQUEST_TIMEOUT STRESS_INTERNAL_TIMEOUT STRESS_CLEANUP_TIMEOUT STRESS_CLEANUP_MAX STRESS_TIMEOUT; do
 		case $duration_name in
 		STRESS_REQUEST_TIMEOUT) duration_value=$stress_request_timeout ;;
 		STRESS_INTERNAL_TIMEOUT) duration_value=$stress_internal_timeout ;;
 		STRESS_CLEANUP_TIMEOUT) duration_value=$stress_cleanup_timeout ;;
+		STRESS_CLEANUP_MAX) duration_value=$stress_cleanup_max ;;
 		STRESS_TIMEOUT) duration_value=$stress_timeout ;;
 		esac
 		if ! is_positive_duration "$duration_value"; then
@@ -588,9 +597,12 @@ else
 		-stress-request-concurrency="$stress_request_concurrency" \
 		-stress-reconnects="$stress_reconnects" \
 		-stress-reconnect-concurrency="$stress_reconnect_concurrency" \
+		-stress-bind-retries="$stress_bind_retries" \
 		-stress-request-timeout="$stress_request_timeout" \
 		-stress-internal-timeout="$stress_internal_timeout" \
 		-stress-cleanup-timeout="$stress_cleanup_timeout" \
+		-stress-cleanup-max="$stress_cleanup_max" \
+		-stress-goroutine-delta-max="$stress_goroutine_delta_max" \
 		-stress-nats-messages-buffer="$stress_nats_messages_buffer" \
 		-stress-soft-file-limit="$stress_soft_file_limit" \
 		-stress-file-limit-unlimited="$stress_file_limit_unlimited" \
@@ -646,9 +658,12 @@ else
 		-stress-request-concurrency="$stress_request_concurrency" \
 		-stress-reconnects="$stress_reconnects" \
 		-stress-reconnect-concurrency="$stress_reconnect_concurrency" \
+		-stress-bind-retries="$stress_bind_retries" \
 		-stress-request-timeout="$stress_request_timeout" \
 		-stress-internal-timeout="$stress_internal_timeout" \
 		-stress-cleanup-timeout="$stress_cleanup_timeout" \
+		-stress-cleanup-max="$stress_cleanup_max" \
+		-stress-goroutine-delta-max="$stress_goroutine_delta_max" \
 		-stress-nats-messages-buffer="$stress_nats_messages_buffer" \
 		-stress-soft-file-limit="$stress_soft_file_limit" \
 		-stress-file-limit-unlimited="$stress_file_limit_unlimited" \

@@ -48,7 +48,7 @@ func TestHandleHandshakeResponseRejectsOversizedInflatedPayload(t *testing.T) {
 }
 
 func TestServerActivityTimestampIsRaceFree(t *testing.T) {
-	client := New()
+	gen := newConnectionGeneration(1, nil, codec.NewPomeloPacketEncoder(), message.NewMessagesEncoder(false))
 	started := make(chan struct{})
 	var ready sync.WaitGroup
 	var workers sync.WaitGroup
@@ -61,7 +61,7 @@ func TestServerActivityTimestampIsRaceFree(t *testing.T) {
 			ready.Done()
 			<-started
 			for index := range 1000 {
-				client.recordServerActivity(time.Unix(0, int64(index+1)))
+				gen.recordServerActivity(time.Unix(0, int64(index+1)))
 			}
 		}()
 		go func() {
@@ -69,7 +69,7 @@ func TestServerActivityTimestampIsRaceFree(t *testing.T) {
 			ready.Done()
 			<-started
 			for range 1000 {
-				_ = client.lastServerActivity()
+				_ = gen.lastServerActivity()
 			}
 		}()
 	}
@@ -77,17 +77,17 @@ func TestServerActivityTimestampIsRaceFree(t *testing.T) {
 	ready.Wait()
 	close(started)
 	workers.Wait()
-	if client.lastServerActivity().IsZero() {
+	if gen.lastServerActivity().IsZero() {
 		t.Fatal("concurrent activity updates did not complete")
 	}
 }
 
 func TestServerActivityTimestampPreservesMonotonicElapsedTime(t *testing.T) {
-	client := New()
+	gen := newConnectionGeneration(1, nil, codec.NewPomeloPacketEncoder(), message.NewMessagesEncoder(false))
 	recorded := time.Now()
-	client.recordServerActivity(recorded)
+	gen.recordServerActivity(recorded)
 
-	if elapsed := client.lastServerActivity().Sub(recorded); elapsed != 0 {
+	if elapsed := gen.lastServerActivity().Sub(recorded); elapsed != 0 {
 		t.Fatalf("reconstructed activity differs by %s", elapsed)
 	}
 }
@@ -98,8 +98,9 @@ func TestSendRequestShouldTimeout(t *testing.T) {
 	defer ctrl.Finish()
 
 	mockConn := mocks.NewMockPlayerConn(ctrl)
-	c.conn = mockConn
-	go c.pendingRequestsReaper()
+	gen := installTestGeneration(c, mockConn, false, 0)
+	go c.pendingRequestsReaper(gen)
+	t.Cleanup(func() { close(gen.closeCh) })
 
 	route := "com.sometest.route"
 	data := []byte{0x02, 0x03, 0x04}
@@ -117,8 +118,6 @@ func TestSendRequestShouldTimeout(t *testing.T) {
 
 	mockConn.EXPECT().SetWriteDeadline(gomock.Any()).Return(nil)
 	mockConn.EXPECT().Write(pkt)
-
-	c.IncomingMsgChan = make(chan *message.Message, 10)
 
 	c.nextID = 0
 	c.SendRequest(route, data)
