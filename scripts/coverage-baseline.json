@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "base_sha": "6b141f9813cf2da28e0c0d311c37f58435d9ec6a",
+  "base_sha": "e5522b17d6fdc7778f1d357703deb44cf1e6c6cb",
   "coverage_platform": {
     "goos": "linux",
     "goarch": "amd64"
@@ -92,52 +92,56 @@
   },
   "baseline": {
     "overall": {
-      "covered": 9352,
-      "total": 11952
+      "covered": 11728,
+      "total": 14514
     },
     "packages": {
       ".": {
-        "covered": 704,
-        "total": 1026
+        "covered": 1268,
+        "total": 1606
       },
       "acceptor": {
-        "covered": 370,
-        "total": 420
+        "covered": 382,
+        "total": 426
       },
       "acceptorwrapper": {
         "covered": 100,
         "total": 123
       },
       "agent": {
-        "covered": 310,
-        "total": 391
+        "covered": 393,
+        "total": 480
       },
       "client": {
-        "covered": 279,
-        "total": 446
+        "covered": 665,
+        "total": 844
       },
       "cluster": {
-        "covered": 2287,
-        "total": 2771
+        "covered": 2747,
+        "total": 3304
+      },
+      "cmd/pitaya-ownerctl": {
+        "covered": 166,
+        "total": 216
       },
       "co": {
-        "covered": 241,
-        "total": 282
+        "covered": 244,
+        "total": 285
       },
       "component": {
         "covered": 110,
         "total": 126
       },
       "config": {
-        "covered": 326,
-        "total": 426
+        "covered": 335,
+        "total": 424
       },
       "conn/codec": {
         "covered": 46,
         "total": 49
       },
       "conn/message": {
-        "covered": 110,
+        "covered": 112,
         "total": 117
       },
       "conn/packet": {
@@ -161,11 +165,15 @@
         "total": 431
       },
       "internal/rpccontext": {
-        "covered": 13,
-        "total": 14
+        "covered": 32,
+        "total": 32
+      },
+      "internal/statefulowner": {
+        "covered": 186,
+        "total": 224
       },
       "internal/workers": {
-        "covered": 445,
+        "covered": 446,
         "total": 646
       },
       "logger": {
@@ -173,8 +181,8 @@
         "total": 106
       },
       "metrics": {
-        "covered": 318,
-        "total": 328
+        "covered": 428,
+        "total": 439
       },
       "modules": {
         "covered": 55,
@@ -185,16 +193,16 @@
         "total": 30
       },
       "remote": {
-        "covered": 199,
-        "total": 295
+        "covered": 219,
+        "total": 303
       },
       "route": {
         "covered": 14,
         "total": 14
       },
       "router": {
-        "covered": 37,
-        "total": 49
+        "covered": 48,
+        "total": 55
       },
       "serialize": {
         "covered": 2,
@@ -209,27 +217,27 @@
         "total": 10
       },
       "service": {
-        "covered": 1274,
-        "total": 1520
+        "covered": 1612,
+        "total": 1899
       },
       "session": {
-        "covered": 771,
-        "total": 870
+        "covered": 757,
+        "total": 850
       },
       "timer": {
         "covered": 217,
         "total": 250
       },
       "tracing": {
-        "covered": 124,
-        "total": 138
+        "covered": 143,
+        "total": 151
       },
       "util": {
         "covered": 122,
         "total": 138
       },
       "util/compression": {
-        "covered": 23,
+        "covered": 24,
         "total": 26
       },
       "util/net": {
