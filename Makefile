@@ -40,9 +40,14 @@ build-cli:
 	@go build -o build/$(BIN) github.com/alkaid/pitaya/pitaya-cli/v2
 	@echo "build pitaya-cli at ./build/$(BIN)"
 
-build-k6-extension:
+# k6 v0.46.0 is the last tested host for this extension's goja API.
+# Upgrade the host separately from the framework stabilization.
+init-xk6:
 	@$(MKFOLDER)
-	@xk6 build --with github.com/alkaid/pitaya/xk6-pitaya=./xk6-pitaya/ --with github.com/alkaid/pitaya/v2=./ --with google.golang.org/grpc=google.golang.org/grpc@v1.54.1 --output ./build/$(XK6_BIN)
+	@GOBIN=$(CURDIR)/build/tools GOWORK=off go install go.k6.io/xk6/cmd/xk6@v1.4.14
+
+build-k6-extension: init-xk6
+	@GOWORK=off $(CURDIR)/build/tools/xk6 build v0.46.0 --with github.com/alkaid/pitaya/xk6-pitaya=$(CURDIR)/xk6-pitaya --replace github.com/alkaid/pitaya/v2=$(CURDIR) --output ./build/$(XK6_BIN)
 	@echo "build pitaya k6 extension at ./build/$(XK6_BIN)"
 
 init-submodules:

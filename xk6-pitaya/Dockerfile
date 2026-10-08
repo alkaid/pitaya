@@ -1,16 +1,12 @@
-# Build the k6 binary with the extension
-FROM golang:1.20 as builder
-
-ARG pitaya_revision
-
-RUN go install go.k6.io/xk6/cmd/xk6@latest
-# For our example, we'll add support for output of test metrics to InfluxDB v2.
-# Feel free to add other extensions using the '--with ...'.
-RUN xk6 build \
-    --with github.com/alkaid/pitaya/xk6-pitaya@$pitaya_revision  \
-    --with github.com/topfreegames/pitaya/v2@$pitaya_revision \
+# Build from the repository root: docker build -f xk6-pitaya/Dockerfile .
+FROM golang:1.27.1 AS builder
+WORKDIR /src
+COPY . .
+RUN GOWORK=off go install go.k6.io/xk6/cmd/xk6@v1.4.14
+RUN GOWORK=off xk6 build v0.46.0 \
+    --with github.com/alkaid/pitaya/xk6-pitaya=/src/xk6-pitaya \
+    --replace github.com/alkaid/pitaya/v2=/src \
     --output /k6
 
-# Use the operator's base image and override the k6 binary
-FROM grafana/k6:latest
+FROM grafana/k6:0.46.0
 COPY --from=builder /k6 /usr/bin/k6

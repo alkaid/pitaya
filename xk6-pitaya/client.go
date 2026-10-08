@@ -8,10 +8,10 @@ import (
 	"sync"
 	"time"
 
+	pitayaclient "github.com/alkaid/pitaya/v2/client"
+	pitayamessage "github.com/alkaid/pitaya/v2/conn/message"
+	"github.com/alkaid/pitaya/v2/session"
 	"github.com/dop251/goja"
-	pitayaclient "github.com/topfreegames/pitaya/v2/client"
-	pitayamessage "github.com/topfreegames/pitaya/v2/conn/message"
-	"github.com/topfreegames/pitaya/v2/session"
 	"go.k6.io/k6/js/modules"
 	"go.k6.io/k6/metrics"
 )
@@ -190,7 +190,7 @@ func (c *Client) pushRequestMetrics(route string, responseTime time.Duration, su
 
 // Disconnect disconnects from the server
 func (c *Client) Disconnect() {
-	c.client.Disconnect()
+	c.client.Disconnect(pitayaclient.CloseReasonManual)
 }
 
 func (c *Client) listen() {

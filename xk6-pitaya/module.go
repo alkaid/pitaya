@@ -7,10 +7,9 @@ import (
 	"fmt"
 	"time"
 
+	pitayaclient "github.com/alkaid/pitaya/v2/client"
+	"github.com/alkaid/pitaya/v2/session"
 	"github.com/dop251/goja"
-	"github.com/sirupsen/logrus"
-	pitayaclient "github.com/topfreegames/pitaya/v2/client"
-	"github.com/topfreegames/pitaya/v2/session"
 	"go.k6.io/k6/js/common"
 	"go.k6.io/k6/js/modules"
 )
@@ -87,7 +86,7 @@ func (mi *ModuleInstance) NewClient(call goja.ConstructorCall) *goja.Object {
 		metrics:   mi.metrics,
 	}
 
-	client.client = pitayaclient.New(logrus.InfoLevel)
+	client.client = pitayaclient.New(client.timeout)
 	client.client.SetClientHandshakeData(opts.HandshakeData)
 
 	return rt.ToValue(client).ToObject(rt)
