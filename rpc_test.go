@@ -24,7 +24,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/golang/mock/gomock"
+	"go.uber.org/mock/gomock"
 	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/cluster"
 	clustermocks "github.com/alkaid/pitaya/v2/cluster/mocks"

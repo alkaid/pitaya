@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/golang/mock/gomock"
+	"go.uber.org/mock/gomock"
 	"github.com/alkaid/pitaya/v2/metrics"
 	"github.com/alkaid/pitaya/v2/metrics/mocks"
 )

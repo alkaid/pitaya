@@ -32,7 +32,7 @@ import (
 
 	"github.com/alkaid/pitaya/v2/session"
 
-	"github.com/golang/mock/gomock"
+	"go.uber.org/mock/gomock"
 	"github.com/google/uuid"
 	opentracing "github.com/opentracing/opentracing-go"
 	"github.com/alkaid/viper"

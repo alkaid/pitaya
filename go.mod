@@ -1,6 +1,6 @@
 module github.com/alkaid/pitaya/v2
 
-go 1.24.2
+go 1.27.1
 
 require (
 	github.com/DataDog/datadog-go v4.8.3+incompatible
@@ -11,7 +11,6 @@ require (
 	github.com/go-playground/validator/v10 v10.26.0
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/go-viper/mapstructure/v2 v2.4.0
-	github.com/golang/mock v1.6.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/mailgun/proxyproto v1.0.0
@@ -24,7 +23,9 @@ require (
 	github.com/prometheus/client_golang v1.22.0
 	github.com/samber/lo v1.50.0
 	github.com/sirupsen/logrus v1.9.4
+	github.com/spf13/cast v1.10.0
 	github.com/stretchr/testify v1.11.1
+	github.com/topfreegames/go-workers v1.2.1
 	github.com/zeromicro/go-zero v1.8.5
 	go.etcd.io/etcd/api/v3 v3.6.6
 	go.etcd.io/etcd/client/pkg/v3 v3.6.6
@@ -34,17 +35,13 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.36.0
 	go.opentelemetry.io/otel/sdk v1.37.0
 	go.opentelemetry.io/otel/trace v1.37.0
+	go.uber.org/mock v0.6.0
 	go.uber.org/zap v1.27.1
 	golang.org/x/exp v0.0.0-20250606033433-dcc06ee1d476
 	golang.org/x/net v0.43.0
 	google.golang.org/grpc v1.75.1
-	google.golang.org/protobuf v1.36.11
+	google.golang.org/protobuf v1.36.12
 	k8s.io/klog/v2 v2.130.1
-)
-
-require (
-	github.com/spf13/cast v1.10.0
-	github.com/topfreegames/go-workers v1.2.1
 	k8s.io/utils v0.0.0-20250502105355-0f33e8f1c979
 )
 

@@ -24,7 +24,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/golang/mock/gomock"
+	"go.uber.org/mock/gomock"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	clustermocks "github.com/alkaid/pitaya/v2/cluster/mocks"
