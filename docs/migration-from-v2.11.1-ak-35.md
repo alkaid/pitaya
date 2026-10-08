@@ -35,3 +35,13 @@ if c.ConnectedStatus() {
 Client 和 ProtoClient 每次重连后都应重新取得 MsgChannel；旧 channel 不会被新连接使用，也不应由应用关闭。用 OnDisconnected 停止旧连接的接收循环，避免无限等待旧 channel。收到断开通知时可以同步重连，回调执行时不持有连接锁。慢回调会延迟发起它的关闭路径，应尽快返回。
 
 ProtoClient 的 bootstrap 使用独立临时连接，不触发业务断开回调。描述符和响应按连接、请求 route 归属；LoadInfo/ExportInformation 会复制命令表，应用修改导出的 map 不再改变 client 内部状态。LoadInfo 在连接中调用只影响下一次连接；AddPushResponse 应在首次连接/加载描述符前调用。
+
+## etcd 服务发现
+
+注册 key/schema、self 和类型黑名单保持不变。SyncServers 现在读取完整 prefix 快照，补偿已有节点的 value 更新；watch 从快照 revision + 1 开始，关闭或压缩后持续重建。旧事件不能覆盖更新后的快照。同一事务的多个节点会完整提交后再通知 listener。
+
+一次补偿读取的数据量约为“注册节点数 × 单节点 payload 大小”；`pitaya.cluster.sd.etcd.syncservers.parallelism` 保留配置兼容，但不再影响执行，因为已删除逐节点并行补读。大注册表需观察完整快照耗时和流量，再调整既有 syncservers.interval。
+
+读取失败保留旧缓存。非法注册文档保留该节点上一份有效值，记录错误，后续合法 PUT 可恢复。快照恢复保证最终状态收敛，不重放断线期间每个中间事件；内容未变化的补偿不重复发 Modify。
+
+listener 可以同步调用 GetServer/GetServers/GetServersByType/GetServerTypes/GetConsistentHashNode。通知仍同步执行，SyncServers 返回表示该批通知完成；listener 中需要再次 SyncServers 或关闭模块时，应异步触发，避免等待自身通知完成。Init/Shutdown 是单次模块生命周期，不支持对同一个实例重新 Init。

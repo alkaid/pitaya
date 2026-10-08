@@ -100,6 +100,7 @@ func getEtcdSD(t *testing.T, config config.EtcdServiceDiscoveryConfig, server *S
 	appDieChan := make(chan bool)
 	e, err := NewEtcdServiceDiscovery(config, server, appDieChan, cli)
 	assert.NoError(t, err)
+	t.Cleanup(func() { e.Shutdown() })
 	return e.(*etcdServiceDiscovery)
 }
 
@@ -108,7 +109,7 @@ func TestNewEtcdServiceDiscovery(t *testing.T) {
 		t.Run(table.server.ID, func(t *testing.T) {
 			config := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
 			c, cli := helpers.GetTestEtcd(t)
-			defer c.Terminate(t)
+			t.Cleanup(func() { c.Terminate(t) })
 			e := getEtcdSD(t, config, table.server, cli)
 			assert.NotNil(t, e)
 		})
@@ -120,7 +121,7 @@ func TestEtcdSDBootstrapLease(t *testing.T) {
 		t.Run(table.server.ID, func(t *testing.T) {
 			config := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
 			c, cli := helpers.GetTestEtcd(t)
-			defer c.Terminate(t)
+			t.Cleanup(func() { c.Terminate(t) })
 			e := getEtcdSD(t, config, table.server, cli)
 			err := e.grantLease()
 			assert.NoError(t, err)
@@ -134,7 +135,7 @@ func TestEtcdSDBootstrapLeaseError(t *testing.T) {
 		t.Run(table.server.ID, func(t *testing.T) {
 			config := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
 			c, cli := helpers.GetTestEtcd(t)
-			defer c.Terminate(t)
+			t.Cleanup(func() { c.Terminate(t) })
 			e := getEtcdSD(t, config, table.server, cli)
 			e.etcdDialTimeout = -time.Nanosecond
 			err := e.grantLease()
@@ -148,7 +149,7 @@ func TestEtcdSDBootstrapServer(t *testing.T) {
 		t.Run(table.server.ID, func(t *testing.T) {
 			config := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
 			c, cli := helpers.GetTestEtcd(t)
-			defer c.Terminate(t)
+			t.Cleanup(func() { c.Terminate(t) })
 			e := getEtcdSD(t, config, table.server, cli)
 			e.Init()
 			err := e.bootstrapServer(table.server)
@@ -172,12 +173,14 @@ func TestEtcdSDDeleteServer(t *testing.T) {
 		t.Run(table.server.ID, func(t *testing.T) {
 			config := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
 			c, cli := helpers.GetTestEtcd(t)
-			defer c.Terminate(t)
+			t.Cleanup(func() { c.Terminate(t) })
 			e := getEtcdSD(t, config, table.server, cli)
 			e.Init()
 			err := e.bootstrapServer(table.server)
 			assert.NoError(t, err)
-			e.deleteServer(table.server.ID)
+			_, err = e.cli.Delete(context.Background(), getKey(table.server.ID, table.server.Type))
+			assert.NoError(t, err)
+			assert.NoError(t, e.SyncServers(false))
 			e.serverMapByID.Delete(table.server.ID)
 			generatedSv, ok := e.serverMapByID.Load(table.server.ID)
 			assert.False(t, ok)
@@ -211,14 +214,16 @@ func TestEtcdSDDeleteLocalInvalidServers(t *testing.T) {
 		t.Run(table.server.ID, func(t *testing.T) {
 			config := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
 			c, cli := helpers.GetTestEtcd(t)
-			defer c.Terminate(t)
+			t.Cleanup(func() { c.Terminate(t) })
 			e := getEtcdSD(t, config, table.server, cli)
 			invalidServer := &Server{
 				ID:   "invalid",
 				Type: "bla",
 			}
-			e.addServer(invalidServer)
-			e.deleteLocalInvalidServers([]string{table.server.ID})
+			e.mapByTypeLock.Lock()
+			e.storeServerLocked(invalidServer)
+			e.mapByTypeLock.Unlock()
+			assert.NoError(t, e.SyncServers(false))
 			inv, err := e.GetServer(invalidServer.ID)
 			assert.ErrorIs(t, err, constants.ErrNoServerWithID)
 			assert.Nil(t, inv)
@@ -231,7 +236,7 @@ func TestEtcdSDGetServer(t *testing.T) {
 		t.Run(table.server.ID, func(t *testing.T) {
 			config := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
 			c, cli := helpers.GetTestEtcd(t)
-			defer c.Terminate(t)
+			t.Cleanup(func() { c.Terminate(t) })
 			e := getEtcdSD(t, config, table.server, cli)
 			e.Init()
 			e.bootstrapServer(table.server)
@@ -247,9 +252,8 @@ func TestEtcdSDGetServers(t *testing.T) {
 		t.Run(table.name, func(t *testing.T) {
 			config := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
 			c, cli := helpers.GetTestEtcd(t)
-			defer c.Terminate(t)
-			self := &Server{}
-			self.fix()
+			t.Cleanup(func() { c.Terminate(t) })
+			self := NewServer("self", "self-type", false)
 			e := getEtcdSD(t, config, self, cli)
 			e.Init()
 			for _, server := range table.servers {
@@ -269,11 +273,11 @@ func TestEtcdSDInit(t *testing.T) {
 			config := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
 			config.SyncServers.Interval = time.Duration(300 * time.Millisecond)
 			c, cli := helpers.GetTestEtcd(t)
-			defer c.Terminate(t)
+			t.Cleanup(func() { c.Terminate(t) })
 			e := getEtcdSD(t, config, table.server, cli)
 			e.Init()
 			// should set running
-			assert.True(t, e.running)
+			assert.True(t, e.Running())
 			// should have a leaseid
 			assert.NotEmpty(t, e.leaseID)
 			// should register the server
@@ -284,6 +288,8 @@ func TestEtcdSDInit(t *testing.T) {
 			time.Sleep(50 * time.Millisecond)
 			// TODO may be flaky
 			helpers.ShouldEventuallyReturn(t, func() bool {
+				e.reconcileMu.Lock()
+				defer e.reconcileMu.Unlock()
 				return math.Abs(float64(time.Now().Unix()-e.lastSyncTime.Unix())) < 5
 			}, true, 50*time.Millisecond, 2*time.Second)
 		})
@@ -295,12 +301,12 @@ func TestEtcdBeforeShutdown(t *testing.T) {
 		t.Run(table.server.ID, func(t *testing.T) {
 			config := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
 			c, cli := helpers.GetTestEtcd(t)
-			defer c.Terminate(t)
+			t.Cleanup(func() { c.Terminate(t) })
 			e := getEtcdSD(t, config, table.server, cli)
 			e.Init()
-			assert.True(t, e.running)
+			assert.True(t, e.Running())
 			e.BeforeShutdown()
-			assert.True(t, e.running)
+			assert.True(t, e.Running())
 			_, err := cli.Revoke(context.TODO(), e.leaseID)
 			assert.Error(t, err)
 		})
@@ -312,12 +318,12 @@ func TestEtcdShutdown(t *testing.T) {
 		t.Run(table.server.ID, func(t *testing.T) {
 			config := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
 			c, cli := helpers.GetTestEtcd(t)
-			defer c.Terminate(t)
+			t.Cleanup(func() { c.Terminate(t) })
 			e := getEtcdSD(t, config, table.server, cli)
 			e.Init()
-			assert.True(t, e.running)
+			assert.True(t, e.Running())
 			e.Shutdown()
-			assert.False(t, e.running)
+			assert.False(t, e.Running())
 		})
 	}
 }
@@ -328,10 +334,10 @@ func TestEtcdWatchChangesAddNewServers(t *testing.T) {
 			config := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
 			config.SyncServers.Interval = time.Duration(100 * time.Millisecond)
 			c, cli := helpers.GetTestEtcd(t)
-			defer c.Terminate(t)
+			t.Cleanup(func() { c.Terminate(t) })
 			e := getEtcdSD(t, config, table.server, cli)
 			e.Init()
-			e.running = true
+			e.running.Store(true)
 			serversBefore, err := e.GetServersByType(table.server.Type)
 			assert.NoError(t, err)
 			assert.Equal(t, 1, len(serversBefore))
@@ -355,10 +361,10 @@ func TestEtcdWatchChangesDeleteServers(t *testing.T) {
 			config := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
 			config.SyncServers.Interval = 100 * time.Millisecond
 			c, cli := helpers.GetTestEtcd(t)
-			defer c.Terminate(t)
+			t.Cleanup(func() { c.Terminate(t) })
 			e := getEtcdSD(t, config, table.server, cli)
 			e.Init()
-			e.running = true
+			e.running.Store(true)
 			serversBefore, err := e.GetServersByType(table.server.Type)
 			assert.NoError(t, err)
 			assert.Equal(t, 1, len(serversBefore))
@@ -389,10 +395,10 @@ func TestEtcdWatchChangesWithBlacklist(t *testing.T) {
 			config.SyncServers.Interval = 100 * time.Millisecond
 			config.ServerTypesBlacklist = table.serverTypeBlacklist
 			c, cli := helpers.GetTestEtcd(t)
-			defer c.Terminate(t)
+			t.Cleanup(func() { c.Terminate(t) })
 			e := getEtcdSD(t, config, table.server, cli)
 			e.Init()
-			e.running = true
+			e.running.Store(true)
 
 			serversBefore, err := e.GetServersByType(table.server.Type)
 			assert.NoError(t, err)
@@ -439,9 +445,9 @@ func TestEtcdWatchChangesWithBlacklist(t *testing.T) {
 	}
 }
 
-func TestParallelGetter(t *testing.T) {
+func TestSnapshotLoadsAllPayloads(t *testing.T) {
 	c, cli := helpers.GetTestEtcd(t)
-	defer c.Terminate(t)
+	t.Cleanup(func() { c.Terminate(t) })
 
 	serversToAdd := []*Server{
 		NewServer("frontend-1", "type1", true, nil),
@@ -465,13 +471,10 @@ func TestParallelGetter(t *testing.T) {
 		assert.NoError(t, err)
 	}
 
-	parallelGetter := newParallelGetter(cli, 5)
-	for _, serverToAdd := range serversToAdd {
-		payload := []byte("{\"id\":\"" + serverToAdd.ID + "\",\"type\":\"" + serverToAdd.Type + "\",\"frontend\":true,\"hostname\":\"" + serverToAdd.ID + "\",\"metadata\":{\"region\":\"us\"}}")
-		parallelGetter.addWorkWithPayload(serverToAdd.Type, serverToAdd.ID, payload)
-	}
-
-	servers := parallelGetter.waitAndGetResult()
+	cfg := config.NewDefaultPitayaConfig().Cluster.SD.Etcd
+	sd := getEtcdSD(t, cfg, NewServer("self", "frontend", true), cli)
+	assert.NoError(t, sd.SyncServers(true))
+	servers := sd.GetServers()
 	assert.Equal(t, len(serversToAdd), len(servers))
 
 	// We add the returned servers to a map first, since the results may be out the order they were added.
@@ -489,4 +492,15 @@ func TestParallelGetter(t *testing.T) {
 		assert.Equal(t, serverToAdd.ID, sv.ID)
 		assert.Equal(t, serverToAdd.Frontend, sv.Frontend)
 	}
+}
+
+func getServerFromEtcd(cli *clientv3.Client, typ, id string) (*Server, error) {
+	result, err := cli.Get(context.Background(), getKey(id, typ))
+	if err != nil {
+		return nil, err
+	}
+	if len(result.Kvs) == 0 {
+		return nil, constants.ErrServerNotFound
+	}
+	return parseServer(result.Kvs[0].Value)
 }
