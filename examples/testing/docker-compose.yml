@@ -1,16 +1,24 @@
-version: '3'
 services:
   nats:
-    image: nats
+    image: nats@sha256:cd3fcd4ecdda44e3a66728a5334af0a959bc3979b32810e033d1c547241cd0f4
     ports:
       - 4222:4222
   etcd:
-    image: bitnami/etcd
-    environment:
-      - ALLOW_NONE_AUTHENTICATION=yes
+    image: gcr.io/etcd-development/etcd@sha256:a491baeaa0cb0c9cd89c0062ac44ece53886e3e5bddad18d2daf36678ce665b6
+    command: /usr/local/bin/etcd --name test --listen-client-urls=http://0.0.0.0:2379 --advertise-client-urls=http://127.0.0.1:2379 --listen-peer-urls=http://127.0.0.1:2380 --initial-advertise-peer-urls=http://127.0.0.1:2380 --initial-cluster=test=http://127.0.0.1:2380
     ports:
       - 2379:2379
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/etcdctl", "endpoint", "health"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
   redis:
-    image: redis
+    image: redis:7-alpine
     ports:
       - 6379:6379
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 30

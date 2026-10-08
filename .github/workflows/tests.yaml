@@ -9,6 +9,9 @@ on:
     branches:
     - main
 
+env:
+  GOWORK: "off"
+
 jobs:
   deps:
     name: Dependencies
@@ -54,6 +57,9 @@ jobs:
         go-version-file: go.mod
     - name: Run tests
       run: make e2e-test-nats
+    - name: Stop test services
+      if: always()
+      run: docker compose -f examples/testing/docker-compose.yml down
   e2e-test-grpc:
     name: GRPC Test End to End
     runs-on: ubuntu-latest
@@ -67,3 +73,55 @@ jobs:
         go-version-file: go.mod
     - name: Run tests
       run: make e2e-test-grpc
+    - name: Stop test services
+      if: always()
+      run: docker compose -f examples/testing/docker-compose.yml down
+  integration:
+    name: Race and real backend recovery
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7.0.1
+    - uses: actions/setup-go@v7.0.0
+      with:
+        go-version-file: go.mod
+    - name: Start disposable backends
+      run: docker compose -f examples/testing/docker-compose.yml up -d --wait etcd redis
+    - name: Race regressions
+      run: go test -mod=readonly -race -count=1 ./cluster ./config ./session ./agent ./conn/message ./conn/codec ./client
+    - name: Redis and etcd outage recovery
+      env:
+        PITAYA_TEST_REDIS_ADDR: 127.0.0.1:6379
+        PITAYA_TEST_ETCD_ENDPOINT: http://127.0.0.1:2379
+      run: go test -mod=readonly -race -count=1 -tags=integration ./config ./session
+    - name: Stop test services
+      if: always()
+      run: docker compose -f examples/testing/docker-compose.yml down
+  generated-and-modules:
+    name: Generated code and nested modules
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7.0.1
+      with:
+        submodules: recursive
+    - uses: actions/setup-go@v7.0.0
+      with:
+        go-version-file: go.mod
+    - name: Install pinned protoc
+      run: |
+        curl -fL --retry 3 https://github.com/protocolbuffers/protobuf/releases/download/v36.2/protoc-36.2-linux-x86_64.zip -o "$RUNNER_TEMP/protoc.zip"
+        echo "121f6c7afe1d4d0e3ea6aab9432038599250134cbf4474cb1167d2c7decd4278  $RUNNER_TEMP/protoc.zip" | sha256sum -c -
+        unzip -q "$RUNNER_TEMP/protoc.zip" -d "$RUNNER_TEMP/protoc"
+        echo "$RUNNER_TEMP/protoc/bin" >> "$GITHUB_PATH"
+    - name: Check generated code
+      run: |
+        make mocks protos-compile protos-compile-demo
+        git diff --exit-code
+        test -z "$(git ls-files --others --exclude-standard)"
+    - name: Nested modules and tools
+      run: make verify-modules
+    - name: Workspace modules
+      run: GOWORK="$PWD/go.work" go test ./pitaya-cli/... ./xk6-pitaya/...
+    - name: Compile tagged tests
+      run: |
+        go test -mod=readonly -tags=e2e -c -o "$RUNNER_TEMP/e2e.test" ./e2e
+        go test -mod=readonly -tags=benchmark -c -o "$RUNNER_TEMP/benchmark.test" ./benchmark
