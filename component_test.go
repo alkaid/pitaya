@@ -23,9 +23,9 @@ package pitaya
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/component"
 	"github.com/alkaid/pitaya/v2/config"
+	"github.com/stretchr/testify/assert"
 )
 
 type MyComp struct {
@@ -45,9 +45,10 @@ func TestRegister(t *testing.T) {
 	config := config.NewDefaultPitayaConfig()
 	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *config).(*App)
 	b := &component.Base{}
+	before := len(app.handlerComp)
 	app.Register(b)
-	assert.Equal(t, 1, len(app.handlerComp))
-	assert.Equal(t, regComp{b, nil}, app.handlerComp[0])
+	assert.Equal(t, before+1, len(app.handlerComp))
+	assert.Equal(t, regComp{b, nil}, app.handlerComp[before])
 }
 
 func TestRegisterRemote(t *testing.T) {
@@ -63,19 +64,23 @@ func TestRegisterRemote(t *testing.T) {
 func TestStartupComponents(t *testing.T) {
 	app := NewDefaultApp(true, "testtype", Standalone, map[string]string{}, *config.NewDefaultPitayaConfig()).(*App)
 
-	app.Register(&MyComp{})
-	app.RegisterRemote(&MyComp{})
+	handler, remote := &MyComp{}, &MyComp{}
+	app.Register(handler)
+	app.RegisterRemote(remote)
 	app.startupComponents()
-	assert.Equal(t, true, app.handlerComp[0].comp.(*MyComp).running)
+	assert.True(t, handler.running)
+	assert.True(t, remote.running)
 }
 
 func TestShutdownComponents(t *testing.T) {
 	app := NewDefaultApp(true, "testtype", Standalone, map[string]string{}, *config.NewDefaultPitayaConfig()).(*App)
 
-	app.Register(&MyComp{})
-	app.RegisterRemote(&MyComp{})
+	handler, remote := &MyComp{}, &MyComp{}
+	app.Register(handler)
+	app.RegisterRemote(remote)
 	app.startupComponents()
 
 	app.shutdownComponents()
-	assert.Equal(t, false, app.handlerComp[0].comp.(*MyComp).running)
+	assert.False(t, handler.running)
+	assert.False(t, remote.running)
 }

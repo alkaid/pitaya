@@ -393,7 +393,7 @@ func TestNatsRPCClientBuildRequest(t *testing.T) {
 			assert.NoError(t, err)
 			assert.NotNil(t, req.Metadata)
 			req.Metadata = nil
-			assert.True(t, proto.Equal(table.expected, &req))
+			assert.True(t, proto.Equal(table.expected, req))
 		})
 	}
 }

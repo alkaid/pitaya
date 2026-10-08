@@ -164,7 +164,7 @@ func (ns *NatsRPCClient) Publish(
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
-	marshalledData, err1 := proto.Marshal(&req)
+	marshalledData, err1 := proto.Marshal(req)
 	err = err1
 	if err != nil {
 		return nil, errors.WithStack(err)
@@ -296,7 +296,7 @@ func (ns *NatsRPCClient) Call(
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
-	marshalledData, err1 := proto.Marshal(&req)
+	marshalledData, err1 := proto.Marshal(req)
 	err = err1
 	if err != nil {
 		return nil, errors.WithStack(err)
@@ -379,7 +379,7 @@ func (ns *NatsRPCClient) Fork(
 	if err != nil {
 		return errors.WithStack(err)
 	}
-	marshalledData, err1 := proto.Marshal(&req)
+	marshalledData, err1 := proto.Marshal(req)
 	err = err1
 	if err != nil {
 		return errors.WithStack(err)

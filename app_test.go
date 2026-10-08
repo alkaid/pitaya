@@ -418,7 +418,7 @@ func expectedSysDocumentation(pointerNames bool) map[string]interface{} {
 		}
 	}
 	return map[string]interface{}{
-		"handlers": map[string]interface{}{},
+		"handlers": remotes,
 		"remotes":  remotes,
 	}
 }
