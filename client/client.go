@@ -21,12 +21,12 @@
 package client
 
 import (
-	"bytes"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"google.golang.org/protobuf/proto"
+	"io"
 	"net"
 	"net/url"
 	"strings"
@@ -41,12 +41,12 @@ import (
 
 	"github.com/alkaid/pitaya/v2/acceptor"
 
-	"github.com/gorilla/websocket"
 	"github.com/alkaid/pitaya/v2/conn/codec"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/conn/packet"
 	"github.com/alkaid/pitaya/v2/session"
 	"github.com/alkaid/pitaya/v2/util/compression"
+	"github.com/gorilla/websocket"
 )
 
 // HandshakeSys struct
@@ -72,7 +72,6 @@ type Client struct {
 	conn                net.Conn
 	Connected           bool
 	packetEncoder       codec.PacketEncoder
-	packetDecoder       codec.PacketDecoder
 	packetChan          chan *packet.Packet
 	IncomingMsgChan     chan *message.Message
 	pendingChan         chan bool
@@ -109,7 +108,6 @@ func New(requestTimeout ...time.Duration) *Client {
 	return &Client{
 		Connected:       false,
 		packetEncoder:   codec.NewPomeloPacketEncoder(),
-		packetDecoder:   codec.NewPomeloPacketDecoder(),
 		packetChan:      make(chan *packet.Packet, 10),
 		pendingRequests: make(map[uint]*pendingRequest),
 		requestTimeout:  reqTimeout,
@@ -153,13 +151,11 @@ func (c *Client) sendHandshakeRequest() error {
 
 func (c *Client) handleHandshakeResponse() error {
 	c.lastAt = time.Now()
-	buf := bytes.NewBuffer(nil)
-	packets, err := c.readPackets(buf)
+	handshakePacket, err := readPacket(c.conn)
 	if err != nil {
 		return err
 	}
 
-	handshakePacket := packets[0]
 	if handshakePacket.Type != packet.Handshake {
 		return fmt.Errorf("got first packet from server that is not a handshake, aborting")
 	}
@@ -258,7 +254,9 @@ func (c *Client) handlePackets() {
 				Log.Debug("client handle packets got", zap.String("data", string(p.Data)))
 				m, err := message.Decode(p.Data)
 				if err != nil {
-					Log.Error("error decoding msg from sv", zap.Any("p", p), zap.String("data", string(p.Data)))
+					Log.Error("error decoding msg from sv", zap.Error(err))
+					c.Disconnect(CloseReasonError)
+					return
 				}
 				if m.Type == message.Response {
 					c.pendingReqMutex.Lock()
@@ -282,45 +280,36 @@ func (c *Client) handlePackets() {
 	}
 }
 
-func (c *Client) readPackets(buf *bytes.Buffer) ([]*packet.Packet, error) {
-	// listen for sv messages
-	data := make([]byte, 1024)
-	n := len(data)
-	var err error
-
-	for n == len(data) {
-		n, err = c.conn.Read(data)
-		if err != nil {
-			return nil, err
-		}
-		buf.Write(data[:n])
+// readPacket consumes exactly one frame, including across fragmented reads.
+// Leaving following bytes in the stream also preserves handshake/data coalescing.
+func readPacket(reader io.Reader) (*packet.Packet, error) {
+	header := make([]byte, codec.HeadLength)
+	if _, err := io.ReadFull(reader, header); err != nil {
+		return nil, err
 	}
-	packets, err := c.packetDecoder.Decode(buf.Bytes())
+	size, typ, err := codec.ParseHeader(header)
 	if err != nil {
-		Log.Error("error decoding packet from server", zap.Error(err))
+		return nil, err
 	}
-	totalProcessed := 0
-	for _, p := range packets {
-		totalProcessed += codec.HeadLength + p.Length
+	data := make([]byte, size)
+	if _, err := io.ReadFull(reader, data); err != nil {
+		return nil, err
 	}
-	buf.Next(totalProcessed)
-
-	return packets, nil
+	return &packet.Packet{Type: typ, Length: size, Data: data}, nil
 }
 
 func (c *Client) handleServerMessages() {
-	buf := bytes.NewBuffer(nil)
 	defer c.Disconnect(CloseReasonError)
 	for c.Connected {
-		packets, err := c.readPackets(buf)
-		if err != nil && c.Connected {
-			Log.Error("", zap.Error(err))
-			break
+		p, err := readPacket(c.conn)
+		if err != nil {
+			return
 		}
 		c.lastAt = time.Now()
-
-		for _, p := range packets {
-			c.packetChan <- p
+		select {
+		case c.packetChan <- p:
+		case <-c.closeChan:
+			return
 		}
 	}
 }
