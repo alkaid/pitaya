@@ -716,6 +716,9 @@ func (sd *etcdServiceDiscovery) Shutdown() error {
 		close(sd.stopChan)
 	})
 	sd.loops.Wait()
+	// Public SyncServers calls are not owned by loops. Join their notifications too.
+	sd.reconcileMu.Lock()
+	sd.reconcileMu.Unlock()
 	return nil
 }
 

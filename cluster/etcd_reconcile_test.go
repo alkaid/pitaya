@@ -200,3 +200,38 @@ func TestWatchRecoveryAfterClosureCompactionAndGetFailures(t *testing.T) {
 		})
 	}
 }
+
+func TestShutdownJoinsExternalSync(t *testing.T) {
+	peer := NewServer("peer", "backend", false)
+	cli := &clientv3.Client{KV: scriptedKV{get: func(context.Context, string, ...clientv3.OpOption) (*clientv3.GetResponse, error) {
+		return &clientv3.GetResponse{Header: &etcdserverpb.ResponseHeader{Revision: 1}, Kvs: []*mvccpb.KeyValue{watchPut(peer, 1).Kv}}, nil
+	}}}
+	service, err := NewEtcdServiceDiscovery(config.NewDefaultPitayaConfig().Cluster.SD.Etcd, NewServer("self", "frontend", true), nil, cli)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sd := service.(*etcdServiceDiscovery)
+	entered, release, syncDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var shutdownReturned, late atomic.Bool
+	sd.AddListener(reconcileListener{check: func(Action, *Server, *Server) { close(entered); <-release }})
+	sd.AddListener(reconcileListener{check: func(Action, *Server, *Server) { late.Store(shutdownReturned.Load()) }})
+	go func() {
+		defer close(syncDone)
+		if err := sd.SyncServers(false); err != nil {
+			t.Error(err)
+		}
+	}()
+	<-entered
+	stopped := make(chan struct{})
+	go func() { _ = sd.Shutdown(); shutdownReturned.Store(true); close(stopped) }()
+	select {
+	case <-stopped:
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	<-syncDone
+	<-stopped
+	if late.Load() {
+		t.Fatal("Shutdown returned while an external SyncServers callback batch was active; the next listener ran after Shutdown")
+	}
+}
