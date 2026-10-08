@@ -361,6 +361,25 @@ func (pc *ProtoClient) LoadServerInfo(uri string) error {
 	return pc.commitBootstrap(attempt, bootstrap)
 }
 
+// OnDisconnected registers a callback after the current ProtoClient connect
+// attempt has unwound, so a peer closing immediately after handshake may be
+// reconnected synchronously from the callback.
+func (pc *ProtoClient) OnDisconnected(callback func(CloseReason)) {
+	if callback == nil {
+		pc.Client.OnDisconnected(nil)
+		return
+	}
+	pc.Client.OnDisconnected(func(reason CloseReason) {
+		pc.stateMu.RLock()
+		attempt := pc.activeAttempt
+		pc.stateMu.RUnlock()
+		if attempt != nil {
+			<-attempt.done
+		}
+		callback(reason)
+	})
+}
+
 // Disconnect the client
 func (pc *ProtoClient) Disconnect(reason CloseReason) {
 	pc.stateMu.RLock()
