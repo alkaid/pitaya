@@ -807,7 +807,9 @@ func (app *App) listen() {
 		app.RegisterModule(unique, "uniqueSession")
 	}
 	// 注册配置重载回调
-	app.RegisterModuleBefore(config.NewConfigModule(app.conf), "configLoader")
+	if app.conf != nil {
+		app.RegisterModuleBefore(config.NewConfigModule(app.conf), "configLoader")
+	}
 	statefulGoPool := co.NewStatefulPoolsModule(app.config.GoPools, app.metricsReporters)
 
 	app.RegisterModuleBefore(statefulGoPool, "statefulGoPool")

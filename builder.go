@@ -205,9 +205,11 @@ func (builder *Builder) AddPostBuildHook(hook func(app Pitaya)) {
 func (builder *Builder) Build() Pitaya {
 	// 根据配置初始化zap
 	logger.InitLogMgr(builder.Config.Log.Development, builder.Config.Log.Level)
-	builder.conf.AddLoader(logger.Manager.ReloadFactory("pitaya.log", func() {
-		logger.ResetGlobalVar()
-	}))
+	if builder.conf != nil {
+		builder.conf.AddLoader(logger.Manager.ReloadFactory("pitaya.log", func() {
+			logger.ResetGlobalVar()
+		}))
+	}
 	handlerPool := service.NewHandlerPool()
 	var remoteService *service.RemoteService
 	if builder.ServerMode == Standalone {
