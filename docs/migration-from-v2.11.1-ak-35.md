@@ -45,3 +45,34 @@ ProtoClient 的 bootstrap 使用独立临时连接，不触发业务断开回调
 读取失败保留旧缓存。非法注册文档保留该节点上一份有效值，记录错误，后续合法 PUT 可恢复。快照恢复保证最终状态收敛，不重放断线期间每个中间事件；内容未变化的补偿不重复发 Modify。
 
 listener 可以同步调用 GetServer/GetServers/GetServersByType/GetServerTypes/GetConsistentHashNode。通知仍同步执行，SyncServers 返回表示该批通知完成；listener 中需要再次 SyncServers 或关闭模块时，应异步触发，避免等待自身通知完成。Init/Shutdown 是单次模块生命周期，不支持对同一个实例重新 Init。
+
+## 配置热更新
+
+依赖固定为 Viper/core、Viper/remote `v1.21.0-ak-8` 和 crypt `v0.31.0-ak-4`。应用若有显式依赖或 replace，应同步检查 `go list -m all`，删除指向旧 fork/开发机的替换；无需修改 etcd key 或 value 格式。
+
+首次启动监听失败、监听关闭和重建失败会持续重试，不再因一次失败永久停止。crypt 在每次恢复时读取快照，再从下一 revision 监听；Pitaya 对同一个远程合并快照进行比较和解码，恢复后远程状态相同不会额外通知。去重不比较环境变量或 flags；被本地 override 遮盖的远程字段变化仍可能多触发一次 Reload。启动仍要求 InitLoad 成功读到全部配置来源，不能将启动失败视为已加载默认值。
+
+多 key 按配置注册顺序从低到高合并。暂时缺失 key、网络失败或非法文档保留该来源最近的有效配置；要撤销某个字段，应写入不含该字段的合法文档，写入 `{}` 会撤销该来源的全部贡献。删除 etcd key 本身不等于清空配置。断连恢复保证最新有效状态，不保证回放期间的每次保存。
+
+每个 ConfLoader 解码到新对象，成功后才写回 Provide 提供的对象并调用 Reload。**Provide 对象预填但未在配置中定义的配置字段会归零**；未导出字段和 `mapstructure:"-"` 字段保留，不作为配置覆盖。把默认值放入 Viper.SetDefault，而不是依赖复用 struct 中残留的值。解码失败保留上一次应用配置且不调用该 loader 的 Reload。推荐让 Provide 每次创建新对象，Reload 使用应用自己的锁或 atomic.Pointer 发布：
+
+```go
+type Feature struct { Enabled bool `mapstructure:"enabled"` }
+var current atomic.Pointer[Feature]
+conf.SetDefault("feature.enabled", true) // 启动监听前设置
+conf.AddLoader(config.LoaderFactory{
+    ProvideApply: func() (string, interface{}) { return "feature", &Feature{} },
+    ReloadApply: func(_ string, value interface{}) { current.Store(value.(*Feature)) },
+})
+// 业务线程读取 current.Load()；发布后的对象按只读处理。
+```
+
+旧的 Provide 复用指针方式仍可用，但业务读取该对象时需要应用自行同步。Viper 的远程更新与读取已有同步保护；运行中并发 Set/SetDefault、更改 aliases/flags/文件来源仍需应用同步。PitayaConfig 返回的 map/slice 也应只读。loader 回调同步执行，应快速返回；不要在 Reload 内同步 Shutdown 自身模块，应异步发起。Shutdown 取消重试并等待当前回调结束；同步远程 Get 的取消由后端超时限制，不能保证任意自定义后端立即返回。
+
+## 其他修复与回退
+
+Redis HMSet 现在实际保存传入的字段；key、TTL、schema 不变。timestamp 心跳返回正确 HeartbeatAck，旧客户端仍可互通。默认 Builder 不再因没有配置热更新源而 panic。Session 的 in-flight map 在副本间共享同一把锁，公开值类型用法不变。
+
+升级前保留 ak-35 二进制和应用配置，并在隔离环境按本文构建和测试。先部署少量候选实例，观察错误率、超时、连接数、goroutine 数、配置更新时间和服务发现同步耗时，再扩大实例数。出现回归时停止候选并换回原二进制；不用清空 Redis/etcd。HMSet 修复后已经成功写入的业务字段不会因回退自动撤销，业务补偿需按应用规则处理。
+
+本分支是可审查的修复候选；互通和验收范围记录在 [验收记录](stabilization-validation.md)。Pitaya 未发布新 tag，应用试用时固定该分支的确切 commit；正式发布后再将 CLI/xk6 的根模块依赖换成发布 tag。

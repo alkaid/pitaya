@@ -6,8 +6,8 @@ require (
 	github.com/DataDog/datadog-go v4.8.3+incompatible
 	github.com/alkaid/ants/v2 v2.12.1-ak-2
 	github.com/alkaid/goerrors v1.0.18
-	github.com/alkaid/viper v1.21.0-ak-5
-	github.com/alkaid/viper/remote v1.21.0-ak-5
+	github.com/alkaid/viper v1.21.0-ak-8
+	github.com/alkaid/viper/remote v1.21.0-ak-8
 	github.com/go-playground/validator/v10 v10.26.0
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/go-viper/mapstructure/v2 v2.4.0
@@ -18,7 +18,6 @@ require (
 	github.com/nats-io/nats-server/v2 v2.11.6
 	github.com/nats-io/nats.go v1.45.0
 	github.com/nats-io/nuid v1.0.1
-	github.com/opentracing/opentracing-go v1.2.0
 	github.com/pkg/errors v0.9.1
 	github.com/prometheus/client_golang v1.22.0
 	github.com/samber/lo v1.50.0
@@ -55,7 +54,7 @@ require (
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/VividCortex/ewma v1.2.0 // indirect
-	github.com/alkaid/crypt v0.31.0-ak-2 // indirect
+	github.com/alkaid/crypt v0.31.0-ak-4 // indirect
 	github.com/armon/go-metrics v0.4.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bgentry/speakeasy v0.2.0 // indirect

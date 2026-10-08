@@ -22,18 +22,20 @@ package config
 
 import (
 	"context"
-	"github.com/alkaid/pitaya/v2/util/viperx"
+	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alkaid/pitaya/v2/util"
+	"github.com/alkaid/pitaya/v2/util/viperx"
 
 	errors2 "github.com/alkaid/goerrors/errors"
 	"go.uber.org/zap"
 
+	"github.com/alkaid/pitaya/v2/logger"
 	"github.com/alkaid/viper"
 	_ "github.com/alkaid/viper/remote"
-	"github.com/alkaid/pitaya/v2/logger"
 )
 
 // ConfLoader 重载监听
@@ -71,6 +73,12 @@ type Config struct {
 	loaders      []ConfLoader
 	pitayaConfig *PitayaConfig
 	inited       bool
+	loadersMu    sync.RWMutex
+	pitayaMu     sync.RWMutex
+	watchMu      sync.Mutex
+	watchCancel  context.CancelFunc
+	watchDone    chan struct{}
+	watchStopped bool
 }
 
 // NewConfig creates a new config with a given viper config if given
@@ -209,39 +217,83 @@ func (c *Config) fillDefaultValues() {
 //	@receiver c
 //	@return PitayaConfig
 func (c *Config) PitayaConfig() PitayaConfig {
+	c.pitayaMu.RLock()
+	defer c.pitayaMu.RUnlock()
 	return *c.pitayaConfig
 }
 
 func (c *Config) AddLoader(loader ConfLoader) {
+	c.loadersMu.Lock()
+	defer c.loadersMu.Unlock()
 	c.loaders = append(c.loaders, loader)
 }
 
 func (c *Config) reloadAll() {
-	for _, loader := range c.loaders {
+	c.reloadSnapshot(c.SnapshotRemoteConfig())
+}
+
+func (c *Config) reloadSnapshot(snapshot *viper.RemoteSnapshot) {
+	c.loadersMu.RLock()
+	loaders := append([]ConfLoader(nil), c.loaders...)
+	c.loadersMu.RUnlock()
+	for _, loader := range loaders {
 		key, confStruct := loader.Provide()
 		if confStruct == nil {
 			continue
 		}
+		// Decode into a fresh value: fields removed from a valid document must
+		// not survive in a reused loader struct, and failed decoding must not
+		// partially overwrite the last valid value.
+		value := reflect.ValueOf(confStruct)
+		if value.Kind() != reflect.Pointer || value.IsNil() {
+			logger.Zap.Error("config loader must provide a non-nil pointer")
+			continue
+		}
+		decoded := reflect.New(value.Elem().Type())
 		var err error
-		// TODO 这里可以优化 已经反序列化过的类型可以缓存起来
 		if key != "" {
-			err = c.UnmarshalKey(key, confStruct)
+			err = snapshot.UnmarshalKey(key, decoded.Interface(), viperx.DefaultDecoderOpts())
 		} else {
-			err = c.Unmarshal(confStruct)
+			err = snapshot.Unmarshal(decoded.Interface(), viperx.DefaultDecoderOpts())
 		}
 		if err != nil {
 			logger.Zap.Error("pitaya:reload config unmarshal error", zap.Error(err))
 			continue
 		}
+		applyConfigValue(value.Elem(), decoded.Elem())
 		loader.Reload(key, confStruct)
 	}
 }
 
+// Preserve fields explicitly excluded from configuration when a loader reuses
+// an object. Replaced maps/slices still discard removed configuration entries.
+func applyConfigValue(dst, decoded reflect.Value) {
+	if dst.Kind() == reflect.Pointer && !dst.IsNil() && !decoded.IsNil() && dst.Elem().Kind() == reflect.Struct {
+		applyConfigValue(dst.Elem(), decoded.Elem())
+		return
+	}
+	if dst.Kind() != reflect.Struct || dst.Type() == reflect.TypeOf(time.Time{}) {
+		if dst.CanSet() {
+			dst.Set(decoded)
+		}
+		return
+	}
+	for i := 0; i < dst.NumField(); i++ {
+		field := dst.Type().Field(i)
+		if (field.PkgPath != "" && !field.Anonymous) || strings.Split(field.Tag.Get("mapstructure"), ",")[0] == "-" {
+			continue
+		}
+		applyConfigValue(dst.Field(i), decoded.Field(i))
+	}
+}
+
 func (c *Config) Reload(key string, confStruct interface{}) {
-	// cm:=confStruct.(*confMap)
+	c.pitayaMu.Lock()
+	defer c.pitayaMu.Unlock()
+	c.pitayaConfig = confStruct.(*PitayaConfig)
 }
 func (c *Config) Provide() (key string, confStruct interface{}) {
-	return "pitaya", c.pitayaConfig
+	return "pitaya", &PitayaConfig{}
 }
 
 // InitLoad 初始化加载本地或远程配置.业务层创建App前调用,仅允许一次
@@ -290,35 +342,88 @@ func (c *Config) InitLoad() error {
 //	@receiver c
 //	@return error
 func (c *Config) watch() error {
-	cnf := &ConfSource{}
-	err := c.UnmarshalKey("pitaya.confsource", cnf)
-	if err != nil {
+	c.watchMu.Lock()
+	defer c.watchMu.Unlock()
+	if c.watchStopped {
+		return context.Canceled
+	}
+	if c.watchCancel != nil {
+		return nil
+	}
+	source := &ConfSource{}
+	if err := c.UnmarshalKey("pitaya.confsource", source); err != nil {
 		return err
 	}
-	// if len(cnf.FilePath) > 0 {
-	// 	c.config.WatchConfig()
-	// }
-	watchChan := make(chan *viper.RemoteResponse, 20)
-	if len(cnf.Etcd.Keys) > 0 && len(cnf.Etcd.Endpoints) > 0 {
-		err = c.WatchRemoteConfigWithChannel(context.Background(), watchChan, true)
-		if err != nil {
-			return err
+	if len(source.Etcd.Keys) == 0 || len(source.Etcd.Endpoints) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	c.watchCancel = cancel
+	c.watchDone = make(chan struct{})
+	go func() { defer close(c.watchDone); c.superviseWatch(ctx) }()
+	return nil
+}
+
+func (c *Config) superviseWatch(ctx context.Context) {
+	last := c.SnapshotRemoteConfig()
+	reloadChanged := func() {
+		snapshot := c.SnapshotRemoteConfig()
+		if snapshot.SameConfig(last) {
+			return
+		}
+		util.SafeCall(nil, func() { c.reloadSnapshot(snapshot) })
+		last = snapshot
+	}
+	for ctx.Err() == nil {
+		attempt, cancel := context.WithCancel(ctx)
+		updates := make(chan *viper.RemoteResponse, 20)
+		err := c.WatchRemoteConfigWithChannel(attempt, updates, true)
+		if err == nil && ctx.Err() == nil {
+			reloadChanged()
+		receive:
+			for {
+				select {
+				case <-ctx.Done():
+					break receive
+				case response, ok := <-updates:
+					if !ok || response == nil {
+						err = errors2.NewWithStack("remote config watcher closed")
+						break receive
+					}
+					if response.Error != nil {
+						err = response.Error
+						break receive
+					}
+					if ctx.Err() == nil {
+						reloadChanged()
+					}
+				}
+			}
+		}
+		cancel()
+		if ctx.Err() != nil {
+			return
+		}
+		logger.Zap.Warn("remote config watch failed; retrying", zap.Error(err))
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			timer.Stop()
+			return
 		}
 	}
-	go func() {
-		for {
-			w, ok := <-watchChan
-			if !ok || w.Error != nil {
-				time.Sleep(10 * time.Second)
-				c.watch()
-				return
-			}
-			util.SafeCall(nil, func() {
-				c.reloadAll()
-			})
-		}
-	}()
-	return nil
+}
+
+func (c *Config) stopWatch() {
+	c.watchMu.Lock()
+	c.watchStopped = true
+	cancel, done := c.watchCancel, c.watchDone
+	c.watchMu.Unlock()
+	if cancel != nil {
+		cancel()
+		<-done
+	}
 }
 
 type _ConfigModule struct {
@@ -334,11 +439,14 @@ func (c *_ConfigModule) Init() error {
 }
 func (c *_ConfigModule) AfterInit() {
 	c.core.reloadAll()
-	c.core.watch()
+	if err := c.core.watch(); err != nil {
+		logger.Zap.Error("start remote config watch", zap.Error(err))
+	}
 }
 func (c *_ConfigModule) BeforeShutdown() {
 
 }
 func (c *_ConfigModule) Shutdown() error {
+	c.core.stopWatch()
 	return nil
 }
