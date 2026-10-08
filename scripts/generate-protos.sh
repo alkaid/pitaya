@@ -15,7 +15,7 @@ done
 export PATH="$tmpdir:$PATH"
 if [[ ${1:-} == demo ]]; then
     for dir in examples/demo/protos examples/testing/protos examples/demo/cluster_protobuf/protos examples/demo/worker/protos examples/demo/cluster_ak/protos; do
-        protoc -I "$dir" "$dir"/*.proto --go_out=.
+        protoc -I "$dir" "$dir"/*.proto --go_out="$dir" --go_opt=paths=source_relative
     done
 else
     protoc -I . -I pitaya-protos/lib/alkaid/goerrors pitaya-protos/*.proto --go_out=. --go-grpc_out=. --go-errors_out=.
