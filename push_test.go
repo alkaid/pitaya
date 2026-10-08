@@ -24,15 +24,15 @@ import (
 	"errors"
 	"testing"
 
-	"go.uber.org/mock/gomock"
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/assert"
 	clustermocks "github.com/alkaid/pitaya/v2/cluster/mocks"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/protos"
 	serializemocks "github.com/alkaid/pitaya/v2/serialize/mocks"
 	sessionmocks "github.com/alkaid/pitaya/v2/session/mocks"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 )
 
 type someStruct struct {
@@ -56,7 +56,7 @@ func TestSendPushToUsersFailsIfErrSerializing(t *testing.T) {
 	mockSerializer.EXPECT().Marshal(data).Return(nil, expectedErr)
 
 	errArr, err := app.SendPushToUsers(route, data, []string{uid}, "test")
-	assert.Equal(t, expectedErr, err)
+	assert.ErrorIs(t, err, expectedErr)
 	assert.Len(t, errArr, 1)
 	assert.Equal(t, errArr[0], uid)
 }

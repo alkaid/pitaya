@@ -6,13 +6,13 @@ import (
 	"github.com/alkaid/pitaya/v2/session"
 	"testing"
 
-	"go.uber.org/mock/gomock"
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/cluster"
 	"github.com/alkaid/pitaya/v2/cluster/mocks"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/route"
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 )
 
 var (
@@ -65,7 +65,8 @@ func TestDefaultRoute(t *testing.T) {
 
 	router := New()
 
-	retServer := router.defaultRoute(serverType, servers, nil)
+	retServer, err := router.defaultRoute(serverType, servers, nil)
+	assert.NoError(t, err)
 	assert.Equal(t, server, retServer)
 }
 
@@ -92,7 +93,11 @@ func TestRoute(t *testing.T) {
 				Data: []byte{0x01},
 			}, nil)
 			assert.Equal(t, table.server, retServer)
-			assert.Equal(t, table.err, err)
+			if table.err != nil {
+				assert.ErrorIs(t, err, table.err)
+			} else {
+				assert.NoError(t, err)
+			}
 		})
 	}
 }

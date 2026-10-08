@@ -5,13 +5,11 @@ import (
 	"net"
 	"testing"
 
-	"go.uber.org/mock/gomock"
-
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/helpers"
 	"github.com/alkaid/pitaya/v2/metrics"
-	protosmocks "github.com/alkaid/pitaya/v2/protos/mocks"
+	"github.com/alkaid/pitaya/v2/protos"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestNewGRPCServer(t *testing.T) {
@@ -26,13 +24,9 @@ func TestGRPCServerInit(t *testing.T) {
 	t.Parallel()
 	c := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Grpc
 	c.Port = helpers.GetFreePort(t)
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-	mockPitayaServer := protosmocks.NewMockPitayaServer(ctrl)
-
 	sv := getServer()
 	gs, err := NewGRPCServer(c, sv, []metrics.Reporter{})
-	gs.SetPitayaServer(mockPitayaServer)
+	gs.SetPitayaServer(&protos.UnimplementedPitayaServer{})
 	err = gs.Init()
 	assert.NoError(t, err)
 	assert.NotNil(t, gs)

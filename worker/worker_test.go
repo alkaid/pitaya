@@ -5,21 +5,12 @@ import (
 	"errors"
 	"testing"
 
-	"go.uber.org/mock/gomock"
+	"github.com/alkaid/pitaya/v2/protos"
+	"github.com/alkaid/pitaya/v2/worker/mocks"
 	"github.com/stretchr/testify/assert"
 	workers "github.com/topfreegames/go-workers"
-	"github.com/alkaid/pitaya/v2/worker/mocks"
+	"go.uber.org/mock/gomock"
 )
-
-type fakeProtoMessage struct {
-	Field string
-}
-
-func (f *fakeProtoMessage) Reset() {}
-
-func (f *fakeProtoMessage) String() string { return "" }
-
-func (f *fakeProtoMessage) ProtoMessage() {}
 
 func TestParsedRPCJob(t *testing.T) {
 	t.Parallel()
@@ -70,7 +61,7 @@ func TestParsedRPCJob(t *testing.T) {
 				msg, err := workers.NewMsg(`{
 					"args": { 
 						"route": "server.svc.method",
-						"arg": { "field": 10 }
+						"arg": { "uid": 10 }
 					}
 				}`)
 				assert.NoError(t, err)
@@ -79,7 +70,7 @@ func TestParsedRPCJob(t *testing.T) {
 			mocks: func() {
 				mockRPCJob.EXPECT().
 					GetArgReply(route).
-					Return(&fakeProtoMessage{}, &fakeProtoMessage{}, nil)
+					Return(&protos.BindMsg{}, &protos.BindMsg{}, nil)
 			},
 			assert: func(f func(*workers.Msg), m *workers.Msg) {
 				assert.Panics(t, func() { f(m) })
@@ -90,7 +81,7 @@ func TestParsedRPCJob(t *testing.T) {
 				msg, err := workers.NewMsg(`{
 					"args": { 
 						"route": "server.svc.method",
-						"arg": { "field": "string" },
+						"arg": { "uid": "string" },
 						"metadata": { "stack": "a" }
 					}
 				}`)
@@ -100,7 +91,7 @@ func TestParsedRPCJob(t *testing.T) {
 			mocks: func() {
 				mockRPCJob.EXPECT().
 					GetArgReply(route).
-					Return(&fakeProtoMessage{}, &fakeProtoMessage{}, nil)
+					Return(&protos.BindMsg{}, &protos.BindMsg{}, nil)
 				mockRPCJob.EXPECT().
 					ServerDiscovery(route, map[string]interface{}{"stack": "a"}).
 					Return("", testErr)
@@ -114,7 +105,7 @@ func TestParsedRPCJob(t *testing.T) {
 				msg, err := workers.NewMsg(`{
 					"args": { 
 						"route": "server.svc.method",
-						"arg": { "field": "string" },
+						"arg": { "uid": "string" },
 						"metadata": { "stack": "a" }
 					}
 				}`)
@@ -124,12 +115,12 @@ func TestParsedRPCJob(t *testing.T) {
 			mocks: func() {
 				mockRPCJob.EXPECT().
 					GetArgReply(route).
-					Return(&fakeProtoMessage{}, &fakeProtoMessage{}, nil)
+					Return(&protos.BindMsg{}, &protos.BindMsg{}, nil)
 				mockRPCJob.EXPECT().
 					ServerDiscovery(route, map[string]interface{}{"stack": "a"}).
 					Return(serverID, nil)
 				mockRPCJob.EXPECT().
-					RPC(ctx, serverID, route, &fakeProtoMessage{}, &fakeProtoMessage{Field: "string"}).
+					RPC(ctx, serverID, route, &protos.BindMsg{}, &protos.BindMsg{Uid: "string"}).
 					Return(testErr)
 			},
 			assert: func(f func(*workers.Msg), m *workers.Msg) {
@@ -141,7 +132,7 @@ func TestParsedRPCJob(t *testing.T) {
 				msg, err := workers.NewMsg(`{
 					"args": { 
 						"route": "server.svc.method",
-						"arg": { "field": "string" },
+						"arg": { "uid": "string" },
 						"metadata": { "stack": "a" }
 					}
 				}`)
@@ -151,12 +142,12 @@ func TestParsedRPCJob(t *testing.T) {
 			mocks: func() {
 				mockRPCJob.EXPECT().
 					GetArgReply(route).
-					Return(&fakeProtoMessage{}, &fakeProtoMessage{}, nil)
+					Return(&protos.BindMsg{}, &protos.BindMsg{}, nil)
 				mockRPCJob.EXPECT().
 					ServerDiscovery(route, map[string]interface{}{"stack": "a"}).
 					Return(serverID, nil)
 				mockRPCJob.EXPECT().
-					RPC(ctx, serverID, route, &fakeProtoMessage{}, &fakeProtoMessage{Field: "string"})
+					RPC(ctx, serverID, route, &protos.BindMsg{}, &protos.BindMsg{Uid: "string"})
 			},
 			assert: func(f func(*workers.Msg), m *workers.Msg) {
 				assert.NotPanics(t, func() { f(m) })

@@ -25,14 +25,15 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/alkaid/pitaya/v2/route"
 	"github.com/stretchr/testify/assert"
 )
 
 var (
-	handler1 = func(ctx context.Context, in interface{}) (context.Context, interface{}, error) {
+	handler1 = func(ctx context.Context, _ route.Route, in interface{}) (context.Context, interface{}, error) {
 		return ctx, in, errors.New("ohno")
 	}
-	handler2 = func(ctx context.Context, in interface{}) (context.Context, interface{}, error) {
+	handler2 = func(ctx context.Context, _ route.Route, in interface{}) (context.Context, interface{}, error) {
 		return ctx, nil, nil
 	}
 	p = &Channel{}
@@ -43,8 +44,8 @@ func TestPushFront(t *testing.T) {
 	p.PushFront(handler2)
 	defer p.Clear()
 
-	_, _, err := p.Handlers[0](nil, nil)
-	assert.Nil(t, nil, err)
+	_, _, err := p.Handlers[0](nil, route.Route{}, nil)
+	assert.NoError(t, err)
 }
 
 func TestPushBack(t *testing.T) {
@@ -52,8 +53,8 @@ func TestPushBack(t *testing.T) {
 	p.PushBack(handler2)
 	defer p.Clear()
 
-	_, _, err := p.Handlers[0](nil, nil)
-	assert.EqualError(t, errors.New("ohno"), err.Error())
+	_, _, err := p.Handlers[0](nil, route.Route{}, nil)
+	assert.EqualError(t, err, "ohno")
 }
 
 func TestClear(t *testing.T) {

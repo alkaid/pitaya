@@ -24,16 +24,27 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	logruswrapper "github.com/alkaid/pitaya/v2/logger/logrus"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
 func TestInitLogger(t *testing.T) {
-	initLogger()
+	InitLogMgr(false, "INFO")
+	t.Cleanup(func() {
+		InitLogMgr(false, "ERROR")
+	})
+
+	assert.Equal(t, zapcore.InfoLevel, Manager.Level.Level())
+	assert.Same(t, Manager.Log, Zap)
+	assert.Same(t, Manager.Sugar, Sugar)
 	assert.NotNil(t, Log)
 }
 
-func TestSetLogger(t *testing.T) {
-	l := logruswrapper.New()
-	SetLogger(l)
-	assert.Equal(t, l, Log)
+func TestNewLogger(t *testing.T) {
+	l := NewLogger(zap.NewDevelopmentConfig())
+
+	assert.NotNil(t, l)
+	assert.NotNil(t, l.Log)
+	assert.NotNil(t, l.Sugar)
+	assert.Equal(t, zapcore.DebugLevel, l.Level.Level())
 }

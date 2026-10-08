@@ -10,6 +10,7 @@ import (
 
 	"strings"
 
+	"github.com/alkaid/goerrors/apierrors"
 	"github.com/alkaid/pitaya/v2"
 	"github.com/alkaid/pitaya/v2/acceptor"
 	"github.com/alkaid/pitaya/v2/component"
@@ -69,11 +70,13 @@ func (r *Room) AfterInit() {
 // Join room
 func (r *Room) Join(ctx context.Context, msg []byte) (*JoinResponse, error) {
 	s := r.app.GetSessionFromCtx(ctx)
-	fakeUID := s.ID()                              // just use s.ID as uid !!!
-	err := s.Bind(ctx, strconv.Itoa(int(fakeUID))) // binding session uid
+	fakeUID := s.ID()                                        // just use s.ID as uid !!!
+	err := s.Bind(ctx, strconv.Itoa(int(fakeUID)), nil, nil) // binding session uid
 
 	if err != nil {
-		return nil, pitaya.Error(err, "RH-000", map[string]string{"failed": "bind"})
+		return nil, apierrors.InternalServer("RH-000", err.Error(), "").
+			WithCause(err).
+			WithMetadata(map[string]string{"failed": "bind"})
 	}
 
 	uids, err := r.app.GroupMembers(ctx, "room")

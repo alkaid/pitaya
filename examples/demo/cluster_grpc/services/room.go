@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/alkaid/goerrors/apierrors"
 	"github.com/alkaid/pitaya/v2"
 	"github.com/alkaid/pitaya/v2/component"
 	"github.com/alkaid/pitaya/v2/examples/demo/protos"
@@ -100,9 +101,11 @@ func (r *Room) AfterInit() {
 // Entry is the entrypoint
 func (r *Room) Entry(ctx context.Context, msg []byte) (*JoinResponse, error) {
 	s := r.app.GetSessionFromCtx(ctx)
-	err := s.Bind(ctx, strconv.Itoa(int(s.ID())))
+	err := s.Bind(ctx, strconv.Itoa(int(s.ID())), nil, nil)
 	if err != nil {
-		return nil, pitaya.Error(err, "RH-000", map[string]string{"failed": "bind"})
+		return nil, apierrors.InternalServer("RH-000", err.Error(), "").
+			WithCause(err).
+			WithMetadata(map[string]string{"failed": "bind"})
 	}
 	return &JoinResponse{Result: "ok"}, nil
 }
@@ -164,7 +167,7 @@ func (r *Room) SendRPC(ctx context.Context, msg *protos.RPCMsg) (*protos.RPCRes,
 	ret := &protos.RPCRes{}
 	err := r.app.RPC(ctx, "connector.connectorremote.remotefunc", ret, msg, "")
 	if err != nil {
-		return nil, pitaya.Error(err, "RPC-000")
+		return nil, apierrors.InternalServer("RPC-000", err.Error(), "").WithCause(err)
 	}
 	return ret, nil
 }

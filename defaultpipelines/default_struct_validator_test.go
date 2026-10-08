@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/alkaid/pitaya/v2/route"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -46,9 +47,9 @@ func TestDefaultValidator(t *testing.T) {
 		t.Run(tname, func(t *testing.T) {
 			var err error
 			if tbl.s == nil {
-				_, _, err = validator.Validate(context.Background(), nil)
+				_, _, err = validator.Validate(context.Background(), route.Route{}, nil)
 			} else {
-				_, _, err = validator.Validate(context.Background(), tbl.s)
+				_, _, err = validator.Validate(context.Background(), route.Route{}, tbl.s)
 			}
 
 			if tbl.shouldFail {

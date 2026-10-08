@@ -1,16 +1,16 @@
 package compression
 
 import (
-	"flag"
+	"bytes"
+	"compress/zlib"
+	"io"
 	"path/filepath"
 	"testing"
 
+	"github.com/alkaid/pitaya/v2/helpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/alkaid/pitaya/v2/helpers"
 )
-
-var update = flag.Bool("update", false, "update .golden files")
 
 var ins = []struct {
 	name string
@@ -26,14 +26,14 @@ func TestCompressionDeflate(t *testing.T) {
 		t.Run(in.name, func(t *testing.T) {
 			b, err := DeflateData([]byte(in.data))
 			require.NoError(t, err)
-			gp := filepath.Join("fixtures", in.name+".golden")
-			if *update {
-				t.Log("updating golden file")
-				helpers.WriteFile(t, gp, b)
-			}
-			expected := helpers.ReadFile(t, gp)
-
-			assert.Equal(t, expected, b)
+			// Deflate output may change between Go releases. Its contract is
+			// a standards-compliant zlib stream containing the original bytes.
+			reader, err := zlib.NewReader(bytes.NewReader(b))
+			require.NoError(t, err)
+			decoded, err := io.ReadAll(reader)
+			require.NoError(t, err)
+			require.NoError(t, reader.Close())
+			assert.Equal(t, []byte(in.data), decoded)
 		})
 	}
 }

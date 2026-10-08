@@ -22,7 +22,6 @@ package pitaya
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -32,23 +31,21 @@ import (
 
 	"github.com/alkaid/pitaya/v2/session"
 
-	"go.uber.org/mock/gomock"
-	"github.com/google/uuid"
-	opentracing "github.com/opentracing/opentracing-go"
-	"github.com/alkaid/viper"
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/acceptor"
 	"github.com/alkaid/pitaya/v2/cluster"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/helpers"
-	"github.com/alkaid/pitaya/v2/logger"
-	"github.com/alkaid/pitaya/v2/logger/logrus"
 	"github.com/alkaid/pitaya/v2/route"
 	"github.com/alkaid/pitaya/v2/router"
 	"github.com/alkaid/pitaya/v2/session/mocks"
 	"github.com/alkaid/pitaya/v2/timer"
+	"github.com/alkaid/viper"
+	"github.com/stretchr/testify/assert"
+	"go.opentelemetry.io/otel/trace"
+	"go.uber.org/mock/gomock"
+	"google.golang.org/protobuf/types/descriptorpb"
 )
 
 var (
@@ -72,8 +69,14 @@ func TestMain(m *testing.M) {
 func TestNewApp(t *testing.T) {
 	for _, table := range tables {
 		t.Run(table.serverType, func(t *testing.T) {
-			builderConfig := config.NewDefaultPitayaConfig()
-			app := NewDefaultApp(table.isFrontend, table.serverType, table.serverMode, table.serverMetadata, *builderConfig).(*App)
+			builder := NewBuilderWithConfigs(
+				table.isFrontend,
+				table.serverType,
+				table.serverMode,
+				table.serverMetadata,
+				config.NewConfig(table.cfg),
+			)
+			app := builder.Build().(*App)
 			assert.Equal(t, table.isFrontend, app.server.Frontend)
 			assert.Equal(t, table.serverType, app.server.Type)
 			assert.Equal(t, table.serverMode, app.serverMode)
@@ -99,21 +102,6 @@ func TestAddAcceptor(t *testing.T) {
 	}
 }
 
-func TestSetDebug(t *testing.T) {
-	builderConfig := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
-	app.SetDebug(true)
-	assert.Equal(t, true, app.debug)
-	app.SetDebug(false)
-	assert.Equal(t, false, app.debug)
-}
-
-func TestSetLogger(t *testing.T) {
-	l := logrus.New()
-	SetLogger(l)
-	assert.Equal(t, l, logger.Log)
-}
-
 func TestGetDieChan(t *testing.T) {
 	builderConfig := config.NewDefaultPitayaConfig()
 	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig).(*App)
@@ -136,7 +124,7 @@ func TestGetServerByID(t *testing.T) {
 	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *builderConfig)
 	s, err := app.GetServerByID("id")
 	assert.Nil(t, s)
-	assert.EqualError(t, constants.ErrNoServerWithID, err.Error())
+	assert.ErrorIs(t, err, constants.ErrNoServerWithID)
 }
 
 func TestGetServersByType(t *testing.T) {
@@ -342,36 +330,6 @@ func TestStartAndListenCluster(t *testing.T) {
 	}, nil, 10*time.Millisecond, 100*time.Millisecond)
 }
 
-func TestError(t *testing.T) {
-	t.Parallel()
-
-	tables := []struct {
-		name     string
-		err      error
-		code     string
-		metadata map[string]string
-	}{
-		{"nil_metadata", errors.New(uuid.New().String()), uuid.New().String(), nil},
-		{"empty_metadata", errors.New(uuid.New().String()), uuid.New().String(), map[string]string{}},
-		{"non_empty_metadata", errors.New(uuid.New().String()), uuid.New().String(), map[string]string{"key": uuid.New().String()}},
-	}
-
-	for _, table := range tables {
-		t.Run(table.name, func(t *testing.T) {
-			var err *e.Error
-			if table.metadata != nil {
-				err = Error(table.err, table.code, table.metadata)
-			} else {
-				err = Error(table.err, table.code)
-			}
-			assert.NotNil(t, err)
-			assert.Equal(t, table.code, err.Code)
-			assert.Equal(t, table.err.Error(), err.Message)
-			assert.Equal(t, table.metadata, err.Metadata)
-		})
-	}
-}
-
 func TestGetSessionFromCtx(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	ss := mocks.NewMockSession(ctrl)
@@ -407,21 +365,62 @@ func TestGetFromPropagateCtx(t *testing.T) {
 }
 
 func TestExtractSpan(t *testing.T) {
-	span := opentracing.StartSpan("op", opentracing.ChildOf(nil))
-	ctx := opentracing.ContextWithSpan(context.Background(), span)
-	spanCtx, err := ExtractSpan(ctx)
-	assert.NoError(t, err)
-	assert.Equal(t, span.Context(), spanCtx)
+	want := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{1},
+		SpanID:  trace.SpanID{2},
+	})
+	ctx := trace.ContextWithSpanContext(context.Background(), want)
+	extractedCtx, got := ExtractSpan(ctx)
+	assert.Equal(t, want, got)
+	assert.Equal(t, want, trace.SpanContextFromContext(extractedCtx))
 }
 
 func TestDescriptor(t *testing.T) {
-	bts, err := Descriptor("kick.proto")
+	descriptors := make(map[string]*descriptorpb.FileDescriptorProto)
+	err := Descriptor("protos.KickMsg", descriptors)
 	assert.NoError(t, err)
-	assert.NotNil(t, bts)
+	assert.NotEmpty(t, descriptors)
 
-	bts, err = Descriptor("not_exists.proto")
-	assert.Nil(t, bts)
+	err = Descriptor("kick.proto", descriptors)
 	assert.EqualError(t, constants.ErrProtodescriptor, err.Error())
+}
+
+func expectedSysDocumentation(pointerNames bool) map[string]interface{} {
+	type remoteTypes struct {
+		input  string
+		output string
+	}
+
+	specs := map[string]remoteTypes{
+		"bindbackendsession":      {"*protos.BindBackendMsg", "*protos.Response"},
+		"bindsession":             {"*protos.BindMsg", "*protos.Response"},
+		"kick":                    {"*protos.KickMsg", "*protos.KickAnswer"},
+		"kickbackend":             {"*protos.BindBackendMsg", "*protos.Response"},
+		"pushsession":             {"*protos.Session", "*protos.Response"},
+		"sessionbound":            {"*protos.BindMsg", "*protos.Response"},
+		"sessionboundbackend":     {"*protos.BindBackendMsg", "*protos.Response"},
+		"sessionboundbackendfork": {"*protos.BindBackendMsg", "*protos.Response"},
+		"sessionboundfork":        {"*protos.BindMsg", "*protos.Response"},
+		"sessionclosed":           {"*protos.KickMsg", "*protos.Response"},
+		"sessionkickedbackend":    {"*protos.BindBackendMsg", "*protos.Response"},
+	}
+	remotes := make(map[string]interface{}, len(specs))
+	for route, types := range specs {
+		input := map[string]interface{}{}
+		output := map[string]interface{}{}
+		if pointerNames {
+			input[types.input] = map[string]interface{}{}
+			output[types.output] = map[string]interface{}{}
+		}
+		remotes["testtype.sys."+route] = map[string]interface{}{
+			"input":  input,
+			"output": []interface{}{output},
+		}
+	}
+	return map[string]interface{}{
+		"handlers": map[string]interface{}{},
+		"remotes":  remotes,
+	}
 }
 
 func TestDocumentation(t *testing.T) {
@@ -430,76 +429,7 @@ func TestDocumentation(t *testing.T) {
 	app.startupComponents()
 	doc, err := app.Documentation(false)
 	assert.NoError(t, err)
-	assert.Equal(t, map[string]interface{}{
-		"handlers": map[string]interface{}{},
-		"remotes": map[string]interface{}{
-			"testtype.sys.bindsession": map[string]interface{}{
-				"input": map[string]interface{}{
-					"uid":  "string",
-					"data": "[]byte",
-					"id":   "int64",
-				},
-				"output": []interface{}{
-					map[string]interface{}{
-						"error": map[string]interface{}{
-							"msg":      "string",
-							"code":     "string",
-							"metadata": "map[string]string",
-						},
-						"data": "[]byte",
-					},
-					"error",
-				},
-			},
-			"testtype.sys.kick": map[string]interface{}{
-				"input": map[string]interface{}{
-					"userId": "string",
-				},
-				"output": []interface{}{
-					map[string]interface{}{
-						"kicked": "bool",
-					},
-					"error",
-				},
-			},
-			"testtype.sys.pushsession": map[string]interface{}{
-				"input": map[string]interface{}{
-					"data": "[]byte",
-					"id":   "int64",
-					"uid":  "string",
-				},
-				"output": []interface{}{
-					map[string]interface{}{
-						"error": map[string]interface{}{
-							"code":     "string",
-							"metadata": "map[string]string",
-							"msg":      "string",
-						},
-						"data": "[]byte",
-					},
-					"error",
-				},
-			},
-			"testtype.sys.bindbackendsession": map[string]interface{}{
-				"input": map[string]interface{}{
-					"uid":  "string",
-					"data": "[]byte",
-					"id":   "int64",
-				},
-				"output": []interface{}{
-					map[string]interface{}{
-						"error": map[string]interface{}{
-							"msg":      "string",
-							"code":     "string",
-							"metadata": "map[string]string",
-						},
-						"data": "[]byte",
-					},
-					"error",
-				},
-			},
-		},
-	}, doc)
+	assert.Equal(t, expectedSysDocumentation(false), doc)
 }
 
 func TestDocumentationTrue(t *testing.T) {
@@ -508,94 +438,7 @@ func TestDocumentationTrue(t *testing.T) {
 	app.startupComponents()
 	doc, err := app.Documentation(true)
 	assert.NoError(t, err)
-	assert.Equal(t, map[string]interface{}{
-		"remotes": map[string]interface{}{
-			"testtype.sys.bindsession": map[string]interface{}{
-				"input": map[string]interface{}{
-					"*protos.Session": map[string]interface{}{
-						"data": "[]byte",
-						"id":   "int64",
-						"uid":  "string",
-					},
-				},
-				"output": []interface{}{map[string]interface{}{
-					"*protos.Response": map[string]interface{}{
-						"data": "[]byte",
-						"error": map[string]interface{}{
-							"*protos.Error": map[string]interface{}{
-								"code":     "string",
-								"metadata": "map[string]string",
-								"msg":      "string",
-							},
-						},
-					},
-				},
-					"error",
-				},
-			},
-			"testtype.sys.kick": map[string]interface{}{
-				"input": map[string]interface{}{
-					"*protos.KickMsg": map[string]interface{}{
-						"userId": "string",
-					},
-				},
-				"output": []interface{}{map[string]interface{}{
-					"*protos.KickAnswer": map[string]interface{}{
-						"kicked": "bool",
-					},
-				},
-					"error",
-				},
-			},
-			"testtype.sys.pushsession": map[string]interface{}{
-				"input": map[string]interface{}{
-					"*protos.Session": map[string]interface{}{
-						"data": "[]byte",
-						"id":   "int64",
-						"uid":  "string",
-					},
-				},
-				"output": []interface{}{map[string]interface{}{
-					"*protos.Response": map[string]interface{}{
-						"data": "[]byte",
-						"error": map[string]interface{}{
-							"*protos.Error": map[string]interface{}{
-								"code":     "string",
-								"metadata": "map[string]string",
-								"msg":      "string",
-							},
-						},
-					},
-				},
-					"error",
-				},
-			},
-			"testtype.sys.bindbackendsession": map[string]interface{}{
-				"input": map[string]interface{}{
-					"*protos.Session": map[string]interface{}{
-						"data": "[]byte",
-						"id":   "int64",
-						"uid":  "string",
-					},
-				},
-				"output": []interface{}{map[string]interface{}{
-					"*protos.Response": map[string]interface{}{
-						"data": "[]byte",
-						"error": map[string]interface{}{
-							"*protos.Error": map[string]interface{}{
-								"code":     "string",
-								"metadata": "map[string]string",
-								"msg":      "string",
-							},
-						},
-					},
-				},
-					"error",
-				},
-			},
-		},
-		"handlers": map[string]interface{}{},
-	}, doc)
+	assert.Equal(t, expectedSysDocumentation(true), doc)
 }
 
 func TestAddGRPCInfoToMetadata(t *testing.T) {

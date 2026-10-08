@@ -28,21 +28,39 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/mock/gomock"
-	nats "github.com/nats-io/nats.go"
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/helpers"
 	"github.com/alkaid/pitaya/v2/metrics"
 	metricsmocks "github.com/alkaid/pitaya/v2/metrics/mocks"
 	"github.com/alkaid/pitaya/v2/protos"
-	protosmocks "github.com/alkaid/pitaya/v2/protos/mocks"
 	sessionmocks "github.com/alkaid/pitaya/v2/session/mocks"
+	nats "github.com/nats-io/nats.go"
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 )
 
 type funcPtrMatcher struct {
 	ptr uintptr
+}
+
+type pitayaServerStub struct {
+	protos.UnimplementedPitayaServer
+	sessionBindRemote func(context.Context, *protos.BindMsg) (*protos.Response, error)
+	pushToUser        func(context.Context, *protos.Push) (*protos.Response, error)
+	kickUser          func(context.Context, *protos.KickMsg) (*protos.KickAnswer, error)
+}
+
+func (s *pitayaServerStub) SessionBindRemote(ctx context.Context, msg *protos.BindMsg) (*protos.Response, error) {
+	return s.sessionBindRemote(ctx, msg)
+}
+
+func (s *pitayaServerStub) PushToUser(ctx context.Context, push *protos.Push) (*protos.Response, error) {
+	return s.pushToUser(ctx, push)
+}
+
+func (s *pitayaServerStub) KickUser(ctx context.Context, kick *protos.KickMsg) (*protos.KickAnswer, error) {
+	return s.kickUser(ctx, kick)
 }
 
 func newFuncPtrMatcher(x interface{}) *funcPtrMatcher {
@@ -160,7 +178,7 @@ func TestNatsRPCServerOnSessionBind(t *testing.T) {
 	conn, err := setupNatsConn(fmt.Sprintf("nats://%s", s.Addr()), nil)
 	assert.NoError(t, err)
 	rpcServer.conn = conn
-	err = rpcServer.onSessionBind(context.Background(), mockSession)
+	err = rpcServer.onSessionBind(context.Background(), mockSession, nil)
 	assert.NoError(t, err)
 	assert.NotNil(t, rpcServer.userKickCh)
 }
@@ -273,7 +291,7 @@ func TestNatsRPCServerSubscribe(t *testing.T) {
 
 	for _, table := range tables {
 		t.Run(table.topic, func(t *testing.T) {
-			subs, err := rpcServer.subscribe(table.topic)
+			subs, err := rpcServer.subscribe(table.topic, false)
 			assert.NoError(t, err)
 			assert.Equal(t, true, subs.IsValid())
 			conn.Publish(table.topic, table.msg)
@@ -309,7 +327,7 @@ func TestNatsRPCServerHandleMessages(t *testing.T) {
 
 	for _, table := range tables {
 		t.Run(table.topic, func(t *testing.T) {
-			subs, err := rpcServer.subscribe(table.topic)
+			subs, err := rpcServer.subscribe(table.topic, false)
 			assert.NoError(t, err)
 			assert.Equal(t, true, subs.IsValid())
 			b, err := proto.Marshal(table.req)
@@ -392,10 +410,7 @@ func TestNatsRPCServerProcessBindings(t *testing.T) {
 
 	assert.NoError(t, err)
 
-	pitayaSvMock := protosmocks.NewMockPitayaServer(ctrl)
 	defer ctrl.Finish()
-
-	rpcServer.SetPitayaServer(pitayaSvMock)
 
 	bindMsg := &protos.BindMsg{
 		Uid: "testuid",
@@ -412,9 +427,12 @@ func TestNatsRPCServerProcessBindings(t *testing.T) {
 	unmarshalledMsg := &protos.BindMsg{}
 	_ = proto.Unmarshal(bindData, unmarshalledMsg)
 
-	pitayaSvMock.EXPECT().SessionBindRemote(context.Background(), unmarshalledMsg).Do(func(ctx context.Context, b *protos.BindMsg) {
-		assert.Equal(t, bindMsg.Uid, b.Uid)
-		assert.Equal(t, bindMsg.Fid, b.Fid)
+	rpcServer.SetPitayaServer(&pitayaServerStub{
+		sessionBindRemote: func(ctx context.Context, b *protos.BindMsg) (*protos.Response, error) {
+			assert.Equal(t, bindMsg.Uid, b.Uid)
+			assert.Equal(t, bindMsg.Fid, b.Fid)
+			return &protos.Response{}, nil
+		},
 	})
 
 	rpcServer.bindingsChan <- msg
@@ -435,10 +453,7 @@ func TestNatsRPCServerProcessPushes(t *testing.T) {
 
 	assert.NoError(t, err)
 
-	pitayaSvMock := protosmocks.NewMockPitayaServer(ctrl)
 	defer ctrl.Finish()
-
-	rpcServer.SetPitayaServer(pitayaSvMock)
 
 	push := &protos.Push{
 		Route: "someroute",
@@ -446,10 +461,13 @@ func TestNatsRPCServerProcessPushes(t *testing.T) {
 		Data:  []byte{0x01},
 	}
 
-	pitayaSvMock.EXPECT().PushToUser(context.Background(), push).Do(func(ctx context.Context, p *protos.Push) {
-		assert.Equal(t, push.Route, p.Route)
-		assert.Equal(t, push.Uid, p.Uid)
-		assert.Equal(t, push.Data, p.Data)
+	rpcServer.SetPitayaServer(&pitayaServerStub{
+		pushToUser: func(ctx context.Context, p *protos.Push) (*protos.Response, error) {
+			assert.Equal(t, push.Route, p.Route)
+			assert.Equal(t, push.Uid, p.Uid)
+			assert.Equal(t, push.Data, p.Data)
+			return &protos.Response{}, nil
+		},
 	})
 
 	rpcServer.userPushCh <- push
@@ -470,17 +488,17 @@ func TestNatsRPCServerProcessKick(t *testing.T) {
 
 	assert.NoError(t, err)
 
-	pitayaSvMock := protosmocks.NewMockPitayaServer(ctrl)
 	defer ctrl.Finish()
-
-	rpcServer.SetPitayaServer(pitayaSvMock)
 
 	kick := &protos.KickMsg{
 		UserId: "someuid",
 	}
 
-	pitayaSvMock.EXPECT().KickUser(gomock.Any(), kick).Do(func(ctx context.Context, p *protos.KickMsg) {
-		assert.Equal(t, kick.UserId, p.UserId)
+	rpcServer.SetPitayaServer(&pitayaServerStub{
+		kickUser: func(ctx context.Context, p *protos.KickMsg) (*protos.KickAnswer, error) {
+			assert.Equal(t, kick.UserId, p.UserId)
+			return &protos.KickAnswer{}, nil
+		},
 	})
 
 	rpcServer.userKickCh <- kick

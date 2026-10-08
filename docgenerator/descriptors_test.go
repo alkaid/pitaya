@@ -3,33 +3,44 @@ package docgenerator
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/constants"
 	_ "github.com/alkaid/pitaya/v2/protos"
+	"github.com/stretchr/testify/assert"
+	"google.golang.org/protobuf/types/descriptorpb"
 )
 
 func TestProtoDescriptors(t *testing.T) {
 	t.Parallel()
 	tables := []struct {
-		name        string
-		messageName string
-		err         error
+		name      string
+		protoName string
+		load      func(string, map[string]*descriptorpb.FileDescriptorProto) error
+		wantErr   error
+		shouldErr bool
 	}{
-		{"fail filename", "not_exists.proto", constants.ErrProtodescriptor},
-		{"success filename", "kick.proto", nil},
-		{"success message", "protos.Push", nil},
-		{"fail message", "protos.DoNotExist", constants.ErrProtodescriptor},
+		{"reject filename as message", "not_exists.proto", ProtoDescriptors, constants.ErrProtodescriptor, true},
+		{"success filename", "pitaya-protos/kick.proto", ProtoFileDescriptors, nil, false},
+		{"success message", "protos.Push", ProtoDescriptors, nil, false},
+		{"fail message", "protos.DoNotExist", ProtoDescriptors, nil, true},
 	}
 	for _, table := range tables {
 		t.Run(table.name, func(t *testing.T) {
-			bts, err := ProtoDescriptors(table.messageName)
-			if table.err != nil {
-				assert.EqualError(t, table.err, err.Error())
-				assert.Nil(t, bts)
+			descriptors := make(map[string]*descriptorpb.FileDescriptorProto)
+			err := table.load(table.protoName, descriptors)
+			if table.shouldErr {
+				assert.Error(t, err)
+				if table.wantErr != nil {
+					assert.ErrorIs(t, err, table.wantErr)
+				}
+				assert.Empty(t, descriptors)
 			} else {
 				assert.NoError(t, err)
-				assert.NotNil(t, bts)
+				assert.NotEmpty(t, descriptors)
 			}
 		})
 	}
+
+	t.Run("nil descriptor map", func(t *testing.T) {
+		assert.ErrorIs(t, ProtoDescriptors("protos.Push", nil), constants.ErrProtodescriptorMapEmpty)
+	})
 }

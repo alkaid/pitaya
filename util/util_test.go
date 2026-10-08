@@ -28,12 +28,12 @@ import (
 	"reflect"
 	"testing"
 
-	"go.uber.org/mock/gomock"
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/serialize/mocks"
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 )
 
 var update = flag.Bool("update", false, "update .golden files")
@@ -89,7 +89,7 @@ func TestPcall(t *testing.T) {
 			if table.methodName == "TestFunc" || table.methodName == "TestFunc2RetNoErr" {
 				assert.NoError(t, err)
 			} else {
-				assert.Equal(t, table.err, err)
+				assert.EqualError(t, err, table.err.Error())
 			}
 			assert.IsType(t, table.out, r)
 			assert.Equal(t, table.out, r)

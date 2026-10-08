@@ -24,11 +24,8 @@ import (
 	"context"
 	"testing"
 
-	"go.uber.org/mock/gomock"
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/cluster"
 	clustermocks "github.com/alkaid/pitaya/v2/cluster/mocks"
-	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/conn/codec"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
@@ -40,21 +37,19 @@ import (
 	serializemocks "github.com/alkaid/pitaya/v2/serialize/mocks"
 	"github.com/alkaid/pitaya/v2/service"
 	sessionmocks "github.com/alkaid/pitaya/v2/session/mocks"
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 	"google.golang.org/protobuf/proto"
 )
 
 func TestDoSendRPCNotInitialized(t *testing.T) {
-	config := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Standalone, map[string]string{}, *config).(*App)
+	app := &App{}
 	err := app.doSendRPC(nil, "", "", nil, nil, "")
 	assert.Equal(t, constants.ErrRPCServerNotInitialized, err)
 }
 
 func TestDoSendRPC(t *testing.T) {
-	config := config.NewDefaultPitayaConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *config).(*App)
-	app.server.ID = "myserver"
-	app.rpcServer = &cluster.NatsRPCServer{}
+	app := &App{server: &cluster.Server{ID: "myserver"}, rpcServer: &cluster.NatsRPCServer{}}
 	tables := []struct {
 		name     string
 		routeStr string
@@ -93,16 +88,13 @@ func TestDoSendRPC(t *testing.T) {
 				mockRPCClient.EXPECT().Call(ctx, protos.RPCType_User, gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(&protos.Response{Data: b}, nil)
 			}
 			err := app.RPCTo(ctx, "myserver", table.routeStr, table.reply, table.arg)
-			assert.Equal(t, table.err, err)
+			assert.ErrorIs(t, err, table.err)
 		})
 	}
 }
 
 func TestDoSendNotify(t *testing.T) {
-	config := config.NewDefaultBuilderConfig()
-	app := NewDefaultApp(true, "testtype", Cluster, map[string]string{}, *config).(*App)
-	app.server.ID = "myserver"
-	app.rpcServer = &cluster.NatsRPCServer{}
+	app := &App{server: &cluster.Server{ID: "myserver"}, rpcServer: &cluster.NatsRPCServer{}}
 	tables := []struct {
 		name     string
 		routeStr string
@@ -110,7 +102,7 @@ func TestDoSendNotify(t *testing.T) {
 		err      error
 	}{
 		{"bad_route", "badroute", nil, route.ErrInvalidRoute},
-		{"no_server_type", "bla.bla", nil, constants.ErrNoServerTypeChosenForRPC},
+		{"short_route_to_self", "bla.bla", nil, constants.ErrNonsenseRPC},
 		{"nonsense_rpc", "mytype.bla.bla", nil, constants.ErrNonsenseRPC},
 		{"success", "bla.bla.bla", &test.SomeStruct{A: 1}, nil},
 	}
@@ -130,7 +122,7 @@ func TestDoSendNotify(t *testing.T) {
 				sessionPool := sessionmocks.NewMockSessionPool(ctrl)
 				router := router.New()
 				handlerPool := service.NewHandlerPool()
-				svc := service.NewRemoteService(mockRPCClient, mockRPCServer, mockSD, packetEncoder, mockSerializer, router, messageEncoder, &cluster.Server{}, sessionPool, pipeline.NewHandlerHooks(), handlerPool)
+				svc := service.NewRemoteService(mockRPCClient, mockRPCServer, mockSD, packetEncoder, mockSerializer, router, messageEncoder, &cluster.Server{}, sessionPool, pipeline.NewRemoteHooks(), pipeline.NewHandlerHooks(), handlerPool)
 				assert.NotNil(t, svc)
 				app.remoteService = svc
 				app.server.ID = "notmyserver"
@@ -140,7 +132,7 @@ func TestDoSendNotify(t *testing.T) {
 				mockRPCClient.EXPECT().Call(ctx, protos.RPCType_User, gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).Return(&protos.Response{Data: b}, nil)
 			}
 			err := app.NotifyTo(ctx, "myserver", table.routeStr, table.arg)
-			assert.Equal(t, table.err, err)
+			assert.ErrorIs(t, err, table.err)
 		})
 	}
 }

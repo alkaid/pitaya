@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/alkaid/goerrors/apierrors"
 	"github.com/alkaid/pitaya/v2"
 	"github.com/alkaid/pitaya/v2/component"
 	"github.com/alkaid/pitaya/v2/examples/demo/cluster_protobuf/protos"
 	"github.com/alkaid/pitaya/v2/timer"
+	"github.com/google/uuid"
 )
 
 type (
@@ -75,9 +76,9 @@ func reply(code int32, msg string) *protos.Response {
 func (r *Room) Entry(ctx context.Context) (*protos.Response, error) {
 	fakeUID := uuid.New().String() // just use s.ID as uid !!!
 	s := r.app.GetSessionFromCtx(ctx)
-	err := s.Bind(ctx, fakeUID) // binding session uid
+	err := s.Bind(ctx, fakeUID, nil, nil) // binding session uid
 	if err != nil {
-		return nil, pitaya.Error(err, "ENT-000")
+		return nil, apierrors.InternalServer("ENT-000", err.Error(), "").WithCause(err)
 	}
 	return reply(200, "ok"), nil
 }
@@ -111,7 +112,7 @@ func (r *Room) SendRPC(ctx context.Context, msg []byte) (*protos.Response, error
 	ret := protos.Response{}
 	err := r.app.RPC(ctx, "connector.connectorremote.remotefunc", &ret, &protos.RPCMsg{}, "")
 	if err != nil {
-		return nil, pitaya.Error(err, "RPC-000")
+		return nil, apierrors.InternalServer("RPC-000", err.Error(), "").WithCause(err)
 	}
 	return reply(200, ret.Msg), nil
 }

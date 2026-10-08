@@ -28,10 +28,7 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/mock/gomock"
-	"github.com/google/uuid"
-	nats "github.com/nats-io/nats.go"
-	"github.com/stretchr/testify/assert"
+	"github.com/alkaid/goerrors/apierrors"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
@@ -41,6 +38,10 @@ import (
 	"github.com/alkaid/pitaya/v2/protos"
 	"github.com/alkaid/pitaya/v2/route"
 	sessionmocks "github.com/alkaid/pitaya/v2/session/mocks"
+	"github.com/google/uuid"
+	nats "github.com/nats-io/nats.go"
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 )
 
 func TestNewNatsRPCClient(t *testing.T) {
@@ -241,7 +242,7 @@ func TestNatsRPCClientSendShouldFailIfNotRunning(t *testing.T) {
 	sv := getServer()
 	rpcClient, _ := NewNatsRPCClient(config, sv, nil, nil)
 	err := rpcClient.Send("topic", []byte("data"))
-	assert.Equal(t, constants.ErrRPCClientNotInitialized, err)
+	assert.ErrorIs(t, err, constants.ErrRPCClientNotInitialized)
 }
 
 func TestNatsRPCClientSend(t *testing.T) {
@@ -298,12 +299,12 @@ func TestNatsRPCClientBuildRequest(t *testing.T) {
 		rpcType        protos.RPCType
 		route          *route.Route
 		msg            *message.Message
-		expected       protos.Request
+		expected       *protos.Request
 	}{
 		{
 			"test-frontend-request", true, protos.RPCType_Sys, rt,
 			&message.Message{Type: message.Request, ID: messageID, Data: data},
-			protos.Request{
+			&protos.Request{
 				Type: protos.RPCType_Sys,
 				Msg: &protos.Msg{
 					Route: rt.String(),
@@ -322,7 +323,7 @@ func TestNatsRPCClientBuildRequest(t *testing.T) {
 		{
 			"test-rpc-sys-request", false, protos.RPCType_Sys, rt,
 			&message.Message{Type: message.Request, ID: messageID, Data: data},
-			protos.Request{
+			&protos.Request{
 				Type: protos.RPCType_Sys,
 				Msg: &protos.Msg{
 					Route: rt.String(),
@@ -341,8 +342,13 @@ func TestNatsRPCClientBuildRequest(t *testing.T) {
 		{
 			"test-rpc-user-request", false, protos.RPCType_User, rt,
 			&message.Message{Type: message.Request, ID: messageID, Data: data},
-			protos.Request{
+			&protos.Request{
 				Type: protos.RPCType_User,
+				Session: &protos.Session{
+					Id:   sessionID,
+					Uid:  uid,
+					Data: data2,
+				},
 				Msg: &protos.Msg{
 					Route: rt.String(),
 					Data:  data,
@@ -354,7 +360,7 @@ func TestNatsRPCClientBuildRequest(t *testing.T) {
 		{
 			"test-notify", false, protos.RPCType_Sys, rt,
 			&message.Message{Type: message.Notify, ID: messageID, Data: data},
-			protos.Request{
+			&protos.Request{
 				Type: protos.RPCType_Sys,
 				Msg: &protos.Msg{
 					Route: rt.String(),
@@ -376,18 +382,18 @@ func TestNatsRPCClientBuildRequest(t *testing.T) {
 			ctrl := gomock.NewController(t)
 
 			ss := sessionmocks.NewMockSession(ctrl)
-			if table.rpcType == protos.RPCType_Sys {
-				ss.EXPECT().ID().Return(sessionID).Times(1)
-				ss.EXPECT().UID().Return(uid).Times(1)
-				ss.EXPECT().GetDataEncoded().Return(data2).Times(1)
-			}
+			ss.EXPECT().GetFrontendSessionID().Return(sessionID)
+			ss.EXPECT().UID().Return(uid)
+			ss.EXPECT().GetDataEncoded().Return(data2)
+			ss.EXPECT().GetBackends().Return(nil)
+			ss.EXPECT().RemoteIPText().Return("")
 
 			rpcClient.server.Frontend = table.frontendServer
-			req, err := buildRequest(context.Background(), table.rpcType, table.route, ss, table.msg, rpcClient.server)
+			req, err := buildRequest(context.Background(), table.rpcType, table.route.String(), ss, table.msg, rpcClient.server)
 			assert.NoError(t, err)
 			assert.NotNil(t, req.Metadata)
 			req.Metadata = nil
-			assert.Equal(t, table.expected, req)
+			assert.True(t, proto.Equal(table.expected, &req))
 		})
 	}
 }
@@ -396,8 +402,15 @@ func TestNatsRPCClientCallShouldFailIfNotRunning(t *testing.T) {
 	config := config.NewDefaultPitayaConfig().Cluster.RPC.Client.Nats
 	sv := getServer()
 	rpcClient, _ := NewNatsRPCClient(config, sv, nil, nil)
-	res, err := rpcClient.Call(context.Background(), protos.RPCType_Sys, nil, nil, nil, sv)
-	assert.Equal(t, constants.ErrRPCClientNotInitialized, err)
+	res, err := rpcClient.Call(
+		context.Background(),
+		protos.RPCType_Sys,
+		route.NewRoute("sv", "svc", "method"),
+		nil,
+		&message.Message{},
+		sv,
+	)
+	assert.ErrorIs(t, err, constants.ErrRPCClientNotInitialized)
 	assert.Nil(t, res)
 }
 
@@ -423,13 +436,14 @@ func TestNatsRPCClientCall(t *testing.T) {
 		Data: []byte("data"),
 	}
 
+	responseErr := apierrors.FromError(errors.New("nok"))
 	tables := []struct {
 		name     string
 		response interface{}
 		expected *protos.Response
 		err      error
 	}{
-		{"test_error", &protos.Response{Data: []byte("nok"), Error: &protos.Error{Msg: "nok"}}, nil, e.NewError(errors.New("nok"), e.ErrUnknownCode)},
+		{"test_error", &protos.Response{Data: []byte("nok"), Status: &responseErr.Status}, nil, errors.New("nok")},
 		{"test_ok", &protos.Response{Data: []byte("ok")}, &protos.Response{Data: []byte("ok")}, nil},
 		{"test_bad_response", []byte("invalid"), nil, errors.New("cannot parse invalid wire-format data")},
 		{"test_bad_proto", &protos.Session{Id: 1, Uid: "snap"}, nil, errors.New("cannot parse invalid wire-format data")},
@@ -463,13 +477,15 @@ func TestNatsRPCClientCall(t *testing.T) {
 			time.Sleep(50 * time.Millisecond)
 
 			ss := sessionmocks.NewMockSession(ctrl)
-			ss.EXPECT().ID().Return(sessionID).Times(1)
+			ss.EXPECT().GetFrontendSessionID().Return(sessionID).Times(1)
 			ss.EXPECT().UID().Return(uid).Times(1)
 			ss.EXPECT().GetDataEncoded().Return(data2).Times(1)
+			ss.EXPECT().GetBackends().Return(nil).Times(1)
+			ss.EXPECT().RemoteIPText().Return("").Times(1)
 			ss.EXPECT().SetRequestInFlight(gomock.Any(), gomock.Any(), gomock.Any()).Times(2)
 
 			res, err := rpcClient.Call(context.Background(), protos.RPCType_Sys, rt, ss, msg, sv2)
-			assert.Equal(t, table.expected, res)
+			assert.True(t, proto.Equal(table.expected, res))
 			if table.err != nil {
 				assert.Error(t, err)
 				assert.Contains(t, err.Error(), table.err.Error())

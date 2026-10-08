@@ -24,40 +24,65 @@ import (
 	"encoding/json"
 	"testing"
 
-	"go.uber.org/mock/gomock"
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/assert"
+	"github.com/alkaid/goerrors/apierrors"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/protos"
+	"github.com/alkaid/pitaya/v2/session"
 	"github.com/alkaid/pitaya/v2/session/mocks"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
 )
+
+func assertSessionNotFound(t *testing.T, err error, metadata map[string]string) {
+	t.Helper()
+
+	var apiErr *apierrors.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, protos.ErrSessionNotFound().GetCode(), apiErr.GetCode())
+	assert.Equal(t, protos.ErrSessionNotFound().GetReason(), apiErr.GetReason())
+	assert.Equal(t, metadata, apiErr.GetMetadata())
+}
 
 func TestBindSession(t *testing.T) {
 	t.Parallel()
 	ctrl := gomock.NewController(t)
 	id := int64(1)
 	uid := uuid.New().String()
-	d, err := json.Marshal(map[string]interface{}{
+	customData := map[string]interface{}{
 		"hello": "test",
-	})
-	assert.NoError(t, err)
+	}
+	d, err := json.Marshal(customData)
+	require.NoError(t, err)
+	metadata := map[string]string{"source": "test"}
 
 	ss := mocks.NewMockSession(ctrl)
 
 	sessionPool := mocks.NewMockSessionPool(ctrl)
-	sessionPool.EXPECT().GetSessionByID(id).Return(ss).Times(1)
+	gomock.InOrder(
+		sessionPool.EXPECT().GetSessionByID(id).Return(ss),
+		ss.EXPECT().SetDataEncoded(d).Return(nil),
+		ss.EXPECT().GetData().Return(customData),
+		ss.EXPECT().Bind(nil, uid, customData, metadata).Return(nil),
+	)
 
-	s := NewSys(sessionPool)
-	data := &protos.Session{
-		Id:   id,
-		Uid:  uid,
-		Data: d,
+	s := NewSys(sessionPool, nil, nil, nil, nil)
+	msg := &protos.BindMsg{
+		Uid: uid,
+		Fid: "frontend-1",
+		Sid: id,
+		Session: &protos.Session{
+			Id:   id,
+			Uid:  uid,
+			Data: d,
+		},
+		Metadata: metadata,
 	}
 
-	ss.EXPECT().Bind(nil, uid).Times(1)
-
-	res, err := s.BindSession(nil, data)
-	assert.NoError(t, err)
+	res, err := s.BindSession(nil, msg)
+	require.NoError(t, err)
+	require.NotNil(t, res)
 	assert.Equal(t, []byte("ack"), res.Data)
 }
 
@@ -69,19 +94,29 @@ func TestBindSessionShouldErrorIfNotExists(t *testing.T) {
 	d, err := json.Marshal(map[string]interface{}{
 		"hello": "test",
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	sessionPool := mocks.NewMockSessionPool(ctrl)
 	sessionPool.EXPECT().GetSessionByID(gomock.Any()).Return(nil)
 
-	s := NewSys(sessionPool)
-	data := &protos.Session{
-		Id:   133,
-		Uid:  uid,
-		Data: d,
+	s := NewSys(sessionPool, nil, nil, nil, nil)
+	msg := &protos.BindMsg{
+		Uid: uid,
+		Fid: "frontend-1",
+		Sid: 133,
+		Session: &protos.Session{
+			Id:   133,
+			Uid:  uid,
+			Data: d,
+		},
 	}
-	_, err = s.BindSession(nil, data)
-	assert.EqualError(t, constants.ErrSessionNotFound, err.Error())
+	res, err := s.BindSession(nil, msg)
+	assert.Nil(t, res)
+	assertSessionNotFound(t, err, map[string]string{
+		"uid": uid,
+		"sid": "133",
+		"fid": "frontend-1",
+	})
 }
 
 func TestBindSessionShouldErrorIfAlreadyBound(t *testing.T) {
@@ -90,30 +125,45 @@ func TestBindSessionShouldErrorIfAlreadyBound(t *testing.T) {
 
 	id := int64(1)
 	uid := uuid.New().String()
-	d, err := json.Marshal(map[string]interface{}{
+	customData := map[string]interface{}{
 		"hello": "test",
-	})
-	assert.NoError(t, err)
-	data := &protos.Session{
-		Id:   id,
-		Uid:  uid,
-		Data: d,
+	}
+	d, err := json.Marshal(customData)
+	require.NoError(t, err)
+	metadata := map[string]string{"source": "test"}
+	msg := &protos.BindMsg{
+		Uid: uid,
+		Fid: "frontend-1",
+		Sid: id,
+		Session: &protos.Session{
+			Id:   id,
+			Uid:  uid,
+			Data: d,
+		},
+		Metadata: metadata,
 	}
 
 	ss := mocks.NewMockSession(ctrl)
-	ss.EXPECT().ID().Return(id).Times(1)
-	ss.EXPECT().Bind(nil, uid).Return(nil).Times(1)
-	ss.EXPECT().Bind(nil, uid).Return(constants.ErrSessionAlreadyBound)
-
 	sessionPool := mocks.NewMockSessionPool(ctrl)
-	sessionPool.EXPECT().GetSessionByID(ss.ID()).Return(ss).Times(2)
+	gomock.InOrder(
+		sessionPool.EXPECT().GetSessionByID(id).Return(ss),
+		ss.EXPECT().SetDataEncoded(d).Return(nil),
+		ss.EXPECT().GetData().Return(customData),
+		ss.EXPECT().Bind(nil, uid, customData, metadata).Return(nil),
+		sessionPool.EXPECT().GetSessionByID(id).Return(ss),
+		ss.EXPECT().SetDataEncoded(d).Return(nil),
+		ss.EXPECT().GetData().Return(customData),
+		ss.EXPECT().Bind(nil, uid, customData, metadata).Return(constants.ErrSessionAlreadyBound),
+	)
 
-	s := NewSys(sessionPool)
-	res, err := s.BindSession(nil, data)
-	assert.NoError(t, err)
+	s := NewSys(sessionPool, nil, nil, nil, nil)
+	res, err := s.BindSession(nil, msg)
+	require.NoError(t, err)
+	require.NotNil(t, res)
 	assert.Equal(t, []byte("ack"), res.Data)
 
-	_, err = s.BindSession(nil, data)
+	res, err = s.BindSession(nil, msg)
+	assert.Nil(t, res)
 	assert.EqualError(t, constants.ErrSessionAlreadyBound, err.Error())
 }
 
@@ -132,17 +182,21 @@ func TestPushSession(t *testing.T) {
 		Uid:  uid,
 		Data: d,
 	}
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	ss := mocks.NewMockSession(ctrl)
-	ss.EXPECT().SetDataEncoded(d).Times(1)
-
 	sessionPool := mocks.NewMockSessionPool(ctrl)
-	sessionPool.EXPECT().GetSessionByID(id).Return(ss).Times(1)
+	gomock.InOrder(
+		sessionPool.EXPECT().GetSessionByID(id).Return(ss),
+		ss.EXPECT().UID().Return(uid),
+		ss.EXPECT().SetDataEncoded(d).Return(nil),
+		ss.EXPECT().FlushUserData().Return(nil),
+	)
 
-	s := NewSys(sessionPool)
+	s := NewSys(sessionPool, nil, nil, nil, nil)
 	res, err := s.PushSession(nil, data)
-	assert.NoError(t, err)
+	require.NoError(t, err)
+	require.NotNil(t, res)
 	assert.Equal(t, []byte("ack"), res.Data)
 }
 
@@ -155,7 +209,7 @@ func TestPushSessionShouldFailIfSessionDoesntExists(t *testing.T) {
 		"hello":   "test",
 		"hello22": 2,
 	})
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	data := &protos.Session{
 		Id:   343,
 		Uid:  uid,
@@ -165,9 +219,13 @@ func TestPushSessionShouldFailIfSessionDoesntExists(t *testing.T) {
 	sessionPool := mocks.NewMockSessionPool(ctrl)
 	sessionPool.EXPECT().GetSessionByID(data.Id).Return(nil).Times(1)
 
-	s := NewSys(sessionPool)
-	_, err = s.PushSession(nil, data)
-	assert.EqualError(t, constants.ErrSessionNotFound, err.Error())
+	s := NewSys(sessionPool, nil, nil, nil, nil)
+	res, err := s.PushSession(nil, data)
+	assert.Nil(t, res)
+	assertSessionNotFound(t, err, map[string]string{
+		"uid": uid,
+		"sid": "343",
+	})
 }
 
 func TestKick(t *testing.T) {
@@ -176,17 +234,20 @@ func TestKick(t *testing.T) {
 	defer ctrl.Finish()
 
 	uid := uuid.New().String()
+	reason := session.CloseReasonKickManual
+	metadata := map[string]string{"source": "test"}
 
 	ss := mocks.NewMockSession(ctrl)
-	ss.EXPECT().Kick(nil).Return(nil)
+	ss.EXPECT().Kick(nil, metadata, reason).Return(nil)
 
 	sessionPool := mocks.NewMockSessionPool(ctrl)
 	sessionPool.EXPECT().GetSessionByUID(uid).Return(ss).Times(1)
 
-	s := NewSys(sessionPool)
+	s := NewSys(sessionPool, nil, nil, nil, nil)
 
-	res, err := s.Kick(nil, &protos.KickMsg{UserId: uid})
-	assert.NoError(t, err)
+	res, err := s.Kick(nil, &protos.KickMsg{UserId: uid, Reason: int32(reason), Metadata: metadata})
+	require.NoError(t, err)
+	require.NotNil(t, res)
 	assert.True(t, res.Kicked)
 }
 
@@ -198,7 +259,12 @@ func TestKickSessionShouldFailIfSessionDoesntExists(t *testing.T) {
 	sessionPool := mocks.NewMockSessionPool(ctrl)
 	sessionPool.EXPECT().GetSessionByUID(uid).Return(nil).Times(1)
 
-	s := NewSys(sessionPool)
-	_, err := s.Kick(nil, &protos.KickMsg{UserId: uid})
-	assert.EqualError(t, constants.ErrSessionNotFound, err.Error())
+	s := NewSys(sessionPool, nil, nil, nil, nil)
+	res, err := s.Kick(nil, &protos.KickMsg{UserId: uid})
+	require.NotNil(t, res)
+	assert.False(t, res.Kicked)
+	assertSessionNotFound(t, err, map[string]string{
+		"uid":    uid,
+		"reason": "0",
+	})
 }

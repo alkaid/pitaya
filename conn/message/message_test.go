@@ -4,11 +4,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/stretchr/testify/require"
 	"path/filepath"
+	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/helpers"
+	"github.com/stretchr/testify/assert"
 )
 
 var update = flag.Bool("update", false, "update .golden files")
@@ -77,8 +79,14 @@ func TestEncode(t *testing.T) {
 			expected := helpers.ReadFile(t, gp)
 
 			if err == nil {
-				assert.Equal(t, table.gzip, expected[0]&gzipMask)
-				assert.Equal(t, expected, result)
+				if table.gzip == 0 {
+					assert.Equal(t, expected, result)
+				} else {
+					// Compression is optional when zlib would enlarge a payload.
+					decoded, decodeErr := Decode(result)
+					require.NoError(t, decodeErr)
+					assert.Equal(t, message, decoded)
+				}
 			} else {
 				assert.Nil(t, result)
 			}
@@ -208,4 +216,16 @@ func TestGetDictionary(t *testing.T) {
 
 	// make sure we're copying the routes maps
 	assert.NotEqual(t, fmt.Sprintf("%p", routes), fmt.Sprintf("%p", dict))
+}
+
+func TestEncodeCompressiblePayload(t *testing.T) {
+	input := &Message{Type: Response, ID: 123, Data: []byte(strings.Repeat("payload", 1024))}
+	expected := *input
+	encoded, err := NewMessagesEncoder(true).Encode(input)
+	require.NoError(t, err)
+	require.Equal(t, uint8(gzipMask), encoded[0]&gzipMask)
+	require.Less(t, len(encoded), len(expected.Data))
+	decoded, err := Decode(encoded)
+	require.NoError(t, err)
+	require.Equal(t, &expected, decoded)
 }

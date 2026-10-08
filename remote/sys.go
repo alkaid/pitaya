@@ -26,8 +26,8 @@ import (
 	"github.com/alkaid/goerrors/apierrors"
 	"strconv"
 
-	"github.com/pkg/errors"
 	"github.com/alkaid/pitaya/v2/util"
+	"github.com/pkg/errors"
 
 	"github.com/alkaid/pitaya/v2/co"
 
@@ -359,7 +359,7 @@ func (s *Sys) PushSession(ctx context.Context, sessionData *protos.Session) (*pr
 	}
 	if sess.UID() != sessionData.Uid {
 		// 不应该到该分支,到这说明有bug
-		return nil, fmt.Errorf("uid not equal.src=%d,dest=%d", sess.UID(), sessionData.Uid)
+		return nil, fmt.Errorf("uid not equal.src=%s,dest=%s", sess.UID(), sessionData.Uid)
 	}
 	if err := sess.SetDataEncoded(sessionData.Data); err != nil {
 		return nil, err

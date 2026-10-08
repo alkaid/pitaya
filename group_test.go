@@ -24,11 +24,11 @@ import (
 	"context"
 	"testing"
 
-	"go.uber.org/mock/gomock"
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/session/mocks"
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 )
 
 func createGroupTestApp() Pitaya {

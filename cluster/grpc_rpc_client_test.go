@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"testing"
 
-	"go.uber.org/mock/gomock"
-	"github.com/stretchr/testify/assert"
 	"github.com/alkaid/pitaya/v2/config"
 	"github.com/alkaid/pitaya/v2/conn/message"
 	"github.com/alkaid/pitaya/v2/constants"
@@ -18,6 +16,8 @@ import (
 	protosmocks "github.com/alkaid/pitaya/v2/protos/mocks"
 	"github.com/alkaid/pitaya/v2/route"
 	sessionmocks "github.com/alkaid/pitaya/v2/session/mocks"
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 	"google.golang.org/grpc"
 )
 
@@ -59,22 +59,21 @@ func TestCall(t *testing.T) {
 	r := route.NewRoute("sv", "svc", "meth")
 
 	sess := sessionmocks.NewMockSession(ctrl)
-	sess.EXPECT().ID().Return(int64(1)).Times(2)
+	sess.EXPECT().GetFrontendSessionID().Return(int64(1)).Times(2)
 	sess.EXPECT().UID().Return(uid).Times(2)
 	sess.EXPECT().GetDataEncoded().Return(nil).Times(2)
+	sess.EXPECT().GetBackends().Return(nil).Times(2)
+	sess.EXPECT().RemoteIPText().Return("").Times(2)
 	sess.EXPECT().SetRequestInFlight(gomock.Any(), gomock.Any(), gomock.Any()).Times(2)
 
-	expected, err := buildRequest(ctx, rpcType, r, sess, msg, g.server)
+	expected, err := buildRequest(ctx, rpcType, r.String(), sess, msg, g.server)
 	assert.NoError(t, err)
 
 	mockPitayaClient.EXPECT().Call(gomock.Any(), gomock.Any()).DoAndReturn(func(ctx context.Context, in *protos.Request, opts ...grpc.CallOption) (*protos.Response, error) {
 		assert.Equal(t, expected.FrontendID, in.FrontendID)
 		assert.Equal(t, expected.Type, in.Type)
 		assert.Equal(t, expected.Msg, in.Msg)
-		return &protos.Response{
-			Data:  []byte{0x01},
-			Error: nil,
-		}, nil
+		return &protos.Response{Data: []byte{0x01}}, nil
 	})
 
 	res, err := g.Call(ctx, rpcType, r, sess, msg, g.server)
@@ -267,9 +266,6 @@ func TestAddServer(t *testing.T) {
 
 		serverConfig := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Grpc
 		serverConfig.Port = helpers.GetFreePort(t)
-		ctrl := gomock.NewController(t)
-		defer ctrl.Finish()
-
 		server := &Server{
 			ID:   "someid",
 			Type: "sometype",
@@ -282,8 +278,7 @@ func TestAddServer(t *testing.T) {
 		gs, err := NewGRPCServer(serverConfig, server, []metrics.Reporter{})
 		assert.NoError(t, err)
 
-		mockPitayaServer := protosmocks.NewMockPitayaServer(ctrl)
-		gs.SetPitayaServer(mockPitayaServer)
+		gs.SetPitayaServer(&protos.UnimplementedPitayaServer{})
 
 		err = gs.Init()
 		assert.NoError(t, err)
@@ -308,9 +303,6 @@ func TestAddServer(t *testing.T) {
 		serverConfig := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Grpc
 		serverConfig.Port = helpers.GetFreePort(t)
 
-		ctrl := gomock.NewController(t)
-		defer ctrl.Finish()
-
 		server := &Server{
 			ID:   "someid",
 			Type: "sometype",
@@ -323,8 +315,7 @@ func TestAddServer(t *testing.T) {
 		gs, err := NewGRPCServer(serverConfig, server, []metrics.Reporter{})
 		assert.NoError(t, err)
 
-		mockPitayaServer := protosmocks.NewMockPitayaServer(ctrl)
-		gs.SetPitayaServer(mockPitayaServer)
+		gs.SetPitayaServer(&protos.UnimplementedPitayaServer{})
 
 		err = gs.Init()
 		assert.NoError(t, err)
@@ -409,9 +400,6 @@ func TestGetServerHost(t *testing.T) {
 }
 
 func TestRemoveServer(t *testing.T) {
-	ctrl := gomock.NewController(t)
-	defer ctrl.Finish()
-
 	clientConfig := config.NewDefaultPitayaConfig().Cluster.RPC.Client.Grpc
 
 	serverConfig := config.NewDefaultPitayaConfig().Cluster.RPC.Server.Grpc
@@ -428,8 +416,7 @@ func TestRemoveServer(t *testing.T) {
 	}
 	gs, err := NewGRPCServer(serverConfig, server, []metrics.Reporter{})
 	assert.NoError(t, err)
-	mockPitayaServer := protosmocks.NewMockPitayaServer(ctrl)
-	gs.SetPitayaServer(mockPitayaServer)
+	gs.SetPitayaServer(&protos.UnimplementedPitayaServer{})
 	err = gs.Init()
 	assert.NoError(t, err)
 

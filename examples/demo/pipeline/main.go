@@ -9,6 +9,8 @@ import (
 	"github.com/alkaid/pitaya/v2/acceptor"
 	"github.com/alkaid/pitaya/v2/component"
 	"github.com/alkaid/pitaya/v2/config"
+	"github.com/alkaid/pitaya/v2/route"
+	"go.uber.org/zap"
 )
 
 // MetagameServer ...
@@ -64,25 +66,32 @@ func (g *MetagameServer) HandlerNoArg(ctx context.Context) (*HandlerNoArgRespons
 // IMPORTANT: that this kind of pipeline will be hard to exist in real code
 // as a pipeline function executes for every handler and each of them
 // most probably have different parameter types.
-func (g *MetagameServer) simpleBefore(ctx context.Context, in interface{}) (context.Context, interface{}, error) {
+func (g *MetagameServer) simpleBefore(ctx context.Context, rt route.Route, in interface{}) (context.Context, interface{}, error) {
 	logger := pitaya.GetDefaultLoggerFromCtx(ctx)
-	logger.Info("Simple Before exec")
+	logger.Info("Simple Before exec", zap.String("route", rt.String()))
 
 	if in != nil {
 		createPlayerArgs := in.(*CreatePlayerCheatArgs)
 
-		logger.Infof("Name: %s", createPlayerArgs.Name)
-		logger.Infof("Email: %s", createPlayerArgs.Email)
-		logger.Infof("SoftCurrency: %d", createPlayerArgs.SoftCurrency)
-		logger.Infof("HardCurrency: %d", createPlayerArgs.HardCurrency)
+		logger.Info("CreatePlayerCheat input",
+			zap.String("name", createPlayerArgs.Name),
+			zap.String("email", createPlayerArgs.Email),
+			zap.Int("softCurrency", createPlayerArgs.SoftCurrency),
+			zap.Int("hardCurrency", createPlayerArgs.HardCurrency),
+		)
 	}
 	return ctx, in, nil
 }
 
-// Simple example of an after pipeline. The 2nd argument is the handler response.
-func (g *MetagameServer) simpleAfter(ctx context.Context, resp interface{}, err error) (interface{}, error) {
+// Simple example of an after pipeline, including the route, input, response, and error.
+func (g *MetagameServer) simpleAfter(ctx context.Context, rt route.Route, in interface{}, resp interface{}, err error) (interface{}, error) {
 	logger := pitaya.GetDefaultLoggerFromCtx(ctx)
-	logger.Infof("Simple After exec - response: %v , error: %v", resp, err)
+	logger.Info("Simple After exec",
+		zap.String("route", rt.String()),
+		zap.Any("input", in),
+		zap.Any("response", resp),
+		zap.Error(err),
+	)
 
 	return resp, err
 }

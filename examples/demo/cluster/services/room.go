@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/alkaid/goerrors/apierrors"
 	"github.com/alkaid/pitaya/v2"
 	"github.com/alkaid/pitaya/v2/component"
 	"github.com/alkaid/pitaya/v2/examples/demo/protos"
 	"github.com/alkaid/pitaya/v2/timer"
+	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
 
 type (
@@ -91,11 +93,12 @@ func (r *Room) Entry(ctx context.Context, msg []byte) (*protos.JoinResponse, err
 	logger := pitaya.GetDefaultLoggerFromCtx(ctx) // The default logger contains a requestId, the route being executed and the sessionId
 	s := r.app.GetSessionFromCtx(ctx)
 
-	err := s.Bind(ctx, uuid.New().String())
+	err := s.Bind(ctx, uuid.New().String(), nil, nil)
 	if err != nil {
-		logger.Error("Failed to bind session")
-		logger.Error(err)
-		return nil, pitaya.Error(err, "RH-000", map[string]string{"failed": "bind"})
+		logger.Error("Failed to bind session", zap.Error(err))
+		return nil, apierrors.InternalServer("RH-000", err.Error(), "").
+			WithCause(err).
+			WithMetadata(map[string]string{"failed": "bind"})
 	}
 	return &protos.JoinResponse{Result: "ok"}, nil
 }
@@ -114,8 +117,7 @@ func (r *Room) SetSessionData(ctx context.Context, data *SessionData) ([]byte, e
 	s := r.app.GetSessionFromCtx(ctx)
 	err := s.SetData(data.Data)
 	if err != nil {
-		logger.Error("Failed to set session data")
-		logger.Error(err)
+		logger.Error("Failed to set session data", zap.Error(err))
 		return nil, err
 	}
 	err = s.PushToFront(ctx)
@@ -137,21 +139,18 @@ func (r *Room) Join(ctx context.Context) (*protos.JoinResponse, error) {
 	s := r.app.GetSessionFromCtx(ctx)
 	err := r.app.GroupAddMember(ctx, "room", s.UID())
 	if err != nil {
-		logger.Error("Failed to join room")
-		logger.Error(err)
+		logger.Error("Failed to join room", zap.Error(err))
 		return nil, err
 	}
 	members, err := r.app.GroupMembers(ctx, "room")
 	if err != nil {
-		logger.Error("Failed to get members")
-		logger.Error(err)
+		logger.Error("Failed to get members", zap.Error(err))
 		return nil, err
 	}
 	s.Push("onMembers", &protos.AllMembers{Members: members})
 	err = r.app.GroupBroadcast(ctx, "connector", "room", "onNewUser", &protos.NewUser{Content: fmt.Sprintf("New user: %d", s.ID())})
 	if err != nil {
-		logger.Error("Failed to broadcast onNewUser")
-		logger.Error(err)
+		logger.Error("Failed to broadcast onNewUser", zap.Error(err))
 		return nil, err
 	}
 	return &protos.JoinResponse{Result: "success"}, nil
@@ -163,7 +162,7 @@ func (r *Room) Leave(ctx context.Context) ([]byte, error) {
 	s := r.app.GetSessionFromCtx(ctx)
 	err := r.app.GroupRemoveMember(ctx, "room", s.UID())
 	if err != nil {
-		logger.Error(err)
+		logger.Error("Failed to leave room", zap.Error(err))
 		return []byte("failed"), err
 	}
 	return []byte("success"), err
@@ -174,8 +173,7 @@ func (r *Room) Message(ctx context.Context, msg *protos.UserMessage) {
 	logger := pitaya.GetDefaultLoggerFromCtx(ctx)
 	err := r.app.GroupBroadcast(ctx, "connector", "room", "onMessage", msg)
 	if err != nil {
-		logger.Error("Error broadcasting message")
-		logger.Error(err)
+		logger.Error("Error broadcasting message", zap.Error(err))
 	}
 }
 
@@ -185,9 +183,12 @@ func (r *Room) SendRPC(ctx context.Context, msg *protos.SendRPCMsg) (*protos.RPC
 	ret := &protos.RPCRes{}
 	err := r.app.RPCTo(ctx, msg.ServerId, msg.Route, ret, &protos.RPCMsg{Msg: msg.Msg})
 	if err != nil {
-		logger.Errorf("Failed to execute RPCTo %s - %s", msg.ServerId, msg.Route)
-		logger.Error(err)
-		return nil, pitaya.Error(err, "RPC-000")
+		logger.Error("Failed to execute RPCTo",
+			zap.String("serverId", msg.ServerId),
+			zap.String("route", msg.Route),
+			zap.Error(err),
+		)
+		return nil, apierrors.InternalServer("RPC-000", err.Error(), "").WithCause(err)
 	}
 	return ret, nil
 }

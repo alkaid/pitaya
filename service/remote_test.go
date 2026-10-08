@@ -28,9 +28,7 @@ import (
 	"reflect"
 	"testing"
 
-	"go.uber.org/mock/gomock"
-	"github.com/google/uuid"
-	"github.com/stretchr/testify/assert"
+	"github.com/alkaid/goerrors/apierrors"
 	agentmocks "github.com/alkaid/pitaya/v2/agent/mocks"
 	"github.com/alkaid/pitaya/v2/cluster"
 	clustermocks "github.com/alkaid/pitaya/v2/cluster/mocks"
@@ -47,6 +45,9 @@ import (
 	serializemocks "github.com/alkaid/pitaya/v2/serialize/mocks"
 	"github.com/alkaid/pitaya/v2/session"
 	sessionmocks "github.com/alkaid/pitaya/v2/session/mocks"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/mock/gomock"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -69,7 +70,7 @@ func (m *MyComp) RemoteRes(ctx context.Context, b *test.SomeStruct) (*test.SomeS
 }
 
 func (m *MyComp) RemoteErr(ctx context.Context) (*test.SomeStruct, error) {
-	return nil, e.NewError(errors.New("remote err"), e.ErrUnknownCode)
+	return nil, apierrors.FromError(errors.New("remote err"))
 }
 
 type unregisteredStruct struct{}
@@ -216,7 +217,7 @@ func TestRemoteServiceKickUser(t *testing.T) {
 	nonexistingUID := "uid2"
 
 	mockSession := sessionmocks.NewMockSession(ctrl)
-	mockSession.EXPECT().Kick(context.Background()).Times(1)
+	mockSession.EXPECT().Kick(context.Background(), nil, session.CloseReason(0)).Return(nil).Times(1)
 
 	mockSessionPool.EXPECT().GetSessionByUID(existingUID).Return(mockSession).Times(1)
 	mockSessionPool.EXPECT().GetSessionByUID(nonexistingUID).Return(nil).Times(1)
@@ -269,14 +270,15 @@ func TestRemoteServiceRemoteCall(t *testing.T) {
 	rt := route.NewRoute("sv", "svc", "method")
 	sv := &cluster.Server{}
 	tables := []struct {
-		name   string
-		server *cluster.Server
-		res    *protos.Response
-		err    error
+		name        string
+		server      *cluster.Server
+		res         *protos.Response
+		rpcErr      error
+		errContains string
 	}{
-		{"no_target_route_error", nil, nil, e.NewError(constants.ErrServiceDiscoveryNotInitialized, e.ErrInternalCode)},
-		{"error", sv, nil, errors.New("ble")},
-		{"success", sv, &protos.Response{Data: []byte("ok")}, nil},
+		{"no_target_route_error", nil, nil, nil, constants.ErrServiceDiscoveryNotInitialized.Error()},
+		{"error", sv, nil, errors.New("ble"), "ble"},
+		{"success", sv, &protos.Response{Data: []byte("ok")}, nil, ""},
 	}
 
 	for _, table := range tables {
@@ -284,6 +286,7 @@ func TestRemoteServiceRemoteCall(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 			mockSession := sessionmocks.NewMockSession(ctrl)
+			mockSession.EXPECT().UID().Return("uid").AnyTimes()
 			mockRPCClient := clustermocks.NewMockRPCClient(ctrl)
 			sessionPool := sessionmocks.NewMockSessionPool(ctrl)
 			router := router.New()
@@ -293,10 +296,14 @@ func TestRemoteServiceRemoteCall(t *testing.T) {
 			msg := &message.Message{}
 			ctx := context.Background()
 			if table.server != nil {
-				mockRPCClient.EXPECT().Call(ctx, protos.RPCType_Sys, rt, mockSession, msg, sv).Return(table.res, table.err)
+				mockRPCClient.EXPECT().Call(ctx, protos.RPCType_Sys, rt, mockSession, msg, sv).Return(table.res, table.rpcErr)
 			}
 			res, err := svc.remoteCall(ctx, table.server, protos.RPCType_Sys, rt, mockSession, msg)
-			assert.Equal(t, table.err, err)
+			if table.errContains == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorContains(t, err, table.errContains)
+			}
 			assert.Equal(t, table.res, res)
 		})
 	}
@@ -368,7 +375,7 @@ func TestRemoteServiceHandleRPCUser(t *testing.T) {
 			res := svc.handleRPCUser(context.Background(), table.req, table.rt)
 			assert.NoError(t, err)
 			if table.errSubstring != "" {
-				assert.Contains(t, res.Error.Msg, table.errSubstring)
+				assert.Contains(t, res.Status.Message, table.errSubstring)
 			} else if table.req.Msg.Data != nil {
 				assert.NotNil(t, res.Data)
 			}
@@ -458,7 +465,7 @@ func TestRemoteServiceHandleRPCUserWithHooks(t *testing.T) {
 			afterHookInvoked := false
 
 			remoteHooks := pipeline.NewRemoteHooks()
-			remoteHooks.BeforeHandler.PushFront(func(ctx context.Context, in interface{}) (context.Context, interface{}, error) {
+			remoteHooks.BeforeHandler.PushFront(func(ctx context.Context, _ route.Route, in interface{}) (context.Context, interface{}, error) {
 				if beforeHookInvoked {
 					assert.FailNow(t, "BeforeHandler hook invoked twice")
 				}
@@ -480,7 +487,7 @@ func TestRemoteServiceHandleRPCUserWithHooks(t *testing.T) {
 				beforeHookInvoked = true
 				return ctx, in, err
 			})
-			remoteHooks.AfterHandler.PushFront(func(ctx context.Context, out interface{}, err error) (interface{}, error) {
+			remoteHooks.AfterHandler.PushFront(func(ctx context.Context, _ route.Route, _ interface{}, out interface{}, err error) (interface{}, error) {
 				if afterHookInvoked {
 					assert.FailNow(t, "AfterHandler hook invoked twice")
 				}
@@ -526,7 +533,7 @@ func TestRemoteServiceHandleRPCUserWithHooks(t *testing.T) {
 
 			assert.NoError(t, err)
 			if table.errSubstring != "" {
-				assert.Contains(t, res.Error.Msg, table.errSubstring)
+				assert.Contains(t, res.Status.Message, table.errSubstring)
 			} else if table.req.Msg.Data != nil {
 				assert.NotNil(t, res.Data)
 			}
@@ -553,7 +560,7 @@ func TestRemoteServiceHandleRPCSys(t *testing.T) {
 			Msg:     &protos.Msg{Reply: uuid.New().String()},
 			Session: &protos.Session{Data: []byte("{no")},
 		}, nil, "invalid character 'n' looking for beginning of object key string"},
-		{"process_handler_msg_err", &protos.Request{Msg: &protos.Msg{Reply: uuid.New().String()}}, route.NewRoute("bla", "bla", "bla"), "bla.bla.bla not found"},
+		{"process_handler_msg_err", &protos.Request{Msg: &protos.Msg{Reply: uuid.New().String()}}, route.NewRoute("bla", "bla", "bla"), "process handle message error"},
 		{"success", &protos.Request{Msg: &protos.Msg{Data: []byte("ok")}}, rt, ""},
 	}
 
@@ -570,6 +577,7 @@ func TestRemoteServiceHandleRPCSys(t *testing.T) {
 			router := router.New()
 			sessionPool := session.NewSessionPool()
 			handlerPool := NewHandlerPool()
+			mockSD.EXPECT().GetSelfServer().Return(&cluster.Server{Frontend: table.req.Session == nil})
 			handlerPool.handlers[rt.Short()] = &component.Handler{Receiver: reflect.ValueOf(tObj), Method: m, Type: m.Type.In(2)}
 			svc := NewRemoteService(mockRPCClient, mockRPCServer, mockSD, packetEncoder, mockSerializer, router, messageEncoder, &cluster.Server{}, sessionPool, nil, pipeline.NewHandlerHooks(), handlerPool)
 			assert.NotNil(t, svc)
@@ -580,7 +588,7 @@ func TestRemoteServiceHandleRPCSys(t *testing.T) {
 			res := svc.handleRPCSys(nil, table.req, table.rt)
 
 			if table.errSubstring != "" {
-				assert.Contains(t, res.Error.Msg, table.errSubstring)
+				assert.Contains(t, res.Status.Message, table.errSubstring)
 			} else {
 				assert.Equal(t, table.req.Msg.Data, res.Data)
 			}
@@ -630,6 +638,7 @@ func TestRemoteServiceRemoteProcess(t *testing.T) {
 
 			mockAgent := agentmocks.NewMockAgent(ctrl)
 			mockAgent.EXPECT().GetSession().Return(mockSession).AnyTimes()
+			mockSession.EXPECT().UID().Return("uid").AnyTimes()
 
 			mockRPCClient.EXPECT().Call(ctx, protos.RPCType_Sys, rt, gomock.Any(), expectedMsg, gomock.Any()).Return(&protos.Response{Data: []byte("ok")}, table.remoteCallErr)
 
@@ -704,9 +713,13 @@ func TestRemoteServiceRPC(t *testing.T) {
 				mockRPCClient.EXPECT().Call(ctx, protos.RPCType_User, rt, gomock.Any(), expectedMsg, gomock.Any()).Return(&protos.Response{Data: b}, table.err)
 			}
 			err := svc.RPC(ctx, table.serverID, rt, table.reply, table.arg, nil)
-			assert.Equal(t, table.err, err)
+			if table.err == nil {
+				assert.NoError(t, err)
+			} else {
+				assert.ErrorIs(t, err, table.err)
+			}
 			if table.reply != nil {
-				assert.Equal(t, table.reply, expected)
+				assert.True(t, proto.Equal(table.reply, expected))
 			}
 		})
 	}

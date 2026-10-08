@@ -22,17 +22,28 @@ package protobuf
 
 import (
 	"flag"
-	"google.golang.org/protobuf/proto"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-
+	"github.com/alkaid/goerrors/apierrors"
 	"github.com/alkaid/pitaya/v2/constants"
 	"github.com/alkaid/pitaya/v2/helpers"
 	"github.com/alkaid/pitaya/v2/protos"
+	"github.com/stretchr/testify/assert"
+	"google.golang.org/protobuf/proto"
 )
 
 var update = flag.Bool("update", false, "update .golden files")
+
+func testResponse() *protos.Response {
+	return &protos.Response{
+		Data: []byte("data"),
+		Status: &apierrors.Status{
+			Code:    500,
+			Reason:  "TEST",
+			Message: "error",
+		},
+	}
+}
 
 func TestNewSerializer(t *testing.T) {
 	t.Parallel()
@@ -45,7 +56,7 @@ func TestMarshal(t *testing.T) {
 		raw interface{}
 		err error
 	}{
-		"test_ok":            {&protos.Response{Data: []byte("data"), Error: &protos.Error{Msg: "error"}}, nil},
+		"test_ok":            {testResponse(), nil},
 		"test_not_a_message": {"invalid", constants.ErrWrongValueType},
 	}
 	serializer := NewSerializer()
@@ -82,7 +93,7 @@ func TestUnmarshal(t *testing.T) {
 		dest     interface{}
 		err      error
 	}{
-		"test_ok":           {&protos.Response{Data: []byte("data"), Error: &protos.Error{Msg: "error"}}, data, &dest, nil},
+		"test_ok":           {testResponse(), data, &dest, nil},
 		"test_invalid_dest": {&protos.Response{Data: []byte(nil)}, data, "invalid", constants.ErrWrongValueType},
 	}
 	serializer := NewSerializer()

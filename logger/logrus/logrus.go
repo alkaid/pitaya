@@ -1,8 +1,8 @@
 package logrus
 
 import (
-	"github.com/sirupsen/logrus"
 	"github.com/alkaid/pitaya/v2/logger/interfaces"
+	"github.com/sirupsen/logrus"
 )
 
 type logrusImpl struct {
@@ -46,6 +46,4 @@ func (l *logrusImpl) WithError(err error) interfaces.Logger {
 
 func (l *logrusImpl) GetInternalLogger() any {
 	return l.FieldLogger
-}
-func (l *logrusImpl) SetLevel(level interfaces.Level) {
 }
