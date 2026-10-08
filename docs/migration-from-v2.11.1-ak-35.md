@@ -69,6 +69,14 @@ conf.AddLoader(config.LoaderFactory{
 
 旧的 Provide 复用指针方式仍可用，但业务读取该对象时需要应用自行同步。Viper 的远程更新与读取已有同步保护；运行中并发 Set/SetDefault、更改 aliases/flags/文件来源仍需应用同步。PitayaConfig 返回的 map/slice 也应只读。loader 回调同步执行，应快速返回；不要在 Reload 内同步 Shutdown 自身模块，应异步发起。Shutdown 取消重试并等待当前回调结束；同步远程 Get 的取消由后端超时限制，不能保证任意自定义后端立即返回。
 
+## 混部与错误响应
+
+候选前端搭配 ak-35 或候选后端，均已验证绑定、双向 RPC、push、kick 和重连，覆盖 NATS/gRPC 及新旧客户端。ak-35 前端的 HMSet 空参数问题仍会导致绑定失败，更新后端不会修复旧前端；灰度顺序应优先覆盖出现该问题的前端。
+
+候选客户端测试同一实例重连。旧客户端复用实例曾在 kick 后重连超时，互通验证使用新的旧版客户端实例重连，不能将其解读为修复了旧客户端二进制。客户端应用应更新依赖后重新构建。
+
+gRPC 的既有错误消息会包含 `code=...,reason=...,message=...,metadata=...`，多跳可能重复包装；NATS 返回原 message。这一差异已用真实 ak-35 服务对照并保留。应用应根据 code/reason 分支，不要依赖跨传输方式相同的完整 message 文本。
+
 ## 其他修复与回退
 
 Redis HMSet 现在实际保存传入的字段；key、TTL、schema 不变。timestamp 心跳返回正确 HeartbeatAck，旧客户端仍可互通。默认 Builder 不再因没有配置热更新源而 panic。Session 的 in-flight map 在副本间共享同一把锁，公开值类型用法不变。
