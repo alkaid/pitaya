@@ -4,13 +4,18 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -96,13 +101,28 @@ func StartProcess(t testing.TB, program string, args ...string) *exec.Cmd {
 
 func waitForServerToBeReady(t testing.TB, out *bufio.Reader) {
 	t.Helper()
-	ShouldEventuallyReturn(t, func() bool {
-		line, _, err := out.ReadLine()
-		if err != nil {
-			t.Fatal(err)
+	ready := make(chan error, 1)
+	go func() {
+		for {
+			line, _, err := out.ReadLine()
+			if err != nil {
+				ready <- err
+				return
+			}
+			if strings.Contains(string(line), "all modules started!") {
+				ready <- nil
+				return
+			}
 		}
-		return strings.Contains(string(line), "all modules started!")
-	}, true, 100*time.Millisecond, 30*time.Second)
+	}()
+	select {
+	case err := <-ready:
+		if err != nil {
+			t.Fatalf("test server exited before ready: %v", err)
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatal("test server did not become ready")
+	}
 }
 
 // StartServer starts a server
@@ -136,6 +156,15 @@ func StartServer(
 	if debug {
 		args = append(args, "-debug")
 	}
+	for env, flag := range map[string]string{
+		"PITAYA_TEST_ETCD_ENDPOINT": "-etcdurl",
+		"PITAYA_TEST_REDIS_ADDR":    "-redisurl",
+		"PITAYA_TEST_NATS_URL":      "-natsurl",
+	} {
+		if value := os.Getenv(env); value != "" {
+			args = append(args, flag, value)
+		}
+	}
 	cmd := StartProcess(
 		t,
 		"../examples/testing/server",
@@ -143,10 +172,10 @@ func StartServer(
 	)
 
 	// always use a random port for prometheus, to avoid e2e conflicts
-	cmd.Env = []string{
+	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("PITAYA_METRICS_PROMETHEUS_PORT=%d", promPort),
 		fmt.Sprintf("PITAYA_CLUSTER_RPC_CLIENT_GRPC_LAZYCONNECTION=%v", lazyConnection),
-	}
+	)
 
 	outPipe, err := cmd.StderrPipe()
 	if err != nil {
@@ -158,13 +187,34 @@ func StartServer(
 		t.Fatal(err)
 	}
 
-	waitForServerToBeReady(t, bufio.NewReader(outPipe))
-	return func() {
-		err := cmd.Process.Kill()
-		if err != nil {
-			t.Fatal(err)
-		}
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			if runtime.GOOS == "windows" {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				return
+			}
+			_ = cmd.Process.Signal(syscall.SIGTERM)
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Errorf("test server shutdown: %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				_ = cmd.Process.Kill()
+				<-done
+				t.Error("test server failed to stop on SIGTERM")
+			}
+		})
 	}
+	t.Cleanup(stop)
+	reader := bufio.NewReader(outPipe)
+	waitForServerToBeReady(t, reader)
+	go io.Copy(io.Discard, reader)
+	return stop
 }
 
 // FixtureGoldenFileName returns the golden file name on fixtures path

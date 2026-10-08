@@ -60,13 +60,13 @@ func TestHandlerCallToFront(t *testing.T) {
 		resp []byte
 	}{
 		{"connector.testsvc.testrequestonlysessionreturnsptr", []byte(``), []byte(`{"code":200,"msg":"hello"}`)},
-		{"connector.testsvc.testrequestonlysessionreturnsptrnil", []byte(``), []byte(`{"code":"PIT-000","msg":"reply must not be null"}`)},
-		{"connector.testsvc.testrequestonlysessionreturnsrawnil", []byte(``), []byte(`{"code":"PIT-000","msg":"reply must not be null"}`)},
+		{"connector.testsvc.testrequestonlysessionreturnsptrnil", []byte(``), []byte(`{"code":500,"message":"reply must not be null"}`)},
+		{"connector.testsvc.testrequestonlysessionreturnsrawnil", []byte(``), []byte(`{"code":500,"message":"reply must not be null"}`)},
 		{"connector.testsvc.testrequestreturnsptr", []byte(`{"msg":"good"}`), []byte(`{"code":200,"msg":"good"}`)},
 		{"connector.testsvc.testrequestreturnsraw", []byte(`{"msg":"good"}`), []byte(`good`)},
 		{"connector.testsvc.testrequestreceivereturnsraw", []byte(`woow`), []byte(`woow`)},
-		{"connector.testsvc.nonexistenthandler", []byte(`woow`), []byte(`{"code":"PIT-404","msg":"pitaya/handler: connector.testsvc.nonexistenthandler not found"}`)},
-		{"connector.testsvc.testrequestreturnserror", []byte(`woow`), []byte(`{"code":"PIT-555","msg":"somerror"}`)},
+		{"connector.testsvc.nonexistenthandler", []byte(`woow`), []byte(`{"code":404,"message":"process handle message error"}`)},
+		{"connector.testsvc.testrequestreturnserror", []byte(`woow`), []byte(`{"code":500,"reason":"PIT-555","message":"somerror"}`)},
 	}
 	port := helpers.GetFreePort(t)
 	sdPrefix := fmt.Sprintf("%s/", uuid.New().String())
@@ -83,7 +83,7 @@ func TestHandlerCallToFront(t *testing.T) {
 			_, err = c.SendRequest(table.req, table.data)
 			assert.NoError(t, err)
 
-			msg := helpers.ShouldEventuallyReceive(t, c.IncomingMsgChan).(*message.Message)
+			msg := helpers.ShouldEventuallyReceive(t, c.MsgChannel()).(*message.Message)
 			assert.Equal(t, message.Response, msg.Type)
 			assert.Equal(t, table.resp, msg.Data)
 		})
@@ -111,8 +111,8 @@ func TestGroupFront(t *testing.T) {
 	_, err = c2.SendRequest("connector.testsvc.testbind", []byte{})
 	assert.NoError(t, err)
 
-	msg1 := helpers.ShouldEventuallyReceive(t, c1.IncomingMsgChan).(*message.Message)
-	msg2 := helpers.ShouldEventuallyReceive(t, c2.IncomingMsgChan).(*message.Message)
+	msg1 := helpers.ShouldEventuallyReceive(t, c1.MsgChannel()).(*message.Message)
+	msg2 := helpers.ShouldEventuallyReceive(t, c2.MsgChannel()).(*message.Message)
 
 	assert.Equal(t, []byte("ack"), msg1.Data)
 	assert.Equal(t, []byte("ack"), msg2.Data)
@@ -127,8 +127,8 @@ func TestGroupFront(t *testing.T) {
 
 	for _, table := range tables {
 		c1.SendNotify(table.route, table.data)
-		msg1 = helpers.ShouldEventuallyReceive(t, c1.IncomingMsgChan).(*message.Message)
-		msg2 = helpers.ShouldEventuallyReceive(t, c2.IncomingMsgChan).(*message.Message)
+		msg1 = helpers.ShouldEventuallyReceive(t, c1.MsgChannel()).(*message.Message)
+		msg2 = helpers.ShouldEventuallyReceive(t, c2.MsgChannel()).(*message.Message)
 
 		assert.Equal(t, message.Push, msg1.Type)
 		assert.Equal(t, message.Push, msg2.Type)
@@ -158,15 +158,15 @@ func TestKick(t *testing.T) {
 	_, err = c1.SendRequest("connector.testsvc.testbindid", []byte(uid1))
 	assert.NoError(t, err)
 
-	helpers.ShouldEventuallyReceive(t, c1.IncomingMsgChan)
+	helpers.ShouldEventuallyReceive(t, c1.MsgChannel())
 
 	_, err = c2.SendRequest("connector.testsvc.testrequestkickuser", []byte(uid1))
 	assert.NoError(t, err)
 
-	helpers.ShouldEventuallyReceive(t, c2.IncomingMsgChan)
+	helpers.ShouldEventuallyReceive(t, c2.MsgChannel())
 
 	helpers.ShouldEventuallyReturn(t, func() bool {
-		return c1.Connected
+		return c1.ConnectedStatus()
 	}, false, 10*time.Millisecond, 1*time.Second)
 }
 
@@ -189,15 +189,15 @@ func TestSameUIDUserShouldBeKicked(t *testing.T) {
 	uid1 := uuid.New().String()
 	_, err = c1.SendRequest("connector.testsvc.testbindid", []byte(uid1))
 	assert.NoError(t, err)
-	helpers.ShouldEventuallyReceive(t, c1.IncomingMsgChan)
+	helpers.ShouldEventuallyReceive(t, c1.MsgChannel())
 
 	_, err = c2.SendRequest("connector.testsvc.testbindid", []byte(uid1))
 	assert.NoError(t, err)
 
-	helpers.ShouldEventuallyReceive(t, c2.IncomingMsgChan)
+	helpers.ShouldEventuallyReceive(t, c2.MsgChannel())
 
 	helpers.ShouldEventuallyReturn(t, func() bool {
-		return c1.Connected
+		return c1.ConnectedStatus()
 	}, false, 10*time.Millisecond, 1*time.Second)
 }
 
@@ -225,17 +225,17 @@ func TestSameUIDUserShouldBeKickedInDifferentServersFromSameType(t *testing.T) {
 		_, err = c1.SendRequest("connector.testsvc.testbindid", []byte(uid1))
 		assert.NoError(t, err)
 	}()
-	helpers.ShouldEventuallyReceive(t, c1.IncomingMsgChan, 1*time.Second)
+	helpers.ShouldEventuallyReceive(t, c1.MsgChannel(), 1*time.Second)
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
 		_, err = c2.SendRequest("connector.testsvc.testbindid", []byte(uid1))
 		assert.NoError(t, err)
 	}()
-	helpers.ShouldEventuallyReceive(t, c2.IncomingMsgChan, 2*time.Second)
+	helpers.ShouldEventuallyReceive(t, c2.MsgChannel(), 2*time.Second)
 
 	helpers.ShouldEventuallyReturn(t, func() bool {
-		return c1.Connected
+		return c1.ConnectedStatus()
 	}, false, 10*time.Millisecond, 1*time.Second)
 }
 
@@ -263,7 +263,7 @@ func TestSameUIDUserShouldNotBeKickedInDifferentServersFromDiffType(t *testing.T
 		_, err = c1.SendRequest("connector.testsvc.testbindid", []byte(uid1))
 		assert.NoError(t, err)
 	}()
-	helpers.ShouldEventuallyReceive(t, c1.IncomingMsgChan)
+	helpers.ShouldEventuallyReceive(t, c1.MsgChannel())
 
 	go func() {
 		time.Sleep(10 * time.Millisecond)
@@ -271,10 +271,10 @@ func TestSameUIDUserShouldNotBeKickedInDifferentServersFromDiffType(t *testing.T
 		assert.NoError(t, err)
 	}()
 
-	helpers.ShouldEventuallyReceive(t, c2.IncomingMsgChan)
+	helpers.ShouldEventuallyReceive(t, c2.MsgChannel())
 
 	helpers.ShouldAlwaysReturn(t, func() bool {
-		return c1.Connected
+		return c1.ConnectedStatus()
 	}, true, 10*time.Millisecond, 1*time.Second)
 }
 
@@ -294,7 +294,7 @@ func TestKickOnBack(t *testing.T) {
 		_, err = c1.SendRequest("game.testsvc.testbind", nil)
 		assert.NoError(t, err)
 	}()
-	msg1 := helpers.ShouldEventuallyReceive(t, c1.IncomingMsgChan).(*message.Message)
+	msg1 := helpers.ShouldEventuallyReceive(t, c1.MsgChannel()).(*message.Message)
 	assert.Equal(t, []byte("ack"), msg1.Data)
 	go func() {
 		time.Sleep(10 * time.Millisecond)
@@ -302,7 +302,7 @@ func TestKickOnBack(t *testing.T) {
 		assert.NoError(t, err)
 	}()
 	helpers.ShouldEventuallyReturn(t, func() bool {
-		return c1.Connected
+		return c1.ConnectedStatus()
 	}, false, 100*time.Millisecond, 1*time.Second)
 }
 
@@ -334,8 +334,8 @@ func TestPushToUsers(t *testing.T) {
 		_, err = c2.SendRequest("connector.testsvc.testbindid", []byte(uid2))
 		assert.NoError(t, err)
 	}(uid1, uid2)
-	msg1 := helpers.ShouldEventuallyReceive(t, c1.IncomingMsgChan, 1*time.Second).(*message.Message)
-	msg2 := helpers.ShouldEventuallyReceive(t, c2.IncomingMsgChan, 1*time.Second).(*message.Message)
+	msg1 := helpers.ShouldEventuallyReceive(t, c1.MsgChannel(), 1*time.Second).(*message.Message)
+	msg2 := helpers.ShouldEventuallyReceive(t, c2.MsgChannel(), 1*time.Second).(*message.Message)
 
 	assert.Equal(t, []byte("ack"), msg1.Data)
 	assert.Equal(t, []byte("ack"), msg2.Data)
@@ -356,8 +356,8 @@ func TestPushToUsers(t *testing.T) {
 				time.Sleep(10 * time.Millisecond)
 				c1.SendNotify(table.route, []byte(msg))
 			}()
-			msg1 = helpers.ShouldEventuallyReceive(t, c1.IncomingMsgChan).(*message.Message)
-			msg2 = helpers.ShouldEventuallyReceive(t, c2.IncomingMsgChan).(*message.Message)
+			msg1 = helpers.ShouldEventuallyReceive(t, c1.MsgChannel()).(*message.Message)
+			msg2 = helpers.ShouldEventuallyReceive(t, c2.MsgChannel()).(*message.Message)
 
 			assert.Equal(t, message.Push, msg1.Type)
 			assert.Equal(t, message.Push, msg2.Type)
@@ -383,8 +383,15 @@ func TestForwardToBackend(t *testing.T) {
 		{"game.testsvc.testrequestreturnsptr", []byte(`{"msg":"good"}`), []byte(`{"code":200,"msg":"good"}`)},
 		{"game.testsvc.testrequestreturnsraw", []byte(`{"msg":"good"}`), []byte(`good`)},
 		{"game.testsvc.testrequestreceivereturnsraw", []byte(`woow`), []byte(`woow`)},
-		{"game.testsvc.nonexistenthandler", []byte(`woow`), []byte(`{"code":"PIT-404","msg":"pitaya/handler: game.testsvc.nonexistenthandler not found"}`)},
-		{"game.testsvc.testrequestreturnserror", []byte(`woow`), []byte(`{"code":"PIT-555","msg":"somerror"}`)},
+		{"game.testsvc.nonexistenthandler", []byte(`woow`), []byte(`{"code":404,"message":"process handle message error"}`)},
+		{"game.testsvc.testrequestreturnserror", []byte(`woow`), []byte(`{"code":500,"reason":"PIT-555","message":"somerror"}`)},
+	}
+
+	// ak-35 gRPC wraps status messages at each remote hop. Preserve and check
+	// that wire contract separately from NATS (verified against real ak-35).
+	if *grpc {
+		tables[4].resp = []byte(`{"code":404,"message":"code=404,reason=,message=process handle message error,metadata=map[]"}`)
+		tables[5].resp = []byte(`{"code":500,"reason":"PIT-555","message":"code=500,reason=PIT-555,message=somerror,metadata=map[]"}`)
 	}
 
 	c := client.New()
@@ -400,7 +407,7 @@ func TestForwardToBackend(t *testing.T) {
 				_, err = c.SendRequest(table.req, table.data)
 				assert.NoError(t, err)
 			}()
-			msg := helpers.ShouldEventuallyReceive(t, c.IncomingMsgChan).(*message.Message)
+			msg := helpers.ShouldEventuallyReceive(t, c.MsgChannel()).(*message.Message)
 			assert.Equal(t, message.Response, msg.Type)
 			assert.Equal(t, table.resp, msg.Data)
 		})
@@ -434,8 +441,8 @@ func TestGroupBack(t *testing.T) {
 		assert.NoError(t, err)
 	}()
 
-	msg1 := helpers.ShouldEventuallyReceive(t, c1.IncomingMsgChan).(*message.Message)
-	msg2 := helpers.ShouldEventuallyReceive(t, c2.IncomingMsgChan).(*message.Message)
+	msg1 := helpers.ShouldEventuallyReceive(t, c1.MsgChannel()).(*message.Message)
+	msg2 := helpers.ShouldEventuallyReceive(t, c2.MsgChannel()).(*message.Message)
 
 	assert.Equal(t, []byte("ack"), msg1.Data)
 	assert.Equal(t, []byte("ack"), msg2.Data)
@@ -453,8 +460,8 @@ func TestGroupBack(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 			c1.SendNotify(table.route, table.data)
 		}()
-		msg1 = helpers.ShouldEventuallyReceive(t, c1.IncomingMsgChan).(*message.Message)
-		msg2 = helpers.ShouldEventuallyReceive(t, c2.IncomingMsgChan).(*message.Message)
+		msg1 = helpers.ShouldEventuallyReceive(t, c1.MsgChannel()).(*message.Message)
+		msg2 = helpers.ShouldEventuallyReceive(t, c2.MsgChannel()).(*message.Message)
 
 		assert.Equal(t, message.Push, msg1.Type)
 		assert.Equal(t, message.Push, msg2.Type)
@@ -485,12 +492,20 @@ func TestUserRPC(t *testing.T) {
 	}{
 		{"front_to_back", "connector.testsvc.testsendrpc", []byte(`{"route":"game.testremotesvc.rpctestrawptrreturnsptr","data":"thisthis"}`), []byte(`{"code":200,"msg":"got thisthis"}`)},
 		{"back_to_front", "game.testsvc.testsendrpc", []byte(`{"route":"connector.testremotesvc.rpctestrawptrreturnsptr","data":"thisthis"}`), []byte(`{"code":200,"msg":"got thisthis"}`)},
-		{"front_to_back_error", "connector.testsvc.testsendrpc", []byte(`{"route":"game.testremotesvc.rpctestreturnserror","data":"thisthis"}`), []byte(`{"code":"PIT-433","msg":"test error","metadata":{"some":"meta"}}`)},
-		{"back_to_front_error", "game.testsvc.testsendrpc", []byte(`{"route":"connector.testremotesvc.rpctestreturnserror","data":"thisthis"}`), []byte(`{"code":"PIT-433","msg":"test error","metadata":{"some":"meta"}}`)},
-		{"same_server", "connector.testsvc.testsendrpc", []byte(`{"route":"connector.testremotesvc.rpctestrawptrreturnsptr","data":"thisthis"}`), []byte(`{"code":"PIT-000","msg":"you are making a rpc that may be processed locally, either specify a different server type or specify a server id"}`)},
+		{"front_to_back_error", "connector.testsvc.testsendrpc", []byte(`{"route":"game.testremotesvc.rpctestreturnserror","data":"thisthis"}`), []byte(`{"code":500,"reason":"PIT-433","message":"test error","metadata":{"some":"meta"}}`)},
+		{"back_to_front_error", "game.testsvc.testsendrpc", []byte(`{"route":"connector.testremotesvc.rpctestreturnserror","data":"thisthis"}`), []byte(`{"code":500,"reason":"PIT-433","message":"test error","metadata":{"some":"meta"}}`)},
+		{"same_server", "connector.testsvc.testsendrpc", []byte(`{"route":"connector.testremotesvc.rpctestrawptrreturnsptr","data":"thisthis"}`), []byte(`{"code":500,"message":"you are making a rpc that may be processed locally, either specify a different server type or specify a server id"}`)},
 		{"front_to_back_ptr", "connector.testsvc.testsendrpc", []byte(`{"route":"game.testremotesvc.rpctestptrreturnsptr","data":"thisthis"}`), []byte(`{"code":200,"msg":"got thisthis"}`)},
 		{"no_args", "connector.testsvc.testsendrpcnoargs", []byte(`{"route":"game.testremotesvc.rpctestnoargs"}`), []byte(`{"code":200,"msg":"got nothing"}`)},
-		{"not_found", "connector.testsvc.testsendrpc", []byte(`{"route":"game.testremotesvc.rpctestnotfound","data":"thisthis"}`), []byte(`{"code":"PIT-404","msg":"route not found","metadata":{"route":"testremotesvc.rpctestnotfound"}}`)},
+		{"not_found", "connector.testsvc.testsendrpc", []byte(`{"route":"game.testremotesvc.rpctestnotfound","data":"thisthis"}`), []byte(`{"code":404,"message":"route not found","metadata":{"route":"testremotesvc.rpctestnotfound"}}`)},
+	}
+
+	// The back-to-front error crosses two gRPC hops; assert the full payload,
+	// including reason and metadata, instead of discarding the message field.
+	if *grpc {
+		tables[2].res = []byte(`{"code":500,"reason":"PIT-433","message":"code=500,reason=PIT-433,message=test error,metadata=map[some:meta]","metadata":{"some":"meta"}}`)
+		tables[3].res = []byte(`{"code":500,"reason":"PIT-433","message":"code=500,reason=PIT-433,message=code=500,reason=PIT-433,message=test error,metadata=map[some:meta],metadata=map[some:meta]","metadata":{"some":"meta"}}`)
+		tables[7].res = []byte(`{"code":404,"message":"code=404,reason=,message=route not found,metadata=map[route:testremotesvc.rpctestnotfound]","metadata":{"route":"testremotesvc.rpctestnotfound"}}`)
 	}
 
 	for _, table := range tables {
@@ -500,7 +515,7 @@ func TestUserRPC(t *testing.T) {
 				_, err := c1.SendRequest(table.route, table.data)
 				assert.NoError(t, err)
 			}()
-			msg := helpers.ShouldEventuallyReceive(t, c1.IncomingMsgChan).(*message.Message)
+			msg := helpers.ShouldEventuallyReceive(t, c1.MsgChannel()).(*message.Message)
 			assert.Equal(t, table.res, msg.Data)
 		})
 	}

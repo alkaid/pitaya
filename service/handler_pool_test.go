@@ -190,11 +190,3 @@ func TestProcessHandlerMessageBrokenAfterPipeline(t *testing.T) {
 	assert.Nil(t, out)
 	assert.Equal(t, errors.New("oh noes"), err)
 }
-
-type sysHandlerSideEffect struct {
-	calls *int
-}
-
-func (h *sysHandlerSideEffect) Handle(context.Context) {
-	(*h.calls)++
-}

@@ -427,16 +427,23 @@ func TestNatsRPCServerProcessBindings(t *testing.T) {
 	unmarshalledMsg := &protos.BindMsg{}
 	_ = proto.Unmarshal(bindData, unmarshalledMsg)
 
+	called := make(chan struct{}, 1)
+	defer rpcServer.Shutdown()
 	rpcServer.SetPitayaServer(&pitayaServerStub{
 		sessionBindRemote: func(ctx context.Context, b *protos.BindMsg) (*protos.Response, error) {
 			assert.Equal(t, bindMsg.Uid, b.Uid)
 			assert.Equal(t, bindMsg.Fid, b.Fid)
+			called <- struct{}{}
 			return &protos.Response{}, nil
 		},
 	})
 
 	rpcServer.bindingsChan <- msg
-	time.Sleep(30 * time.Millisecond)
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("RPC callback was not invoked")
+	}
 }
 
 func TestNatsRPCServerProcessPushes(t *testing.T) {
@@ -461,17 +468,24 @@ func TestNatsRPCServerProcessPushes(t *testing.T) {
 		Data:  []byte{0x01},
 	}
 
+	called := make(chan struct{}, 1)
+	defer rpcServer.Shutdown()
 	rpcServer.SetPitayaServer(&pitayaServerStub{
 		pushToUser: func(ctx context.Context, p *protos.Push) (*protos.Response, error) {
 			assert.Equal(t, push.Route, p.Route)
 			assert.Equal(t, push.Uid, p.Uid)
 			assert.Equal(t, push.Data, p.Data)
+			called <- struct{}{}
 			return &protos.Response{}, nil
 		},
 	})
 
 	rpcServer.userPushCh <- push
-	time.Sleep(30 * time.Millisecond)
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("RPC callback was not invoked")
+	}
 }
 
 func TestNatsRPCServerProcessKick(t *testing.T) {
@@ -494,15 +508,22 @@ func TestNatsRPCServerProcessKick(t *testing.T) {
 		UserId: "someuid",
 	}
 
+	called := make(chan struct{}, 1)
+	defer rpcServer.Shutdown()
 	rpcServer.SetPitayaServer(&pitayaServerStub{
 		kickUser: func(ctx context.Context, p *protos.KickMsg) (*protos.KickAnswer, error) {
 			assert.Equal(t, kick.UserId, p.UserId)
+			called <- struct{}{}
 			return &protos.KickAnswer{}, nil
 		},
 	})
 
 	rpcServer.userKickCh <- kick
-	time.Sleep(30 * time.Millisecond)
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("RPC callback was not invoked")
+	}
 }
 
 func TestNatsRPCServerReportMetrics(t *testing.T) {
