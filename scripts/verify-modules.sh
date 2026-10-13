@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The candidate root module is not tagged yet. Test each nested module with a
-# temporary replacement, without changing its published dependency manifest.
+# Check each nested module against its published dependencies, then verify the
+# current root using a temporary replacement without changing the manifest.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 repo_root=$PWD
@@ -10,6 +10,9 @@ export GOWORK=off
 for module in pitaya-cli xk6-pitaya; do
     (
         cd "$module"
+        go test -mod=readonly ./...
+        go vet -mod=readonly ./...
+
         modfile="$tmpdir/$module.mod"
         cp go.mod "$modfile"
         cp go.sum "$tmpdir/$module.sum"

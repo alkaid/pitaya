@@ -37,6 +37,8 @@ github.com/alkaid/crypt v0.31.0-ak-2 h1:csqAjwPn6TGq2HFHi/pmdlQu2PhxgCQeiPsnWGAQ
 github.com/alkaid/crypt v0.31.0-ak-2/go.mod h1:8Ga/OcRmOJ6erMegI9KpifGbwF6KG6Sk380SEe/dnyU=
 github.com/alkaid/goerrors v1.0.18 h1:yvKdX+XThstk4tdcpD4TuY6MfLtMz4/BCn9gQ890r+0=
 github.com/alkaid/goerrors v1.0.18/go.mod h1:uqFTqtzD9+jABI7mbQUrn0ruVJgdJF11SLPvmKJSAEs=
+github.com/alkaid/pitaya/v2 v2.11.1-ak-35 h1:WsLNVBMx1eQM0mD5jvwZ9UAIwwDf+AUAZd9c/8nL+9M=
+github.com/alkaid/pitaya/v2 v2.11.1-ak-35/go.mod h1:0wbowS9DcMXDmR/NsaHC7KVeM2iTRjdCGFMV0uRPgJY=
 github.com/alkaid/viper v1.21.0-ak-5 h1:DcGj+4N8tlyXJj+4XNu+lE1Ow9eHKAClvUjqgd6AZXc=
 github.com/alkaid/viper v1.21.0-ak-5/go.mod h1:LB0/whP5U3i9YCw/uU/hjJXK0xL09SSsoEBUHGEhVSQ=
 github.com/alkaid/viper/remote v1.21.0-ak-5 h1:UJNQ4CO2IkFdotkKPTyNxpc5zLOTQy+3ia5EMQ4dqCY=

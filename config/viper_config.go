@@ -250,6 +250,7 @@ func (c *Config) reloadSnapshot(snapshot *viper.RemoteSnapshot) {
 			continue
 		}
 		decoded := reflect.New(value.Elem().Type())
+		seedConfigDecodeShape(decoded, value, true, make(map[configDecodePointer]bool))
 		var err error
 		if key != "" {
 			err = snapshot.UnmarshalKey(key, decoded.Interface(), viperx.DefaultDecoderOpts())
@@ -265,11 +266,99 @@ func (c *Config) reloadSnapshot(snapshot *viper.RemoteSnapshot) {
 	}
 }
 
+type configDecodePointer struct {
+	typ     reflect.Type
+	address uintptr
+}
+
+// Keep only the structure mapstructure cannot infer from field types: allocated
+// squash pointers and concrete interface types. Configuration values, including
+// map entries and slice elements, start empty and never alias the live object.
+// dst must refer exclusively to fresh decoder storage, never the loader object.
+func seedConfigDecodeShape(dst, src reflect.Value, allocate bool, active map[configDecodePointer]bool) bool {
+	switch src.Kind() {
+	case reflect.Pointer:
+		if src.IsNil() {
+			return false
+		}
+		pointer := configDecodePointer{src.Type(), src.Pointer()}
+		if active[pointer] {
+			return false
+		}
+		active[pointer] = true
+		defer delete(active, pointer)
+		value := reflect.New(src.Type().Elem())
+		needed := seedConfigDecodeShape(value.Elem(), src.Elem(), false, active)
+		if allocate || needed {
+			if dst.CanSet() {
+				dst.Set(value)
+			} else if !dst.IsNil() && dst.Elem().CanSet() {
+				dst.Elem().Set(value.Elem())
+			}
+			return true
+		}
+	case reflect.Interface:
+		if !src.IsNil() && dst.CanSet() {
+			value := reflect.New(src.Elem().Type()).Elem()
+			seedConfigDecodeShape(value, src.Elem(), true, active)
+			dst.Set(value)
+			return true
+		}
+	case reflect.Struct:
+		needed := false
+		for i := 0; i < src.NumField(); i++ {
+			field := src.Type().Field(i)
+			tags := strings.Split(field.Tag.Get("mapstructure"), ",")
+			if (field.PkgPath != "" && !field.Anonymous) || tags[0] == "-" {
+				continue
+			}
+			squash := false
+			for _, tag := range tags[1:] {
+				squash = squash || tag == "squash"
+			}
+			target := dst.Field(i)
+			if squash && field.Anonymous && field.PkgPath != "" && target.Kind() == reflect.Pointer && target.Type().Elem().Kind() == reflect.Struct && target.CanAddr() {
+				// mapstructure accepts initialized private embedded pointers but
+				// reflection cannot allocate their slots normally. Expose only
+				// this slot in our fresh storage; the pointee is allocated below.
+				// Using its exact type/address keeps alignment and GC tracking.
+				target = reflect.NewAt(target.Type(), target.Addr().UnsafePointer()).Elem()
+			}
+			if seedConfigDecodeShape(target, src.Field(i), squash, active) {
+				needed = true
+			}
+		}
+		return needed
+	case reflect.Array:
+		needed := false
+		for i := 0; i < src.Len(); i++ {
+			if seedConfigDecodeShape(dst.Index(i), src.Index(i), false, active) {
+				needed = true
+			}
+		}
+		return needed
+	}
+	return false
+}
+
 // Preserve fields explicitly excluded from configuration when a loader reuses
 // an object. Replaced maps/slices still discard removed configuration entries.
 func applyConfigValue(dst, decoded reflect.Value) {
-	if dst.Kind() == reflect.Pointer && !dst.IsNil() && !decoded.IsNil() && dst.Elem().Kind() == reflect.Struct {
+	if dst.Kind() == reflect.Interface && !dst.IsNil() && !decoded.IsNil() && dst.Elem().Type() == decoded.Elem().Type() && dst.CanSet() {
+		value := reflect.New(dst.Elem().Type()).Elem()
+		value.Set(dst.Elem())
+		applyConfigValue(value, decoded.Elem())
+		dst.Set(value)
+		return
+	}
+	if dst.Kind() == reflect.Pointer && !dst.IsNil() && !decoded.IsNil() {
 		applyConfigValue(dst.Elem(), decoded.Elem())
+		return
+	}
+	if dst.Kind() == reflect.Array {
+		for i := 0; i < dst.Len(); i++ {
+			applyConfigValue(dst.Index(i), decoded.Index(i))
+		}
 		return
 	}
 	if dst.Kind() != reflect.Struct || dst.Type() == reflect.TypeOf(time.Time{}) {

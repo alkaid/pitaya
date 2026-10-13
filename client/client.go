@@ -619,6 +619,9 @@ func (c *Client) dial(ctx context.Context, u *url.URL, tlsCfg *tls.Config) (net.
 	case "tcps", "tls":
 		// Preserve the ak-35 TLS policy; only mutate this connection's clone.
 		tlsCfg.InsecureSkipVerify = true
+		if tlsCfg.ServerName == "" {
+			tlsCfg.ServerName = u.Hostname()
+		}
 		rawConn, err := (&net.Dialer{}).DialContext(ctx, "tcp", u.Host)
 		if err != nil {
 			return nil, err

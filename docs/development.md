@@ -41,7 +41,7 @@ make build-k6-extension
 
 xk6 固定 v1.4.14。扩展依然使用 goja，k6 宿主固定 v0.46.0；升级到使用 sobek 的新宿主需要单独迁移，未混入本次稳定化。Docker 构建从仓库根目录传入 context，不再用同一个 revision 覆盖不同仓库。
 
-子模块 go.mod 的根依赖保留已发布的 v2.11.1-ak-35；候选分支尚未发版时，独立验证必须用临时 modfile 的 local replace 指向根目录。发布候选根版本后再将依赖改成该确切 tag，并运行无 replace 的 `GOWORK=off go test ./...`。不得将本机绝对路径写入提交的模块文件。
+子模块 go.mod 的根依赖为已发布的 v2.11.1-ak-35。独立验证先使用正式依赖和已提交的 go.sum，再用临时 modfile 的 local replace 验证当前根代码。发布子模块前，应将依赖更新到所需的已发布根版本，并重新执行无 replace 的 `GOWORK=off go test -mod=readonly ./...`。不得将本机绝对路径写入提交的模块文件。
 
 ## 真实后端回归
 
@@ -58,4 +58,4 @@ docker compose -f examples/testing/docker-compose.yml down
 
 已有测试服务使用其他端口时，可通过 `PITAYA_TEST_ETCD_ENDPOINT`、`PITAYA_TEST_REDIS_ADDR`、`PITAYA_TEST_NATS_URL` 传给 E2E，先执行 `make ensure-testing-bin`，再直接 `GOWORK=off go test -mod=readonly -count=1 -tags=e2e ./e2e`（gRPC 添加 `-grpc`）。Makefile 的 E2E 入口会重新构建服务，避免复用旧二进制。
 
-CI 除根模块测试/vet 外，还执行受影响包的 race 检查、上述真实后端恢复测试、NATS/gRPC E2E、生成一致性、CLI/xk6 workspace 及独立模块验证。`make verify-modules` 在临时 modfile 中替换候选根模块，另外检查 tools 的 tidy 一致性；不会改写子模块的正式依赖。
+CI 除根模块测试/vet 外，还执行受影响包的 race 检查、上述真实后端恢复测试、NATS/gRPC E2E、生成一致性、CLI/xk6 workspace 及独立模块验证。`make verify-modules` 先对正式依赖执行 readonly test/vet，再在临时 modfile 中替换候选根模块验证，另外检查 tools 的 tidy 一致性；不会改写子模块的正式依赖。
