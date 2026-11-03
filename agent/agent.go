@@ -33,9 +33,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/alkaid/pitaya/v2/acceptor"
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
-	"github.com/alkaid/pitaya/v2/acceptor"
 	"go.uber.org/zap"
 
 	"go.opentelemetry.io/otel/trace"
@@ -83,16 +83,19 @@ type (
 		chStopWrite          chan struct{}     // stop writing messages
 		chStopKeepCacheAlive chan struct{}
 		closeMutex           sync.Mutex
-		conn                 net.Conn            // low-level conn fd
-		decoder              codec.PacketDecoder // binary decoder
-		encoder              codec.PacketEncoder // binary encoder
-		heartbeatTimeout     time.Duration
-		lastAt               int64 // last heartbeat unix time stamp
-		messageEncoder       message.Encoder
-		messagesBufferSize   int // size of the pending messages buffer
-		metricsReporters     []metrics.Reporter
-		serializer           serialize.Serializer // message serializer
-		state                int32                // current agent state
+		// connWriteMutex serializes the deadline update and data write because
+		// gorilla/websocket permits only one concurrent writer per connection.
+		connWriteMutex     sync.Mutex
+		conn               net.Conn            // low-level conn fd
+		decoder            codec.PacketDecoder // binary decoder
+		encoder            codec.PacketEncoder // binary encoder
+		heartbeatTimeout   time.Duration
+		lastAt             int64 // last heartbeat unix time stamp
+		messageEncoder     message.Encoder
+		messagesBufferSize int // size of the pending messages buffer
+		metricsReporters   []metrics.Reporter
+		serializer         serialize.Serializer // message serializer
+		state              int32                // current agent state
 	}
 
 	pendingMessage struct {
@@ -646,6 +649,9 @@ func (a *agentImpl) write() {
 	}
 }
 func (a *agentImpl) connWriteWithDeadline(b []byte) (int, error) {
+	a.connWriteMutex.Lock()
+	defer a.connWriteMutex.Unlock()
+
 	err := a.conn.SetWriteDeadline(time.Now().Add(time.Second * 5))
 	if err != nil {
 		return 0, err

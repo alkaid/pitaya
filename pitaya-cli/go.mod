@@ -20,7 +20,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/abiosoft/ishell v2.0.0+incompatible // indirect
 	github.com/abiosoft/readline v0.0.0-20180607040430-155bce2042db // indirect
-	github.com/alkaid/ants/v2 v2.12.1-ak-2 // indirect
+	github.com/alkaid/ants/v2 v2.12.1-ak-4 // indirect
 	github.com/alkaid/crypt v0.31.0-ak-2 // indirect
 	github.com/alkaid/goerrors v1.0.18 // indirect
 	github.com/alkaid/viper v1.21.0-ak-5 // indirect

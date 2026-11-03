@@ -4,7 +4,7 @@ go 1.27.1
 
 require (
 	github.com/DataDog/datadog-go v4.8.3+incompatible
-	github.com/alkaid/ants/v2 v2.12.1-ak-2
+	github.com/alkaid/ants/v2 v2.12.1-ak-4
 	github.com/alkaid/goerrors v1.0.18
 	github.com/alkaid/viper v1.21.0-ak-8
 	github.com/alkaid/viper/remote v1.21.0-ak-8
