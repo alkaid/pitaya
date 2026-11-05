@@ -1,6 +1,6 @@
 # 从 v2.11.1-ak-35 迁移
 
-本分支从 v2.11.1-ak-35 提取必要修复，保留公开 RPC/client 方法签名、protobuf wire 字段与 Redis/etcd key schema。
+本文说明从 v2.11.1-ak-35 升级至 v2.11.1-ak-39 的注意事项，保留公开 RPC/client 方法签名、protobuf wire 字段与 Redis/etcd key schema。ak-39 恢复在已有配置值上解码的语义，配置热更新一节已同步修正。
 
 ## 构建和生成
 
@@ -15,7 +15,7 @@ GOTOOLCHAIN=local go test ./...
 
 应用自有 mock 改用 `go.uber.org/mock/gomock`；重新生成时使用 mockgen v0.6.0。仓库的生成工具由 tools/go.mod 独立锁定，执行 `make mocks protos-compile`。protobuf runtime 为 v1.36.12，grpc runtime 保持 v1.75.1；protobuf descriptor 未改变。生成器和 protoc 安装见 development.md。
 
-CLI/k6 使用本 fork 的 module path，通过仓库 go.work 构建候选代码。xk6 工具固定 v1.4.14；k6 宿主暂保留 v0.46.0/goja API。此分支未发布根模块 tag，独立子模块的正式版本依赖应在根模块发布后更新，不能直接把 workspace 构建视为独立发布验证。
+CLI/k6 使用本 fork 的 module path，通过仓库 go.work 构建候选代码。xk6 工具固定 v1.4.14；k6 宿主暂保留 v0.46.0/goja API。根模块使用 v2.11.1-ak-39；CLI/xk6 是独立子模块，发布它们时仍需单独更新根依赖并验证，不能直接把 workspace 构建视为独立发布验证。
 
 ## Client 并发和重连
 
@@ -52,16 +52,19 @@ listener 可以同步调用 GetServer/GetServers/GetServersByType/GetServerTypes
 
 首次启动监听失败、监听关闭和重建失败会持续重试，不再因一次失败永久停止。crypt 在每次恢复时读取快照，再从下一 revision 监听；Pitaya 对同一个远程合并快照进行比较和解码，恢复后远程状态相同不会额外通知。去重不比较环境变量或 flags；被本地 override 遮盖的远程字段变化仍可能多触发一次 Reload。启动仍要求 InitLoad 成功读到全部配置来源，不能将启动失败视为已加载默认值。
 
-多 key 按配置注册顺序从低到高合并。暂时缺失 key、网络失败或非法文档保留该来源最近的有效配置；要撤销某个字段，应写入不含该字段的合法文档，写入 `{}` 会撤销该来源的全部贡献。删除 etcd key 本身不等于清空配置。断连恢复保证最新有效状态，不保证回放期间的每次保存。
+多 key 按配置注册顺序从低到高合并。暂时缺失 key、网络失败或非法文档保留该来源最近的有效配置；合法文档中省略字段或写入 `{}` 会撤销该来源的相应贡献，但不保证清空 loader 中的已有值：合并后仍有低优先级值时会解码该值，合并结果中缺失的字段则保留 Provide 对象中的原值。删除 etcd key 本身不等于清空配置。断连恢复保证最新有效状态，不保证回放期间的每次保存。
 
-每个 ConfLoader 解码到新对象，成功后才写回 Provide 提供的对象并调用 Reload。**Provide 对象预填但未在配置中定义的配置字段会归零**；未导出字段和 `mapstructure:"-"` 字段保留，不作为配置覆盖。把默认值放入 Viper.SetDefault，而不是依赖复用 struct 中残留的值。解码失败保留上一次应用配置且不调用该 loader 的 Reload。推荐让 Provide 每次创建新对象，Reload 使用应用自己的锁或 atomic.Pointer 发布：
+ak-39 在 Provide 对象已有配置值的独立副本上解码，成功后才写回并调用 Reload。**解码输入未提供的字段保留已有值**；这恢复了旧版在已有结构体上解码的行为。复用对象会保留上一次值；每次创建新对象则保留该次 Provide 设置的默认值。未导出字段和 `mapstructure:"-"` 字段继续不作为配置覆盖。解码失败保留原对象且不调用该 loader 的 Reload，map、slice 和指针也不能被失败解码部分污染。
+
+此前的空对象解码会丢失 Provide 中的预填值；框架自己的 Provide 也返回空对象，因此当远程文档只含部分 `pitaya` 子树时，InitLoad 已读到的启动参数（例如 `pitaya.confsource.etcd`）和默认值可能被清空。修复位于 Pitaya，不修改 Viper，也不改变 Viper 的来源优先级：`UnmarshalKey` 选中的子树不会逐字段补齐低优先级默认值，不能只依赖 SetDefault 修复此类问题。
+
+显式 `false`、`0`、`""` 按原解码规则覆盖；slice 显式 `[]` 可清空。map 按 key 合并，省略 map key 或提供 `{}` 不会自动删除已有项；`null` 也不能作为通用清空指令。需要整份替换、删除 map 项或回到默认值的业务，应让 Provide 返回带所需默认值的新对象。以下示例每次以默认值构造对象，Reload 使用 atomic.Pointer 发布：
 
 ```go
 type Feature struct { Enabled bool `mapstructure:"enabled"` }
 var current atomic.Pointer[Feature]
-conf.SetDefault("feature.enabled", true) // 启动监听前设置
 conf.AddLoader(config.LoaderFactory{
-    ProvideApply: func() (string, interface{}) { return "feature", &Feature{} },
+    ProvideApply: func() (string, interface{}) { return "feature", &Feature{Enabled: true} },
     ReloadApply: func(_ string, value interface{}) { current.Store(value.(*Feature)) },
 })
 // 业务线程读取 current.Load()；发布后的对象按只读处理。
@@ -83,4 +86,4 @@ Redis HMSet 现在实际保存传入的字段；key、TTL、schema 不变。time
 
 升级前保留 ak-35 二进制和应用配置，并在隔离环境按本文构建和测试。先部署少量候选实例，观察错误率、超时、连接数、goroutine 数、配置更新时间和服务发现同步耗时，再扩大实例数。出现回归时停止候选并换回原二进制；不用清空 Redis/etcd。HMSet 修复后已经成功写入的业务字段不会因回退自动撤销，业务补偿需按应用规则处理。
 
-本分支是可审查的修复候选；互通和验收范围记录在 [验收记录](stabilization-validation.md)。Pitaya 未发布新 tag，应用试用时固定该分支的确切 commit；正式发布后再将 CLI/xk6 的根模块依赖换成发布 tag。
+历史互通和验收范围记录在 [验收记录](stabilization-validation.md)。升级 ak-39 时重点复测启动参数与部分远程配置合并、字段省略与显式零值、集合更新、非法配置隔离，以及 etcd 断连/压缩后恢复；应用集成验收不能仅由框架单测替代。

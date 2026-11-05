@@ -136,9 +136,9 @@ func TestRemoteConfigEtcdRecoveryIntegration(t *testing.T) {
 	put(high, `{"feature":{"value":"recreated","removed":"old","fields":{"high":"new"}}}`)
 	awaitFeature(t, updates, "recreated")
 	put(high, `{}`)
-	cleared := awaitFeature(t, updates, "lower")
-	require.Empty(t, cleared.Removed)
-	require.Equal(t, map[string]string{"low": "two"}, cleared.Fields)
+	fallback := awaitFeature(t, updates, "lower")
+	require.Equal(t, "old", fallback.Removed)
+	require.Equal(t, map[string]string{"low": "two", "high": "new"}, fallback.Fields)
 	// Break both shared-client watches, save repeatedly and compact while the
 	// application is disconnected, then verify catch-up and subsequent PUTs.
 	proxy.pause()

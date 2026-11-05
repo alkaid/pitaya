@@ -241,16 +241,16 @@ func (c *Config) reloadSnapshot(snapshot *viper.RemoteSnapshot) {
 		if confStruct == nil {
 			continue
 		}
-		// Decode into a fresh value: fields removed from a valid document must
-		// not survive in a reused loader struct, and failed decoding must not
-		// partially overwrite the last valid value.
+		// Decode a detached copy of the supplied values, as decoding in place
+		// did before: omitted fields retain their values, but a failed decode
+		// cannot partially overwrite the live configuration.
 		value := reflect.ValueOf(confStruct)
 		if value.Kind() != reflect.Pointer || value.IsNil() {
 			logger.Zap.Error("config loader must provide a non-nil pointer")
 			continue
 		}
 		decoded := reflect.New(value.Elem().Type())
-		seedConfigDecodeShape(decoded, value, true, make(map[configDecodePointer]bool))
+		cloneConfigValue(decoded, value, make(map[configDecodePointer]reflect.Value))
 		var err error
 		if key != "" {
 			err = snapshot.UnmarshalKey(key, decoded.Interface(), viperx.DefaultDecoderOpts())
@@ -261,7 +261,7 @@ func (c *Config) reloadSnapshot(snapshot *viper.RemoteSnapshot) {
 			logger.Zap.Error("pitaya:reload config unmarshal error", zap.Error(err))
 			continue
 		}
-		applyConfigValue(value.Elem(), decoded.Elem())
+		applyConfigValue(value, decoded, make(map[configApplyPointer]bool))
 		loader.Reload(key, confStruct)
 	}
 }
@@ -269,95 +269,115 @@ func (c *Config) reloadSnapshot(snapshot *viper.RemoteSnapshot) {
 type configDecodePointer struct {
 	typ     reflect.Type
 	address uintptr
+	length  int // Different slice views may share a backing array.
 }
 
-// Keep only the structure mapstructure cannot infer from field types: allocated
-// squash pointers and concrete interface types. Configuration values, including
-// map entries and slice elements, start empty and never alias the live object.
-// dst must refer exclusively to fresh decoder storage, never the loader object.
-func seedConfigDecodeShape(dst, src reflect.Value, allocate bool, active map[configDecodePointer]bool) bool {
+// Clone configuration values into fresh storage before decoding. Maps, slices,
+// pointers and concrete interface values must not alias the loader's live data.
+// Remember references to preserve shared pointers and terminate cycles; excluded
+// runtime fields are left untouched when the decoded value is applied below.
+func cloneConfigValue(dst, src reflect.Value, seen map[configDecodePointer]reflect.Value) {
 	switch src.Kind() {
-	case reflect.Pointer:
+	case reflect.Pointer, reflect.Map, reflect.Slice:
 		if src.IsNil() {
-			return false
+			return
 		}
-		pointer := configDecodePointer{src.Type(), src.Pointer()}
-		if active[pointer] {
-			return false
+		reference := configDecodePointer{typ: src.Type(), address: src.Pointer()}
+		if src.Kind() == reflect.Slice {
+			reference.length = src.Len()
 		}
-		active[pointer] = true
-		defer delete(active, pointer)
-		value := reflect.New(src.Type().Elem())
-		needed := seedConfigDecodeShape(value.Elem(), src.Elem(), false, active)
-		if allocate || needed {
+		if value, ok := seen[reference]; ok {
+			dst.Set(value)
+			return
+		}
+		switch src.Kind() {
+		case reflect.Pointer:
 			if dst.CanSet() {
-				dst.Set(value)
-			} else if !dst.IsNil() && dst.Elem().CanSet() {
-				dst.Elem().Set(value.Elem())
+				dst.Set(reflect.New(src.Type().Elem()))
 			}
-			return true
+			seen[reference] = dst
+			cloneConfigValue(dst.Elem(), src.Elem(), seen)
+		case reflect.Map:
+			dst.Set(reflect.MakeMapWithSize(src.Type(), src.Len()))
+			seen[reference] = dst
+			iter := src.MapRange()
+			for iter.Next() {
+				value := reflect.New(src.Type().Elem()).Elem()
+				cloneConfigValue(value, iter.Value(), seen)
+				dst.SetMapIndex(iter.Key(), value)
+			}
+		case reflect.Slice:
+			dst.Set(reflect.MakeSlice(src.Type(), src.Len(), src.Len()))
+			seen[reference] = dst
+			for i := 0; i < src.Len(); i++ {
+				cloneConfigValue(dst.Index(i), src.Index(i), seen)
+			}
 		}
 	case reflect.Interface:
-		if !src.IsNil() && dst.CanSet() {
+		if !src.IsNil() {
 			value := reflect.New(src.Elem().Type()).Elem()
-			seedConfigDecodeShape(value, src.Elem(), true, active)
+			cloneConfigValue(value, src.Elem(), seen)
 			dst.Set(value)
-			return true
 		}
 	case reflect.Struct:
-		needed := false
+		if src.Type() == reflect.TypeOf(time.Time{}) {
+			dst.Set(src)
+			return
+		}
 		for i := 0; i < src.NumField(); i++ {
 			field := src.Type().Field(i)
 			tags := strings.Split(field.Tag.Get("mapstructure"), ",")
 			if (field.PkgPath != "" && !field.Anonymous) || tags[0] == "-" {
 				continue
 			}
-			squash := false
-			for _, tag := range tags[1:] {
-				squash = squash || tag == "squash"
-			}
 			target := dst.Field(i)
-			if squash && field.Anonymous && field.PkgPath != "" && target.Kind() == reflect.Pointer && target.Type().Elem().Kind() == reflect.Struct && target.CanAddr() {
+			if field.Anonymous && field.PkgPath != "" && target.Kind() == reflect.Pointer && target.Type().Elem().Kind() == reflect.Struct && target.CanAddr() {
 				// mapstructure accepts initialized private embedded pointers but
 				// reflection cannot allocate their slots normally. Expose only
-				// this slot in our fresh storage; the pointee is allocated below.
+				// this slot in our fresh storage; the pointee is allocated above.
 				// Using its exact type/address keeps alignment and GC tracking.
 				target = reflect.NewAt(target.Type(), target.Addr().UnsafePointer()).Elem()
 			}
-			if seedConfigDecodeShape(target, src.Field(i), squash, active) {
-				needed = true
-			}
+			cloneConfigValue(target, src.Field(i), seen)
 		}
-		return needed
 	case reflect.Array:
-		needed := false
 		for i := 0; i < src.Len(); i++ {
-			if seedConfigDecodeShape(dst.Index(i), src.Index(i), false, active) {
-				needed = true
-			}
+			cloneConfigValue(dst.Index(i), src.Index(i), seen)
 		}
-		return needed
+	default:
+		if dst.CanSet() {
+			dst.Set(src)
+		}
 	}
-	return false
+}
+
+type configApplyPointer struct {
+	typ                  reflect.Type
+	destination, decoded uintptr
 }
 
 // Preserve fields explicitly excluded from configuration when a loader reuses
-// an object. Replaced maps/slices still discard removed configuration entries.
-func applyConfigValue(dst, decoded reflect.Value) {
+// an object. Maps/slices come from the detached, successfully decoded copy.
+func applyConfigValue(dst, decoded reflect.Value, seen map[configApplyPointer]bool) {
 	if dst.Kind() == reflect.Interface && !dst.IsNil() && !decoded.IsNil() && dst.Elem().Type() == decoded.Elem().Type() && dst.CanSet() {
 		value := reflect.New(dst.Elem().Type()).Elem()
 		value.Set(dst.Elem())
-		applyConfigValue(value, decoded.Elem())
+		applyConfigValue(value, decoded.Elem(), seen)
 		dst.Set(value)
 		return
 	}
 	if dst.Kind() == reflect.Pointer && !dst.IsNil() && !decoded.IsNil() {
-		applyConfigValue(dst.Elem(), decoded.Elem())
+		pair := configApplyPointer{dst.Type(), dst.Pointer(), decoded.Pointer()}
+		if seen[pair] {
+			return
+		}
+		seen[pair] = true
+		applyConfigValue(dst.Elem(), decoded.Elem(), seen)
 		return
 	}
 	if dst.Kind() == reflect.Array {
 		for i := 0; i < dst.Len(); i++ {
-			applyConfigValue(dst.Index(i), decoded.Index(i))
+			applyConfigValue(dst.Index(i), decoded.Index(i), seen)
 		}
 		return
 	}
@@ -372,7 +392,7 @@ func applyConfigValue(dst, decoded reflect.Value) {
 		if (field.PkgPath != "" && !field.Anonymous) || strings.Split(field.Tag.Get("mapstructure"), ",")[0] == "-" {
 			continue
 		}
-		applyConfigValue(dst.Field(i), decoded.Field(i))
+		applyConfigValue(dst.Field(i), decoded.Field(i), seen)
 	}
 }
 
@@ -382,7 +402,13 @@ func (c *Config) Reload(key string, confStruct interface{}) {
 	c.pitayaConfig = confStruct.(*PitayaConfig)
 }
 func (c *Config) Provide() (key string, confStruct interface{}) {
-	return "pitaya", &PitayaConfig{}
+	c.pitayaMu.RLock()
+	defer c.pitayaMu.RUnlock()
+	// Carry bootstrap defaults and the last valid values into the next decode,
+	// while keeping previously published PitayaConfig snapshots immutable.
+	provided := &PitayaConfig{}
+	cloneConfigValue(reflect.ValueOf(provided), reflect.ValueOf(c.pitayaConfig), make(map[configDecodePointer]reflect.Value))
+	return "pitaya", provided
 }
 
 // InitLoad 初始化加载本地或远程配置.业务层创建App前调用,仅允许一次

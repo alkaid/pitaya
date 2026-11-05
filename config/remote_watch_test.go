@@ -95,7 +95,7 @@ type watchedFeature struct {
 func recordFeature(c *Config) (<-chan watchedFeature, *atomic.Int32) {
 	updates := make(chan watchedFeature, 100)
 	count := &atomic.Int32{}
-	// Reuse the object deliberately: removed fields must not remain in it.
+	// Reuse the object deliberately: omitted fields must retain their values.
 	target := &watchedFeature{}
 	c.AddLoader(LoaderFactory{ProvideApply: func() (string, interface{}) { return "feature", target }, ReloadApply: func(_ string, value interface{}) { count.Add(1); updates <- *value.(*watchedFeature) }})
 	return updates, count
@@ -163,7 +163,7 @@ func TestRemoteWatchRetriesInitialAndRepeatedFailures(t *testing.T) {
 	require.Equal(t, before, count.Load())
 }
 
-func TestRemoteWatchPriorityInvalidDocumentAndFieldRemoval(t *testing.T) {
+func TestRemoteWatchPriorityInvalidDocumentAndOmittedFields(t *testing.T) {
 	c, f := setupRemoteFixture(t, map[string][]byte{
 		"/low":  []byte(`{"feature":{"value":"low","fields":{"low":"value"}}}`),
 		"/high": []byte(`{"feature":{"value":"high","removed":"stale","fields":{"high":"value"}}}`),
@@ -181,8 +181,8 @@ func TestRemoteWatchPriorityInvalidDocumentAndFieldRemoval(t *testing.T) {
 	awaitFeature(t, updates, "valid-again")
 	f.put("/high", `{}`)
 	got := awaitFeature(t, updates, "new-low")
-	require.Empty(t, got.Removed)
-	require.Equal(t, map[string]string{"low": "new"}, got.Fields)
+	require.Equal(t, "stale", got.Removed)
+	require.Equal(t, map[string]string{"low": "new", "high": "value"}, got.Fields)
 }
 
 func TestRemoteWatchShutdownCancelsRetry(t *testing.T) {
