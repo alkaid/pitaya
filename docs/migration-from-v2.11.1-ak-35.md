@@ -80,6 +80,12 @@ conf.AddLoader(config.LoaderFactory{
 
 gRPC 的既有错误消息会包含 `code=...,reason=...,message=...,metadata=...`，多跳可能重复包装；NATS 返回原 message。这一差异已用真实 ak-35 服务对照并保留。应用应根据 code/reason 分支，不要依赖跨传输方式相同的完整 message 文本。
 
+## 有状态协程池
+
+`co.StatefulPool.Go` 使用 ants `PoolWithID` 的阻塞提交：同一 ID 的任务串行执行，队列满后提交方等待空位。正在执行的任务向自己的满队列提交，或多个 ID 之间形成提交环时，不保证继续执行。嵌套派发应避免循环依赖，例如为各处理阶段分配互不重叠的 ID；`Wait` 也不能同步等待当前 ID 上排队的任务。
+
+超时监控只记录日志，不会取消任务或解除提交阻塞。ants 的运行超时恢复可能替换仍在运行的 worker，不能把这种恢复当作递归派发正常完成的保证。应用集成应重点覆盖热点 ID 队列饱和、嵌套派发及跨池同步等待。
+
 ## 其他修复与回退
 
 Redis HMSet 现在实际保存传入的字段；key、TTL、schema 不变。timestamp 心跳返回正确 HeartbeatAck，旧客户端仍可互通。默认 Builder 不再因没有配置热更新源而 panic。Session 的 in-flight map 在副本间共享同一把锁，公开值类型用法不变。
